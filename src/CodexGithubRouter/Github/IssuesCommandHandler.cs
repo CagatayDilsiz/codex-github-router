@@ -18,7 +18,10 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
-            var issues = await GitHubCliService.GetOpenIssuesAsync(workingDirectory);
+            var issueFilters = new IssueFilters(); 
+            // triggers will be added here in the future to filter issues based on certain criteria       
+
+            var issues = await GitHubCliService.GetOpenIssuesAsync(workingDirectory, issueFilters);
 
             if (issues.Count == 0)
             {

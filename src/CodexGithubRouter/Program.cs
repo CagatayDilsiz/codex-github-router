@@ -1,11 +1,13 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
+await Startup.InitializeAsync();
 if (args.Length == 0)
 {
     PrintHelp();
