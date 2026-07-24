@@ -1,6 +1,5 @@
 using CodexGithubRouter.Git;
-
-namespace CodexGithubRouter.Github;
+namespace CodexGithubRouter.GitHub;
 
 public static class IssuesCommandHandler
 {
@@ -15,11 +14,11 @@ public static class IssuesCommandHandler
 
             if (gitCommonDir is null)
             {
-                Console.WriteLine("Not a valid Git repository.");
+                Console.Error.WriteLine("Not a valid Git repository.");
                 return 1;
             }
 
-            var issues = await GithubCliService.GetOpenIssuesAsync(workingDirectory);
+            var issues = await GitHubCliService.GetOpenIssuesAsync(workingDirectory);
 
             if (issues.Count == 0)
             {
@@ -35,7 +34,7 @@ public static class IssuesCommandHandler
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error: {ex.Message}");
+            Console.Error.WriteLine($"Error: {ex.Message}");
             return 1;
         }
         

@@ -1,6 +1,6 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
-using CodexGithubRouter.Github;
+using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Hooks;
 
 Console.InputEncoding = Encoding.UTF8;

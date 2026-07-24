@@ -1,12 +1,11 @@
 using CodexGithubRouter.Helpers;
 
-namespace CodexGithubRouter.Github;
+namespace CodexGithubRouter.GitHub;
 
-public static class GithubCliService
+public static class GitHubCliService
 {
     public static async Task<List<Issue>> GetOpenIssuesAsync(string workingDirectory, CancellationToken cancellationToken = default)
-    {
-        var issues = new List<Issue>();
+    {      
 
         var arguments = new List<string>();
         arguments.Add("issue");     
@@ -22,8 +21,15 @@ public static class GithubCliService
             throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
         }
 
-        issues = System.Text.Json.JsonSerializer.Deserialize<List<Issue>>(process.Output) ?? new List<Issue>();
-
-        return issues;
+        try
+        {
+            var issues = System.Text.Json.JsonSerializer.Deserialize<List<Issue>>(process.Output) ?? new List<Issue>();
+            return issues;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output: {ex.Message}. Output: {process.Output}");    
+        }
+        
     }
 }

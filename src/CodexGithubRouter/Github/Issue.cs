@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace CodexGithubRouter.Github;
+namespace CodexGithubRouter.GitHub;
 
 public class Issue
 {

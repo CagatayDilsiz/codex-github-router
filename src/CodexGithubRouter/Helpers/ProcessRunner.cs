@@ -29,19 +29,41 @@ public static class ProcessRunner
             StartInfo = startInfo
         };
 
-        process.Start();
+        if (!process.Start())
+        {
+            throw new InvalidOperationException($"Failed to start process: {fileName}");
+        }
 
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+            await Task.WhenAll(outputTask, errorTask);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None);
+                }
+            }
+            catch
+            {
+                // Ignore exceptions from killing the process
+            }
 
-        var waitForExitTask = process.WaitForExitAsync(cancellationToken);
-        await Task.WhenAll(outputTask, errorTask, waitForExitTask);
-
+            throw;
+        }
+      
         return new ProcessResult
         {
             ExitCode = process.ExitCode,
-            Output = outputTask.Result,
-            Error = errorTask.Result
+            Output = await outputTask,
+            Error = await errorTask
         };
     }
 }
