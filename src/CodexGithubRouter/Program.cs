@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using CodexGithubRouter.Hooks;
 
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -12,7 +13,8 @@ if (args.Length == 0)
 return args[0].ToLowerInvariant() switch
 {
     "--version" or "-v" => PrintVersion(),
-    "--help" or "-h" => PrintHelp(),    
+    "--help" or "-h" => PrintHelp(), 
+    "hook" => await HookService.RunAsync(),
     _ => UnknownCommand(args[0])
 };
 
