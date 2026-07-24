@@ -35,15 +35,12 @@ public static class HookService
 
             // If this executable is accidentally bound to another hook event
             // continue without any intervention.
-            if (!string.Equals(
-                    payload.HookEventName,
-                    "UserPromptSubmit",
-                    StringComparison.Ordinal))
+            if (!string.Equals(payload.HookEventName,"UserPromptSubmit",StringComparison.Ordinal))
             {
                 return 0;
             }
 
-            if (!await AutonomousService.IsAutonomousAsync(payload))
+            if (!await AutonomousService.IsAutonomousAsync(payload.Cwd))
             {
                 // If autonomous mode is disabled, do not intervene in the manual prompt.
                 return 0;

@@ -1,5 +1,5 @@
 using System.Diagnostics;
-namespace CodexGithubRouter.GitWorks;
+namespace CodexGithubRouter.Git;
 
 public static class GitRepositoryService
 {
@@ -28,7 +28,8 @@ public static class GitRepositoryService
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
 
-        await Task.WhenAll(outputTask, errorTask);
+        var waitForExitTask = process.WaitForExitAsync(cancellationToken);
+        await Task.WhenAll(outputTask, errorTask, waitForExitTask);
 
         if (process.ExitCode != 0)
         {
