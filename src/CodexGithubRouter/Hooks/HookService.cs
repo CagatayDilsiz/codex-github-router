@@ -39,7 +39,7 @@ public static class HookService
 
             // If this executable is accidentally bound to another hook event
             // continue without any intervention.
-            if (!string.Equals(payload.HookEventName,"UserPromptSubmit",StringComparison.Ordinal))
+            if (!string.Equals(payload.HookEventName, "UserPromptSubmit", StringComparison.Ordinal))
             {
                 return 0;
             }
@@ -54,7 +54,7 @@ public static class HookService
 
             var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
-           
+
             if (!completedIssueTasks.IsSuccessful)
             {
                 await WriteBlockAsync(completedIssueTasks.Message);
@@ -76,6 +76,22 @@ public static class HookService
                 Tasks = completedIssueTasks.Tasks.Concat(newIssueTask.Tasks).ToList()
             };
 
+
+            if (combinedTasks.Tasks.Count == 0)
+            {
+                await WriteBlockAsync("No actionable workflow tasks found.");
+                return 0;
+            }
+
+            var actionableTasks = combinedTasks.Tasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
+
+            if (actionableTasks.Count == 0)
+            {
+                await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");
+                return 0;
+            }
+
+
             var blockingTypes = new HashSet<WorkflowItemType>
             {
                 WorkflowItemType.AwaitingReview,
@@ -84,69 +100,54 @@ public static class HookService
                 WorkflowItemType.UnknownPullRequestState
             };
 
-            if (combinedTasks.Tasks.Any(y => y.Type != WorkflowItemType.Deferred))
+
+            // close any issues that are marked for closure before hook blocker
+            var closingIssueTasks = combinedTasks.Tasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
+
+            foreach (var closingIssueTask in closingIssueTasks)
             {
-                // close any issues that are marked for closure before hook blocker
-                var closingIssueTasks = combinedTasks.Tasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
+                await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
+            }
 
-                foreach (var closingIssueTask in closingIssueTasks)
-                {
-                    await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
-                }
+            // find the first hookblocker true task and write the message to the block output
+            var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
 
-                // find the first hookblocker true task and write the message to the block output
-                var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
-
-                if (hookBlockerTask != null)
-                {
-                    await WriteBlockAsync(hookBlockerTask.Status.Message);
-                    return 0;
-                }
-                
-                var changeRequestTask = combinedTasks.Tasks.FirstOrDefault(y => y.Type == WorkflowItemType.ChangeRequest);
-
-                if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
-                {
-                    await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(changeRequestTask.IssueNumber, changeRequestTask.PullRequestNumber.Value));
-                    return 0;
-                }
-
-                var issuesNeedingPRLink = combinedTasks.Tasks.Where(t => t.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
-
-                if (issuesNeedingPRLink.Count > 0)
-                {
-                    await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
-                    return 0;
-                }
-
-                var newIssueTaskToPrompt = combinedTasks.Tasks.FirstOrDefault(t => t.Type == WorkflowItemType.NewIssue);
-
-                if (newIssueTaskToPrompt != null)
-                {
-                    var context = ContextPromptService.GetNewIssuePrompt(newIssueTaskToPrompt.IssueNumber);
-
-                    await WriteAdditionalContextAsync(context);
-                    return 0;
-                }
-
-
-                await WriteBlockAsync("No actionable workflow tasks found.");
+            if (hookBlockerTask != null)
+            {
+                await WriteBlockAsync(hookBlockerTask.Status.Message);
                 return 0;
             }
-            else
-            {
-                if (combinedTasks.Tasks.All(t => t.Type == WorkflowItemType.Deferred))
-                {
-                    await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");            
-                }
-                else
-                {
-                    await WriteBlockAsync("No actionable workflow tasks found.");
-                    
-                }
 
-               return 0;
-            }          
+            var changeRequestTask = combinedTasks.Tasks.FirstOrDefault(y => y.Type == WorkflowItemType.ChangeRequest);
+
+            if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
+            {
+                await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(changeRequestTask.IssueNumber, changeRequestTask.PullRequestNumber.Value));
+                return 0;
+            }
+
+            var issuesNeedingPRLink = combinedTasks.Tasks.Where(t => t.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
+
+            if (issuesNeedingPRLink.Count > 0)
+            {
+                await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
+                return 0;
+            }
+
+            var newIssueTaskToPrompt = combinedTasks.Tasks.FirstOrDefault(t => t.Type == WorkflowItemType.NewIssue);
+
+            if (newIssueTaskToPrompt != null)
+            {
+                var context = ContextPromptService.GetNewIssuePrompt(newIssueTaskToPrompt.IssueNumber);
+
+                await WriteAdditionalContextAsync(context);
+                return 0;
+            }
+
+
+            await WriteBlockAsync("No actionable workflow tasks found.");
+            return 0;
+
         }
         catch (JsonException exception)
         {
