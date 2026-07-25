@@ -2,7 +2,7 @@ namespace CodexGithubRouter.Workflow;
 
 public class WorkflowResponse
 {
-    public List<WorkflowTask> Tasks { get; set; } = new List<WorkflowTask>();
+    public List<WorkflowItem> Tasks { get; set; } = new List<WorkflowItem>();
 
     public string Message { get; set; } = string.Empty;
 

@@ -8,7 +8,7 @@ public static class WorkflowService
     {
          var customIssueSelection = new IssueSelectionConfiguration
         {
-            Limit = null// No limit, we let gh cli handle the default which seems to be 30           
+            Limit = 30 // 30 is enough for now later we can send this as parameter to the workflow service if needed         
         };
         var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, customIssueSelection);
 
@@ -25,9 +25,9 @@ public static class WorkflowService
 
         if (openIssues.Count > 0)
         {
-            var workflowTasks = openIssues.Select(issue => new WorkflowTask
+            var workflowTasks = openIssues.Select(issue => new WorkflowItem
             {
-                Type = TaskType.NewIssue,
+                Type = WorkflowItemType.NewIssue,
                 IssueNumber = issue.Number
             }).ToList();
 
@@ -42,7 +42,7 @@ public static class WorkflowService
         {
             return new WorkflowResponse
             {
-                Tasks = new List<WorkflowTask>(),
+                Tasks = new List<WorkflowItem>(),
                 IsSuccessful = true,
                 Message = "No new issues found."
             };
@@ -53,7 +53,7 @@ public static class WorkflowService
     {
         var customIssueSelection = new IssueSelectionConfiguration
         {
-            Limit = null // No limit, we let gh cli handle the default which seems to be 30
+            Limit = 30 // 30 is enough for now later we can send this as parameter to the workflow service if needed
         };
         var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, customIssueSelection);
 
@@ -76,7 +76,7 @@ public static class WorkflowService
         {
             return new WorkflowResponse
             {
-                Tasks = new List<WorkflowTask>(),
+                Tasks = new List<WorkflowItem>(),
                 IsSuccessful = true,
                 Message = "No completed issues found."
             };
@@ -85,7 +85,7 @@ public static class WorkflowService
 
     public static async Task<WorkflowResponse> CheckIssueLinkedPullRequestsAsync(RouterConfiguration configuration, string workingDirectory, IEnumerable<Issue> completedIssues)
     {
-        var workflowTasks = new List<WorkflowTask>();
+        var workflowTasks = new List<WorkflowItem>();
         var noIssuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count == 0).ToList();
         var issuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();        
 
@@ -114,9 +114,9 @@ public static class WorkflowService
 
             if (prList.Any(pr => pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase)))
             {
-                workflowTasks.Add(new WorkflowTask()
+                workflowTasks.Add(new WorkflowItem()
                 {
-                    Type = TaskType.CloseIssue,
+                    Type = WorkflowItemType.CloseIssue,
                     IssueNumber = issue.Number,
                     PullRequestNumber = prList.First(pr => pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase)).Number,
                     Status = new WorkflowTaskStatus
@@ -133,9 +133,9 @@ public static class WorkflowService
             {
                 // If all of the linked PRs are closed but not merged, we cannot close the issue automatically.
 
-                workflowTasks.Add(new WorkflowTask()
+                workflowTasks.Add(new WorkflowItem()
                 {
-                    Type = TaskType.ClosedWithoutMerge,
+                    Type = WorkflowItemType.ClosedWithoutMerge,
                     IssueNumber = issue.Number,
                     PullRequestNumber = prList.First().Number,
                     Status = new WorkflowTaskStatus
@@ -160,9 +160,9 @@ public static class WorkflowService
                 {
                     foreach (var pr in changesRequested)
                     {
-                        workflowTasks.Add(new WorkflowTask()
+                        workflowTasks.Add(new WorkflowItem()
                         {
-                            Type = TaskType.ChangeRequest,
+                            Type = WorkflowItemType.ChangeRequest,
                             IssueNumber = issue.Number,
                             PullRequestNumber = pr.Number,
                             Status = new WorkflowTaskStatus
@@ -181,9 +181,9 @@ public static class WorkflowService
                 if (reviewRequested is not null)
                 {
 
-                    workflowTasks.Add(new WorkflowTask()
+                    workflowTasks.Add(new WorkflowItem()
                     {
-                        Type = TaskType.AwaitingReview,
+                        Type = WorkflowItemType.AwaitingReview,
                         IssueNumber = issue.Number,
                         PullRequestNumber = reviewRequested.Number,
                         Status = new WorkflowTaskStatus
@@ -200,9 +200,9 @@ public static class WorkflowService
 
                 if (awaitingMerge is not null)
                 {
-                    workflowTasks.Add(new WorkflowTask()
+                    workflowTasks.Add(new WorkflowItem()
                     {
-                        Type = TaskType.AwaitingMerge,
+                        Type = WorkflowItemType.AwaitingMerge,
                         IssueNumber = issue.Number,
                         PullRequestNumber = awaitingMerge.Number,
                         Status = new WorkflowTaskStatus
@@ -220,14 +220,14 @@ public static class WorkflowService
 
                 if (allDeferred)
                 {
-                    workflowTasks.Add(new WorkflowTask()
+                    workflowTasks.Add(new WorkflowItem()
                     {
-                        Type = TaskType.Deferred,
+                        Type = WorkflowItemType.Deferred,
                         IssueNumber = issue.Number,
                         PullRequestNumber = openPullRequests.First().Number,
                         Status = new WorkflowTaskStatus
                         {
-                            Message = $"All linked pull requests for issue #{issue.Number} are deferred. Please review the pull requests and ensure they are in a valid state.",
+                            Message = $"All linked pull requests for issue #{issue.Number} are deferred. No action is required at this time.",
                             LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),                           
                         }
                     });
@@ -236,9 +236,9 @@ public static class WorkflowService
                 }
 
 
-                workflowTasks.Add(new WorkflowTask()
+                workflowTasks.Add(new WorkflowItem()
                 {
-                    Type = TaskType.UnknownPullRequestState,
+                    Type = WorkflowItemType.UnknownPullRequestState,
                     IssueNumber = issue.Number,
                     PullRequestNumber = openPullRequests.First().Number,
                     Status = new WorkflowTaskStatus
@@ -256,9 +256,9 @@ public static class WorkflowService
                 var unknownStates = prStates.Where(state => !state.Equals("merged", StringComparison.OrdinalIgnoreCase) && !state.Equals("closed", StringComparison.OrdinalIgnoreCase) && !state.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
                 // we checked all linked PRs and none of them is merged, closed, or open. This means they are in an unknown state.
 
-                workflowTasks.Add(new WorkflowTask()
+                workflowTasks.Add(new WorkflowItem()
                 {
-                    Type = TaskType.UnknownPullRequestState,
+                    Type = WorkflowItemType.UnknownPullRequestState,
                     IssueNumber = issue.Number,
                     PullRequestNumber = prList.First().Number,
                     Status = new WorkflowTaskStatus
@@ -274,9 +274,9 @@ public static class WorkflowService
         {
             foreach (var issue in noIssuesWithLinkedPRs)
             {
-                workflowTasks.Add(new WorkflowTask()
+                workflowTasks.Add(new WorkflowItem()
                 {
-                    Type = TaskType.LinkPullRequestsToIssues,
+                    Type = WorkflowItemType.LinkPullRequestsToIssues,
                     IssueNumber = issue.Number
                 });
             }
