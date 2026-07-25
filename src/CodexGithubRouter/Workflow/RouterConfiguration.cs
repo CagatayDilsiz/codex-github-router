@@ -4,7 +4,7 @@ public sealed class RouterConfiguration
 {
     public int Version { get; init; } = 1;
 
-    public Dictionary<WorkflowState, List<IssueMatchRule>> States { get; init; } = new Dictionary<WorkflowState, List<IssueMatchRule>>();
+    public Dictionary<WorkflowState, List<IssueMatchRule>> States { get; init; } = GetDefaultStates();
 
     public IssueSelectionConfiguration IssueSelection { get; init; } = new IssueSelectionConfiguration();
 

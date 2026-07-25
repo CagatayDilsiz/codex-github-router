@@ -143,18 +143,9 @@ public static class IssueFilterCompiler
 
     private static string QuoteSearchValue(string value)
     {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            throw new ArgumentException("Search value cannot be null or whitespace.", nameof(value));
-        }
+        var escapedValue = value.Replace("\"", "\\\"", StringComparison.Ordinal);
 
-        // If the value contains spaces or special characters, wrap it in quotes
-        if (value.Contains(' ') || value.Contains('"') || value.Contains('\''))
-        {
-            return $"\"{value.Replace("\"", "\\\"", StringComparison.Ordinal)}\""; // Escape double quotes
-        }
-
-        return value;
+        return $"\"{escapedValue}\"";        
     }
 
     
