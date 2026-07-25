@@ -45,13 +45,18 @@ public static class WorkflowConfigurationService
         var directory = Path.GetDirectoryName(path)
         ?? throw new InvalidOperationException("Configuration directory could not be resolved.");
 
-        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(directory);       
 
-        var configuration = new RouterConfiguration();
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
 
-        await using var stream = File.Create(path);
-
-        await JsonSerializer.SerializeAsync(stream, configuration, WorkflowJson.Options, cancellationToken);
+            await JsonSerializer.SerializeAsync(stream, new RouterConfiguration(), WorkflowJson.Options, cancellationToken);
+        }
+        catch (IOException) when (File.Exists(path))
+        {
+            // Another process created it first. Ignore the exception and proceed to load the existing configuration.
+        }
     }
 
     private static void Validate(RouterConfiguration configuration)
@@ -62,7 +67,7 @@ public static class WorkflowConfigurationService
                 $"{configuration.Version}");
         }
 
-        if (!configuration.States.TryGetValue(WorkflowState.Ready,out var readyRules) ||            readyRules.Count == 0)
+        if (!configuration.States.TryGetValue(WorkflowState.Ready, out var readyRules) || readyRules.Count == 0)
         {
             throw new InvalidOperationException("The Ready workflow state must contain at least one rule.");
         }

@@ -55,6 +55,70 @@ public static class GitHubCliService
         }        
     }
 
+    public static async Task<Issue> GetIssueByNumberAsync(string workingDirectory, int issueNumber, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "issue",
+            "view",
+            issueNumber.ToString(CultureInfo.InvariantCulture),
+            "--json",
+            "number,title,url,labels,createdAt,updatedAt"
+        };
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        try
+        {
+            var issue = System.Text.Json.JsonSerializer.Deserialize<Issue>(process.Output);
+            if (issue == null)
+            {
+                throw new InvalidOperationException("Failed to deserialize GitHub CLI output: output is null");
+            }
+            return issue;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output", ex);
+        }
+    }
+
+    public static async Task<bool> TransitionIssueAsync(string workingDirectory, IssueTransition issueTransition, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "issue",
+            "edit",
+            issueTransition.IssueNumber.ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (issueTransition.LabelsToAdd.Any())
+        {
+             arguments.Add("--add-label");
+             arguments.Add($"\"{string.Join(',', issueTransition.LabelsToAdd)}\"");
+        }
+
+        if (issueTransition.LabelsToRemove.Any())
+        {
+            arguments.Add("--remove-label");
+            arguments.Add($"\"{string.Join(',', issueTransition.LabelsToRemove)}\"");           
+        }
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+        return true;
+    }
+
+    
     private static string? BuildSearchQuery(IssueFilters filters)
     {
         var searchTerms = new List<string>();

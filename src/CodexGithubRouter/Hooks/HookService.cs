@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Workflow;
@@ -49,7 +50,9 @@ public static class HookService
                 return 0;
             }
 
-            var completedIssueFilters = await IssueFilterResolver.ByState(WorkflowState.Completed);
+            var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+
+            var completedIssueFilters = await IssueFilterResolver.ByState(configuration,WorkflowState.Completed);
 
             if (completedIssueFilters is null)
             {
@@ -66,7 +69,7 @@ public static class HookService
                 return 0;
             }
             
-            var openIssueFilters = await IssueFilterResolver.ByState(WorkflowState.Ready);
+            var openIssueFilters = await IssueFilterResolver.ByState(configuration, WorkflowState.Ready);
 
             if (openIssueFilters is null)
             {
@@ -83,8 +86,7 @@ public static class HookService
             }
             
             var nextIssue = openIssues.First();
-            var configuration = openIssueFilters.RouterConfiguration;
-
+            
             var context = NewIssuePrompt.GetPrompt(nextIssue.Number);          
            
 

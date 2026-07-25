@@ -15,9 +15,5 @@ public sealed class IssueFilters
 
     public SortDirection? SortDirection { get; init; }
 
-    /// <summary>
-    /// Gets or sets the router configuration associated with the issue filters.
-    /// This property is optional and can be null if no router configuration is provided.
-    /// </summary>
-    public RouterConfiguration? RouterConfiguration { get; set; }
+
 }

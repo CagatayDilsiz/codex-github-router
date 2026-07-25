@@ -5,28 +5,17 @@ namespace CodexGithubRouter.GitHub;
 
 public static class IssueFilterResolver
 {
-    public static async Task<IssueFilters?> ByState(WorkflowState state = WorkflowState.Ready)
-    {
-        var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+    public static async Task<IssueFilters?> ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready)
+    {      
 
-        if (configuration is null)
+        if (!configuration.States.TryGetValue(state, out var stateRules) || stateRules.Count == 0)
         {
-            Console.Error.WriteLine("Failed to load workflow configuration.");
-            return null;
+            throw new InvalidOperationException($"No match rules found for workflow state '{state}'.");
         }
 
-        if (!configuration.States.TryGetValue(state, out var readyRules) || readyRules.Count == 0)
-        {
-            Console.Error.WriteLine($"The {state} workflow state must contain at least one rule.");
-            return null;
-        }
+        var issueFilters = IssueFilterCompiler.Compile(stateRules, configuration.IssueSelection);
 
-        var issueFilters = IssueFilterCompiler.Compile(readyRules, configuration.IssueSelection);
-
-        issueFilters ??= new IssueFilters();
-
-        issueFilters.RouterConfiguration = configuration;
-
+       
         return issueFilters;
     }
 }
