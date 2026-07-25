@@ -7,20 +7,21 @@ public static class ConfigurationInitializer
 {
     public static async Task<int> InitAsync(string[] args, CancellationToken cancellationToken = default)
     {
-        var userHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var codexGithubRouterDir = Path.Combine(userHome, ".codex-github-router");
-        Directory.CreateDirectory(codexGithubRouterDir);
+        var force = args.Any(argument => string.Equals(argument, "--force", StringComparison.OrdinalIgnoreCase));
 
-        // check if workflow.json exists, if not create it with default content.
-        var workflowFilePath = Path.Combine(codexGithubRouterDir, "workflow.json");
-     
-        var force = args.Contains("--force");   
-        if (!File.Exists(workflowFilePath) || force)
+        var path = ConfigurationPaths.WorkflowFile;
+
+        if (File.Exists(path) && !force)
         {
-            var defaultWorkflow = new RouterConfiguration();
-            var jsonContent = System.Text.Json.JsonSerializer.Serialize(defaultWorkflow, WorkflowJson.Options);
-            await File.WriteAllTextAsync(workflowFilePath, jsonContent, cancellationToken);
+            Console.WriteLine($"Configuration already exists: {path}");
+
+            return 0;
         }
+
+        await WorkflowConfigurationService.WriteDefaultAsync(path, cancellationToken);
+
+        Console.WriteLine($"Configuration written: {path}");
+
         return 0;
     }
 }

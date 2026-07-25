@@ -6,7 +6,7 @@ namespace CodexGithubRouter.GitHub;
 
 public static class GitHubCliService
 {
-    public static async Task<List<Issue>> GetOpenIssuesAsync(string workingDirectory, IssueFilters filters, CancellationToken cancellationToken = default)
+    public static async Task<List<Issue>> GetIssuesAsync(string workingDirectory, IssueFilters filters, CancellationToken cancellationToken = default)
     {      
 
         var arguments = new List<string>();

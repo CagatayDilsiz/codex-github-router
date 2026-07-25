@@ -1,5 +1,8 @@
 using System.Text.Json;
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Prompts;
+using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Hooks;
 
@@ -46,24 +49,44 @@ public static class HookService
                 return 0;
             }
 
-            // Temporary block test.
-            if (payload.Prompt.Contains(
-                    "block-test",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                await WriteBlockAsync(
-                    "Blocked by C# hook test.");
+            var completedIssueFilters = await IssueFilterResolver.ByState(WorkflowState.Completed);
 
+            if (completedIssueFilters is null)
+            {
+                await WriteBlockAsync("Could not resolve issue filters from workflow configuration.");
                 return 0;
             }
 
-            var context = $"""
-                C# hook ran successfully.
+            var completedIssues = await GitHubCliService.GetIssuesAsync(payload.Cwd, completedIssueFilters);
 
-                Model: {payload.Model}
-                Working directory: {payload.Cwd}
-                Turn: {payload.TurnId}
-                """;
+            if (completedIssues.Count > 0)
+            {
+                // for now, we will block, later we will check pr status and decide to continue or block based on that.
+                await WriteBlockAsync("There are completed issues that need to be closed before proceeding.");
+                return 0;
+            }
+            
+            var openIssueFilters = await IssueFilterResolver.ByState(WorkflowState.Ready);
+
+            if (openIssueFilters is null)
+            {
+                await WriteBlockAsync("Could not resolve open issue filters from workflow configuration.");
+                return 0;
+            }
+
+            var openIssues = await GitHubCliService.GetIssuesAsync(payload.Cwd, openIssueFilters);
+
+            if (openIssues.Count == 0)
+            {
+                await WriteBlockAsync("No open issues found for the current repository.");
+                return 0;
+            }
+            
+            var nextIssue = openIssues.First();
+            var configuration = openIssueFilters.RouterConfiguration;
+
+            var context = NewIssuePrompt.GetPrompt(nextIssue.Number);          
+           
 
             await WriteAdditionalContextAsync(context);
 

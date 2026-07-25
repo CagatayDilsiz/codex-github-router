@@ -1,0 +1,75 @@
+using System.Text.Json;
+using CodexGithubRouter.Workflow;
+
+namespace CodexGithubRouter.Configurations;
+
+public static class WorkflowConfigurationService
+{
+    public static async Task<RouterConfiguration> LoadOrCreateAsync(CancellationToken cancellationToken = default)
+    {
+        var path = ConfigurationPaths.WorkflowFile;
+
+        if (!File.Exists(path))
+        {
+            await WriteDefaultAsync(path, cancellationToken);
+        }
+
+        return await LoadAsync(path, cancellationToken);
+    }
+
+    public static async Task<RouterConfiguration> LoadAsync(string path, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await using var stream = File.OpenRead(path);
+
+            var configuration = await JsonSerializer.DeserializeAsync<RouterConfiguration>(stream, WorkflowJson.Options, cancellationToken);
+
+            if (configuration is null)
+            {
+                throw new InvalidOperationException("Workflow configuration is empty.");
+            }
+
+            Validate(configuration);
+
+            return configuration;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"Workflow configuration is not valid JSON: {path}", exception);
+        }
+    }
+
+    public static async Task WriteDefaultAsync(string path, CancellationToken cancellationToken = default)
+    {
+        var directory = Path.GetDirectoryName(path)
+        ?? throw new InvalidOperationException("Configuration directory could not be resolved.");
+
+        Directory.CreateDirectory(directory);
+
+        var configuration = new RouterConfiguration();
+
+        await using var stream = File.Create(path);
+
+        await JsonSerializer.SerializeAsync(stream, configuration, WorkflowJson.Options, cancellationToken);
+    }
+
+    private static void Validate(RouterConfiguration configuration)
+    {
+        if (configuration.Version != 1)
+        {
+            throw new InvalidOperationException($"Unsupported workflow configuration version: " +
+                $"{configuration.Version}");
+        }
+
+        if (!configuration.States.TryGetValue(WorkflowState.Ready,out var readyRules) ||            readyRules.Count == 0)
+        {
+            throw new InvalidOperationException("The Ready workflow state must contain at least one rule.");
+        }
+
+        if (configuration.IssueSelection.Limit <= 0)
+        {
+            throw new InvalidOperationException("Issue selection limit must be greater than zero.");
+        }
+    }
+}
