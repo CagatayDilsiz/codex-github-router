@@ -45,7 +45,7 @@ static int PrintHelp()
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
           cgr init [--force]
-          cgr pull-request|pr <list> [--state <state>] [working-directory]
+          cgr pull-request|pr <list|transition> <options> [working-directory]
 
         Commands:
           hook        Run the hook service to process incoming codex payloads.

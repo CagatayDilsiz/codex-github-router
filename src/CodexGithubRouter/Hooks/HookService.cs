@@ -64,20 +64,21 @@ public static class HookService
             {
                 var tasks = workflowTasks.Tasks.Where(y => y.Type != TaskType.NewIssue).OrderBy(t => t.Type); // in hook service we do not handle new issue task type here but in else.
 
-                var firstTask = tasks.FirstOrDefault(y => y.PullRequestNumber.HasValue);
+                var changeRequestTask = tasks.FirstOrDefault(y => y.Type == TaskType.ChangeRequest);
                 
-                if (firstTask != null && firstTask.PullRequestNumber.HasValue && firstTask.Type == TaskType.ChangeRequest)
+                if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
                 {
-                    await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(firstTask.IssueNumber, firstTask.PullRequestNumber.Value));
+                    await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(changeRequestTask.IssueNumber, changeRequestTask.PullRequestNumber.Value));
+                    return 0;
                 }
-                else if (firstTask != null && firstTask.Type == TaskType.ReviewPRForOpenIssues)
+
+                var issuesNeedingPRLink = tasks.Where(t => t.Type == TaskType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
+
+                if (issuesNeedingPRLink.Count > 0)
                 {
-                    await WriteAdditionalContextAsync(ContextPromptService.GetReviewPRForOpenIssuesPrompt(tasks.Select(t => t.IssueNumber).ToArray()));
-                }
-                else
-                {
-                    await WriteBlockAsync("No actionable tasks found in the workflow.");                   
-                }
+                    await WriteAdditionalContextAsync(ContextPromptService.GetReviewPRForOpenIssuesPrompt(issuesNeedingPRLink.ToArray()));
+                    return 0;
+                }                
                 
                 return 0;
             }

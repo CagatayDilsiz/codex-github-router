@@ -18,6 +18,8 @@ public static class PullRequestCommandHandler
         {
             case "list":
                 return await ListPullRequestsAsync(args.Skip(1).ToArray());
+            case "transition":
+                return await TransitionPullRequestAsync(args.Skip(1).ToArray());
             default:
                 PrintUsage();
                 return 1;
@@ -37,6 +39,72 @@ public static class PullRequestCommandHandler
             Options:
               --state     Filter pull requests by state. Valid values are 'open', 'closed', 'all', or 'merged'.
             """);
+    }
+
+    private static async Task<int> TransitionPullRequestAsync(string[] strings)
+    {
+        var arguments = strings.ToList();
+
+        if (arguments.Count < 2)
+        {
+            Console.Error.WriteLine("Error: Missing required arguments for transition command.");
+            PrintUsage();
+            return 1;
+        }
+
+        if (!int.TryParse(arguments[0], out int pullRequestNumber))
+        {
+            Console.Error.WriteLine($"Error: Invalid pull request number '{arguments[0]}'.");
+            return 1;
+        }
+
+        var targetStateArg = arguments[1];
+
+        if (!PullRequestStateParser.TryParse(targetStateArg, out PullRequestState targetState))
+        {
+            Console.Error.WriteLine($"Error: Invalid pull request state '{targetStateArg}'.");
+            return 1;
+        }
+
+        var workingDirectory = arguments.Count > 2 ? arguments[2] : Environment.CurrentDirectory;
+
+        try
+        {
+            var gitCommonDir = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+
+            if (gitCommonDir is null)
+            {
+                Console.Error.WriteLine("Not a valid Git repository.");
+                return 1;
+            }
+
+            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
+
+            var pullRequestSelection = new PullRequestSelection()
+            {
+                Number = true,
+                Labels = true,
+            }; // You can customize the selection as needed
+
+            var pullRequestToTransition = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, pullRequestSelection, CancellationToken.None);
+          
+            var pullRequestTransition = PullRequestTransitionPlanner.Plan(pullRequestToTransition, targetState, routerConfig);
+
+            if (pullRequestTransition.LabelsToAdd.Count == 0 && pullRequestTransition.LabelsToRemove.Count == 0)
+            {
+                Console.WriteLine($"Pull request #{pullRequestNumber} is already in state '{targetState}'.");
+                return 0;
+            }
+
+            await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
+            Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+        return 0;
     }
 
     private static async Task<int> ListPullRequestsAsync(string[] arguments)

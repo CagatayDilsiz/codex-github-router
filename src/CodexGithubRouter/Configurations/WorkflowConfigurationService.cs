@@ -66,10 +66,21 @@ public static class WorkflowConfigurationService
             throw new InvalidOperationException($"Unsupported workflow configuration version: " +
                 $"{configuration.Version}");
         }
-
-        if (!configuration.States.TryGetValue(WorkflowState.Ready, out var readyRules) || readyRules.Count == 0)
+       
+        foreach (var state in Enum.GetValues<WorkflowState>())
         {
-            throw new InvalidOperationException("The Ready workflow state must contain at least one rule.");
+            if (!configuration.States.TryGetValue(state, out var rules) || rules.Count == 0)
+            {
+                throw new InvalidOperationException($"The {state} workflow state must contain at least one rule.");
+            }
+        }
+
+        foreach (var state in Enum.GetValues<PullRequestState>())
+        {
+            if (!configuration.PullRequestStates.TryGetValue(state, out var rules) || rules.Count == 0)
+            {
+                throw new InvalidOperationException($"The {state} pull request state must contain at least one rule.");
+            }
         }
 
         if (configuration.IssueSelection.Limit <= 0)

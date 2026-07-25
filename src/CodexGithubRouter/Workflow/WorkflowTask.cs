@@ -10,7 +10,7 @@ public sealed class WorkflowTask
 public enum TaskType
 {
     ChangeRequest = 1,
-    ReviewPRForOpenIssues = 2,
+    LinkPullRequestsToIssues = 2,
     NewIssue = 3,    
     
 }

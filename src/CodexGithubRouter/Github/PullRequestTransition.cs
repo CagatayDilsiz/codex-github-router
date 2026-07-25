@@ -1,8 +1,8 @@
 namespace CodexGithubRouter.GitHub;
 
-public sealed class IssueTransition
+public sealed class PullRequestTransition
 {
-    public int IssueNumber { get; init; }
+    public int PullRequestNumber { get; init; }
 
     public List<string> LabelsToAdd { get; init; } = new();
 

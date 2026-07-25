@@ -8,7 +8,7 @@ public sealed class RouterConfiguration
 
     public Dictionary<PullRequestState, List<IssueMatchRule>> PullRequestStates { get; init; } = new Dictionary<PullRequestState, List<IssueMatchRule>>
     {
-        [PullRequestState.reviewRequested] = new List<IssueMatchRule>
+        [PullRequestState.ReviewRequested] = new List<IssueMatchRule>
         {
             new IssueMatchRule
             {
@@ -16,12 +16,20 @@ public sealed class RouterConfiguration
                 Values = new List<string> { "codex:rr" }
             }
         },
-        [PullRequestState.changesRequested] = new List<IssueMatchRule>
+        [PullRequestState.ChangeRequested] = new List<IssueMatchRule>
         {
             new IssueMatchRule
             {
                 Type = IssueMatchRuleType.Label,
                 Values = new List<string> { "codex:cr" }
+            }
+        },
+        [PullRequestState.AwaitingMerge] = new List<IssueMatchRule>
+        {
+            new IssueMatchRule
+            {
+                Type = IssueMatchRuleType.Label,
+                Values = new List<string> { "codex:merge-ready" }
             }
         }
     };

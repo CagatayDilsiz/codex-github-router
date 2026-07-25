@@ -52,6 +52,8 @@ public static class ContextPromptService
 
             5. If the local working directory has uncommitted changes that are not related to the pull request, do not proceed with the changes until the changes are either committed or stashed. This is to ensure that the working directory is clean and does not interfere with the work on the pull request. run `cgr issue transition {issueNumber} blocked` to block the issue and do not start working on it until the changes are resolved by the user.
 
+            6. Once you have completed the changes requested, please push the changes to the same branch and run `cgr issue transition {issueNumber} completed` to indicate that the work is complete and run `cgr pull-request transition {pullRequestNumber} ready-for-review` to indicate that the pull request is ready for review again.
+
         """;
     }
 }

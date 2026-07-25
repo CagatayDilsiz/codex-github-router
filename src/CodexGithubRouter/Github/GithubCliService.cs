@@ -214,6 +214,36 @@ public static class GitHubCliService
         }      
     }
 
+    public static async Task<bool> TransitionPullRequestAsync(string workingDirectory, PullRequestTransition pullRequestTransition, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "pr",
+            "edit",
+            pullRequestTransition.PullRequestNumber.ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (pullRequestTransition.LabelsToAdd.Any())
+        {
+             arguments.Add("--add-label");
+             arguments.Add($"{string.Join(',', pullRequestTransition.LabelsToAdd)}");
+        }
+
+        if (pullRequestTransition.LabelsToRemove.Any())
+        {
+            arguments.Add("--remove-label");
+            arguments.Add($"{string.Join(',', pullRequestTransition.LabelsToRemove)}");
+        }
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+        return true;
+    }
+
     
     private static string? BuildSearchQuery(IssueFilters filters)
     {
