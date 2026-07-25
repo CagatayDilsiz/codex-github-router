@@ -1,13 +1,14 @@
 using System.Security.Cryptography.X509Certificates;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
+using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Workflow;
 namespace CodexGithubRouter.GitHub;
 
 public static class IssuesCommandHandler
 {
     public static async Task<int> HandleAsync(string[] args)
-    {       
+    {
         if (args.Length == 0)
         {
             PrintUsage();
@@ -47,7 +48,7 @@ public static class IssuesCommandHandler
 
         var targetStateArg = arguments[1];
 
-        if (!Enum.TryParse(targetStateArg, true, out WorkflowState targetState))
+        if (!WorkflowStateParser.TryParse(targetStateArg, out WorkflowState targetState))
         {
             Console.Error.WriteLine($"Error: Invalid workflow state '{targetStateArg}'.");
             return 1;
@@ -73,78 +74,19 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
-           
-            var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);           
+
+            var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
 
             if (issueToTransition is null)
             {
                 Console.Error.WriteLine($"Issue #{issueNumber} not found.");
                 return 1;
             }
+            var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
 
-            // find the transition rules from values
-            if (!routerConfig.Transitions.TryGetValue(targetState, out var transitionRules) || transitionRules.Count == 0)
-            {
-                Console.Error.WriteLine($"No transition rules found for target state '{targetState}'.");
-                return 1;
-            }
 
-            // for now just work with labels, we can extend this later to work with other types
-            var labelTransitionRule = transitionRules.FirstOrDefault(r => r.FromType == IssueMatchRuleType.Label && r.ToType == IssueMatchRuleType.Label);
-
-         
-            var configLabels = routerConfig.States
-                .Where(kvp => kvp.Key != targetState)
-                .SelectMany(kvp => kvp.Value)
-                .Where(rule => rule.Type == IssueMatchRuleType.Label)
-                .SelectMany(rule => rule.Values).Distinct().ToList();
-               
-            if (labelTransitionRule is null)
-            {
-                Console.Error.WriteLine($"No label transition rule found for target state '{targetState}'.");
-                return 1;
-            }
-
-            var labelsToRemove = new List<string>();
-            // remove all other state labels from the issue
-            foreach (var label in labelsToRemove)
-            {
-                var labelToRemove = issueToTransition.Labels.FirstOrDefault(l => configLabels.Contains(l.Name, StringComparer.OrdinalIgnoreCase));
-
-                if (labelToRemove != null)
-                {
-                   labelsToRemove.Add(labelToRemove.Name);
-                }
-            }
-
-            // find label for the target state
-            var targetStateRule = routerConfig.States[targetState].FirstOrDefault(r => r.Type == IssueMatchRuleType.Label);
-
-            if (targetStateRule is null || targetStateRule.Values.Count == 0)
-            {
-                Console.Error.WriteLine($"No label found for target state '{targetState}'.");
-                return 1;
-            }
-
-            var labelsToAdd = targetStateRule.Values.Except(issueToTransition.Labels.Select(l => l.Name), StringComparer.OrdinalIgnoreCase).ToList();
-
-            var issueTransition = new IssueTransition
-            {
-                IssueNumber = issueNumber,                
-                LabelsToAdd = labelsToAdd,
-                LabelsToRemove = labelsToRemove
-            };
-
-            if (await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None))
-            {
-                Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
-            }
-            else
-            {
-                Console.Error.WriteLine($"Failed to transition issue #{issueNumber} to state '{targetState}'.");
-                return 1;
-            }           
-           
+            await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
+            Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }
         catch (Exception ex)
         {
@@ -162,13 +104,13 @@ public static class IssuesCommandHandler
 
         Console.WriteLine("Options For 'cgr issue list':");
         Console.WriteLine("  --use-configured, -c   Use the configured issue filters from the router configuration.");
-        Console.WriteLine("  --state <state>        Filter issues by workflow state (Ready, InProgress, Completed, Blocked, NeedsInfo, Abandoned).");  
+        Console.WriteLine("  --state <state>        Filter issues by workflow state (Ready, InProgress, Completed, Blocked, NeedsInfo, Abandoned).");
 
         Console.WriteLine("Options For 'cgr issue transition':");
         Console.WriteLine("  <issue-number>         The number of the issue to transition.");
         Console.WriteLine("  <target-state>         The target workflow state to transition the issue to (Ready, InProgress, Completed, Blocked, NeedsInfo, Abandoned).");
-        Console.WriteLine("  [working-directory]    Optional. The working directory of the Git repository. Defaults to the current directory if not specified.");      
-    }    
+        Console.WriteLine("  [working-directory]    Optional. The working directory of the Git repository. Defaults to the current directory if not specified.");
+    }
 
     private static async Task<int> ListIssuesAsync(string[] args)
     {
@@ -176,7 +118,7 @@ public static class IssuesCommandHandler
         bool useConfiguredIssues = false;
 
         var configuredIssues = arguments.FirstOrDefault(arg => arg.Equals("--use-configured", StringComparison.OrdinalIgnoreCase) || arg.Equals("-c", StringComparison.OrdinalIgnoreCase));
-        
+
         if (configuredIssues != null)
         {
             useConfiguredIssues = true;
@@ -187,8 +129,14 @@ public static class IssuesCommandHandler
 
         WorkflowState state = WorkflowState.Ready;
 
-        if (stateArgIndex != -1 && stateArgIndex + 1 < arguments.Count)
+        if (stateArgIndex != -1)
         {
+            if (stateArgIndex + 1 >= arguments.Count)
+            {
+                Console.Error.WriteLine("Error: Missing value for --state argument.");
+                return 1;
+            }
+
             var stateValue = arguments[stateArgIndex + 1];
 
             if (!Enum.TryParse(stateValue, true, out state))
@@ -200,8 +148,9 @@ public static class IssuesCommandHandler
             // Remove the --state and its value from the arguments
             arguments.RemoveAt(stateArgIndex); // Remove --state
             arguments.RemoveAt(stateArgIndex); // Remove the state value
+            useConfiguredIssues = true;
         }
-        
+
         var workingDirectory = arguments.FirstOrDefault() ?? Environment.CurrentDirectory;
 
         try
@@ -226,7 +175,7 @@ public static class IssuesCommandHandler
                     return 1;
                 }
 
-                issueFilters = await IssueFilterResolver.ByState(routerConfig, state) ?? new IssueFilters();
+                issueFilters = IssueFilterResolver.ByState(routerConfig, state) ?? new IssueFilters();
             }
 
             var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, issueFilters, CancellationToken.None);
@@ -241,7 +190,7 @@ public static class IssuesCommandHandler
                 {
                     Console.WriteLine("No open issues found.");
                 }
-               
+
                 return 0;
             }
 
@@ -264,7 +213,7 @@ public static class IssuesCommandHandler
             Console.Error.WriteLine($"Error: {ex.Message}");
             return 1;
         }
-        
+
         return 0;
     }
 }

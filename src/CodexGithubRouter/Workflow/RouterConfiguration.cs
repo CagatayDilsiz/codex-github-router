@@ -6,7 +6,7 @@ public sealed class RouterConfiguration
 
     public Dictionary<WorkflowState, List<IssueMatchRule>> States { get; init; } = GetDefaultStates();
 
-    public Dictionary<WorkflowState, List<TransitionTypeState>> Transitions { get; init; } = GetDefaultTransitions();
+   
 
     public IssueSelectionConfiguration IssueSelection { get; init; } = new IssueSelectionConfiguration();
 
@@ -60,54 +60,6 @@ public sealed class RouterConfiguration
                 {
                     Type = IssueMatchRuleType.Label,
                     Values = new List<string> { "codex:abandoned" }
-                }
-            }
-        };
-    }
-
-    private static Dictionary<WorkflowState, List<TransitionTypeState>> GetDefaultTransitions()
-    {
-        return new Dictionary<WorkflowState, List<TransitionTypeState>>
-        {
-            [WorkflowState.Ready] = new List<TransitionTypeState>
-            {
-                new TransitionTypeState
-                {
-                    FromType = IssueMatchRuleType.Label,
-                    ToType = IssueMatchRuleType.Label                  
-                }
-            },
-            [WorkflowState.InProgress] = new List<TransitionTypeState>
-            {
-                new TransitionTypeState
-                {
-                    FromType = IssueMatchRuleType.Label,
-                    ToType = IssueMatchRuleType.Label,                   
-                }
-            },
-            [WorkflowState.Blocked] = new List<TransitionTypeState>
-            {
-                new TransitionTypeState
-                {
-                    FromType = IssueMatchRuleType.Label,
-                    ToType = IssueMatchRuleType.Label
-                    
-                }
-            },
-            [WorkflowState.NeedsInfo] = new List<TransitionTypeState>
-            {
-                new TransitionTypeState
-                {
-                    FromType = IssueMatchRuleType.Label,
-                    ToType = IssueMatchRuleType.Label                    
-                }
-            },
-            [WorkflowState.Abandoned] = new List<TransitionTypeState>
-            {
-                new TransitionTypeState
-                {
-                    FromType = IssueMatchRuleType.Label,
-                    ToType = IssueMatchRuleType.Label                    
                 }
             }
         };

@@ -52,7 +52,7 @@ public static class HookService
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
 
-            var completedIssueFilters = await IssueFilterResolver.ByState(configuration,WorkflowState.Completed);
+            var completedIssueFilters = IssueFilterResolver.ByState(configuration,WorkflowState.Completed);
 
             if (completedIssueFilters is null)
             {
@@ -69,7 +69,7 @@ public static class HookService
                 return 0;
             }
             
-            var openIssueFilters = await IssueFilterResolver.ByState(configuration, WorkflowState.Ready);
+            var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready);
 
             if (openIssueFilters is null)
             {

@@ -100,13 +100,13 @@ public static class GitHubCliService
         if (issueTransition.LabelsToAdd.Any())
         {
              arguments.Add("--add-label");
-             arguments.Add($"\"{string.Join(',', issueTransition.LabelsToAdd)}\"");
+             arguments.Add($"{string.Join(',', issueTransition.LabelsToAdd)}");
         }
 
         if (issueTransition.LabelsToRemove.Any())
         {
             arguments.Add("--remove-label");
-            arguments.Add($"\"{string.Join(',', issueTransition.LabelsToRemove)}\"");           
+            arguments.Add($"{string.Join(',', issueTransition.LabelsToRemove)}");
         }
 
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);

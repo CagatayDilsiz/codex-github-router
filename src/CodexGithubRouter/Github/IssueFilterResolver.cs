@@ -5,7 +5,7 @@ namespace CodexGithubRouter.GitHub;
 
 public static class IssueFilterResolver
 {
-    public static async Task<IssueFilters?> ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready)
+    public static IssueFilters ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready)
     {      
 
         if (!configuration.States.TryGetValue(state, out var stateRules) || stateRules.Count == 0)
