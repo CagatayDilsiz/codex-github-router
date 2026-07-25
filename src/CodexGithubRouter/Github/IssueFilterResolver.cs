@@ -5,15 +5,22 @@ namespace CodexGithubRouter.GitHub;
 
 public static class IssueFilterResolver
 {
-    public static IssueFilters ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready, IssueSelectionConfiguration? issueSelection = null)
-    {      
+    public static IssueFilters ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready, int? limitOverride = null)
+    {
+        var issueSelection = configuration.DefaultIssueSelection with
+        {
+            Limit = limitOverride ?? configuration.DefaultIssueSelection.Limit
+        };
+
+        if (issueSelection.Limit is null or <= 0)
+        {
+            throw new InvalidOperationException("Limit must be a positive integer.");
+        }
 
         if (!configuration.States.TryGetValue(state, out var stateRules) || stateRules.Count == 0)
         {
             throw new InvalidOperationException($"No match rules found for workflow state '{state}'.");
-        }
-
-        issueSelection ??= configuration.DefaultIssueSelection;
+        }       
 
         var issueFilters = IssueFilterCompiler.Compile(stateRules, issueSelection);
 

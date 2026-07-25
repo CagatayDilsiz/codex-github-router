@@ -97,12 +97,13 @@ public static class HookService
                 WorkflowItemType.AwaitingReview,
                 WorkflowItemType.AwaitingMerge,
                 WorkflowItemType.ClosedWithoutMerge,
-                WorkflowItemType.UnknownPullRequestState
+                WorkflowItemType.UnknownPullRequestState,
+                WorkflowItemType.Unknown
             };
 
 
             // close any issues that are marked for closure before hook blocker
-            var closingIssueTasks = combinedTasks.Tasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
+            var closingIssueTasks = actionableTasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
 
             foreach (var closingIssueTask in closingIssueTasks)
             {
@@ -110,7 +111,7 @@ public static class HookService
             }
 
             // find the first hookblocker true task and write the message to the block output
-            var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
+            var hookBlockerTask = actionableTasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
 
             if (hookBlockerTask != null)
             {
@@ -118,7 +119,7 @@ public static class HookService
                 return 0;
             }
 
-            var changeRequestTask = combinedTasks.Tasks.FirstOrDefault(y => y.Type == WorkflowItemType.ChangeRequest);
+            var changeRequestTask = actionableTasks.FirstOrDefault(y => y.Type == WorkflowItemType.ChangeRequest);
 
             if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
             {
@@ -126,7 +127,7 @@ public static class HookService
                 return 0;
             }
 
-            var issuesNeedingPRLink = combinedTasks.Tasks.Where(t => t.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
+            var issuesNeedingPRLink = actionableTasks.Where(t => t.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
 
             if (issuesNeedingPRLink.Count > 0)
             {
@@ -134,7 +135,7 @@ public static class HookService
                 return 0;
             }
 
-            var newIssueTaskToPrompt = combinedTasks.Tasks.FirstOrDefault(t => t.Type == WorkflowItemType.NewIssue);
+            var newIssueTaskToPrompt = actionableTasks.FirstOrDefault(t => t.Type == WorkflowItemType.NewIssue);
 
             if (newIssueTaskToPrompt != null)
             {

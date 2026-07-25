@@ -5,12 +5,8 @@ namespace CodexGithubRouter.Workflow;
 public static class WorkflowService
 {
     public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
-    {
-         var customIssueSelection = new IssueSelectionConfiguration
-        {
-            Limit = scanLimit
-        };
-        var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, customIssueSelection);
+    {        
+        var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, scanLimit);
 
         if (openIssueFilters is null)
         {
@@ -51,11 +47,8 @@ public static class WorkflowService
 
     public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
     {
-        var customIssueSelection = new IssueSelectionConfiguration
-        {
-            Limit = scanLimit
-        };
-        var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, customIssueSelection);
+        
+        var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, scanLimit);
 
         if (completedIssueFilters is null)
         {

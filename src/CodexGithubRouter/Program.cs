@@ -28,7 +28,14 @@ return args[0].ToLowerInvariant() switch
 
 static int PrintVersion()
 {
-    Console.WriteLine("0.0.1");
+    // get informationalVersion that is in cspoj
+
+    var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+    var informationalVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
+        .FirstOrDefault()?.InformationalVersion ?? assembly.GetName().Version?.ToString() ?? "unknown";
+
+    Console.WriteLine("v" + informationalVersion);
     return 0;
 }
 

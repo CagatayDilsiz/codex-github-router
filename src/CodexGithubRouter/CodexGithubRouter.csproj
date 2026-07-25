@@ -6,6 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>cgr</AssemblyName>
+    <Version>0.0.1</Version>
+    <InformationalVersion>0.0.1-beta</InformationalVersion>  
   </PropertyGroup>
 
 </Project>
