@@ -82,81 +82,108 @@ public static class WorkflowService
         {
             var linkedPullRequests = issue.ClosingPullRequestsReferences;
 
+            var prList = new List<PullRequest>();
+
             foreach (var prReference in linkedPullRequests)
             {
                 var prNumber = prReference.Number;
                 var pr = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, prNumber, new PullRequestSelection() { Number=true, State=true, Labels = true }, CancellationToken.None);
 
-                if (pr is null)
+                if (pr is not null)
                 {
-                    continue;
+                    prList.Add(pr);
                 }
+            }
 
-                if (pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase))
-                {
-                    // so despite linked PR is merged, issue is not closed automatically, so we can close the issue manually
-                    await GitHubCliService.CloseIssueAsync(workingDirectory, issue.Number, CancellationToken.None);
+            if (prList.Count == 0)
+            {
+                // this should not happen?                
+                continue;
+            }
 
-                    break;
-                }
-                else if (pr.State.Equals("open", StringComparison.OrdinalIgnoreCase))
+            if (prList.Any(pr => pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase)))
+            {
+                // If any of the linked PRs is merged, we can close the issue automatically.
+                await GitHubCliService.CloseIssueAsync(workingDirectory, issue.Number, CancellationToken.None);
+                continue;
+            }
+
+            if (prList.All(pr => pr.State.Equals("closed", StringComparison.OrdinalIgnoreCase)))
+            {
+                // If all of the linked PRs are closed but not merged, we cannot close the issue automatically.
+                return new WorkflowResponse
                 {
-                    var prLabels = pr.Labels.Select(label => label.Name).ToList();
+                    IsSuccessful = false,
+                    Message = $"Linked pull request for issue #{issue.Number} is closed but not merged. Please review the pull request and ensure it is either merged or reopened or mark the issue to be worked on again."
+                };
+            }
+
+            if (prList.Any(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)))
+            {
+                // If any of the linked PRs is open, we need to check their labels to determine the next steps.
+                var openPRs = prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
+
+                foreach (var openPR in openPRs)
+                {
+                    var prLabels = openPR.Labels.Select(label => label.Name).ToList();
 
                     var reviewRequestedLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.ReviewRequested).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
 
-                    if (prLabels.Any(reviewRequestedLabels.Contains))
+                    if (prLabels.Any(x => reviewRequestedLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
                     {
                         return new WorkflowResponse
                         {
                             IsSuccessful = false,
-                            Message = $"Linked pull request #{pr.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed."
-                        };                       
+                            Message = $"Linked pull request #{openPR.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed."
+                        };
                     }
-                    
-                    var stateLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.ChangeRequested).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
 
-                    if (prLabels.Any(label => stateLabels.Contains(label)))
+                    var changeRequestedLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.ChangesRequested).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
+
+                    if (prLabels.Any(x => changeRequestedLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
                     {
                         workflowTasks.Add(new WorkflowTask()
                         {
                             Type = TaskType.ChangeRequest,
                             IssueNumber = issue.Number,
-                            PullRequestNumber = pr.Number,
+                            PullRequestNumber = openPR.Number,
                         });
                         continue;
                     }
-                    else
+
+                    var awaitingMergeLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.AwaitingMerge).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
+
+                    if (prLabels.Any(x => awaitingMergeLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
                     {
-                        var awaitingMergeLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.AwaitingMerge).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
-
-                        if (prLabels.Any(label => awaitingMergeLabels.Contains(label)))
+                        return new WorkflowResponse
                         {
-                            // linked PR is open and has awaiting merge label, so we can leave the issue open and move to the next issue
-                            continue;
-                        }
-                        else
-                        {
-                            return new WorkflowResponse
-                            {
-                                IsSuccessful = false,
-                                Message = $"Linked pull request #{pr.Number} for issue #{issue.Number} is open but does not have any of the expected labels for 'changes requested' or 'awaiting merge'. Please review the pull request and ensure it has the correct labels."
-                            };
-                        }
-                    }                   
+                            IsSuccessful = false,
+                            Message = $"Linked pull request #{openPR.Number} for issue #{issue.Number} is awaiting merge. Please wait until the pull request is merged."
+                        };
+                    }
 
-                }
-                else if (pr.State.Equals("closed", StringComparison.OrdinalIgnoreCase))
-                {
-                    return new WorkflowResponse
+                    var deferredLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.Deferred).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
+
+                    if (prLabels.Any(x => deferredLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
                     {
-                        IsSuccessful = false,
-                        Message = $"Linked pull request #{pr.Number} for issue #{issue.Number} is closed but not merged. Please review the pull request and ensure it is either merged or reopened or mark the issue to be worked on again."
-                    };
-                    
+                        // if the remaining open PRs are deferred, we can move to the next issue in the workflow. 
+                        break;
+                    }
                 }
-
             }
+            else 
+            {
+
+                var prStates = prList.Select(pr => pr.State).Distinct().ToList();
+
+                var unknownStates = prStates.Where(state => !state.Equals("merged", StringComparison.OrdinalIgnoreCase) && !state.Equals("closed", StringComparison.OrdinalIgnoreCase) && !state.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
+                // we checked all linked PRs and none of them is merged, closed, or open. This means they are in an unknown state.
+                return new WorkflowResponse
+                {
+                    IsSuccessful = false,
+                    Message = $"Linked pull requests for issue #{issue.Number} are in unknown states: {string.Join(", ", unknownStates)}. Please review the pull requests and ensure they are in a valid state."
+                };
+            }            
         }
 
         if (noIssuesWithLinkedPRs.Count > 0)

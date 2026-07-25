@@ -3,8 +3,9 @@ namespace CodexGithubRouter.Workflow;
 public enum PullRequestState
 {
     ReviewRequested,
-    ChangeRequested,
+    ChangesRequested,
     AwaitingMerge,
+    Deferred,
 
 
 }

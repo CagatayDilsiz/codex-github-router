@@ -32,12 +32,15 @@ public static class PullRequestCommandHandler
             """
             Usage:
               cgr pull-request|pr list [--state <state>] [working-directory]
+              cgr pull-request|pr transition <pull-request-number> <target-state> [working-directory]
 
             Commands:
               list        List open pull requests in the repository. (default open state)
+              transition  Transition a pull request to a different state.
 
             Options:
               --state     Filter pull requests by state. Valid values are 'open', 'closed', 'all', or 'merged'.
+              <target-state>  The state to transition the pull request to. Valid values are 'review-requested', 'changes-requested', 'awaiting-merge' or 'deferred'.
             """);
     }
 

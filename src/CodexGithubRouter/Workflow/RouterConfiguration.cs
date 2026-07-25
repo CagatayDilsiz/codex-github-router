@@ -16,7 +16,7 @@ public sealed class RouterConfiguration
                 Values = new List<string> { "codex:rr" }
             }
         },
-        [PullRequestState.ChangeRequested] = new List<IssueMatchRule>
+        [PullRequestState.ChangesRequested] = new List<IssueMatchRule>
         {
             new IssueMatchRule
             {
@@ -30,6 +30,14 @@ public sealed class RouterConfiguration
             {
                 Type = IssueMatchRuleType.Label,
                 Values = new List<string> { "codex:merge-ready" }
+            }
+        },
+        [PullRequestState.Deferred] = new List<IssueMatchRule>
+        {
+            new IssueMatchRule
+            {
+                Type = IssueMatchRuleType.Label,
+                Values = new List<string> { "codex:deferred" }
             }
         }
     };

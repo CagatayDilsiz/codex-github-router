@@ -9,14 +9,16 @@ public static class PullRequestStateParser
         state = value.Trim().ToLowerInvariant() switch
         {
             "review-requested" or "ready-for-review" => PullRequestState.ReviewRequested,
-            "change-requested" => PullRequestState.ChangeRequested,
+            "changes-requested" => PullRequestState.ChangesRequested,
             "awaiting-merge" => PullRequestState.AwaitingMerge,
+            "deferred" => PullRequestState.Deferred,
             _ => default
         };
 
         return value.Trim().ToLowerInvariant() is
             "review-requested" or "ready-for-review" or
-            "change-requested" or
-            "awaiting-merge";
+            "changes-requested" or
+            "awaiting-merge" or
+            "deferred";
     }
 }
