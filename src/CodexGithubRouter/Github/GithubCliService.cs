@@ -1,3 +1,5 @@
+using System.Globalization;
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
 
 namespace CodexGithubRouter.GitHub;
@@ -13,39 +15,28 @@ public static class GitHubCliService
         arguments.Add("--state");
         arguments.Add("open");
         
-        if (filters.Labels != null && filters.Labels.Count > 0)
+         foreach (var label in filters.Labels)
         {
-            foreach (var label in filters.Labels)
-            {
-                arguments.Add("--label");
-                arguments.Add(label);
-            }
+            arguments.Add("--label");
+            arguments.Add(label);
         }
 
-        if (filters.Limit.HasValue)
-        {
-            arguments.Add("--limit");
-            arguments.Add(filters.Limit.Value.ToString());
-        }
+        var searchQuery = BuildSearchQuery(filters);
 
-        if (filters.Search != null)
+        if (!string.IsNullOrWhiteSpace(searchQuery))
         {
             arguments.Add("--search");
-            var searchTerms = new List<string>();
-            if (filters.Search.SortByCreationDate.HasValue)
-            {
-                searchTerms.Add($"sort:created-{(filters.Search.SortByCreationDate.Value ? "asc" : "desc")}");
-            }
+            arguments.Add(searchQuery);
+        }
 
-            if (searchTerms.Count > 0)
-            {
-                arguments.Add(string.Join(" ", searchTerms));
-            }
-            
+        if (filters.Limit is > 0)
+        {
+            arguments.Add("--limit");
+            arguments.Add(filters.Limit.Value.ToString(CultureInfo.InvariantCulture));
         }
 
         arguments.Add("--json");
-        arguments.Add("number,title,url");    
+        arguments.Add("number,title,url,labels,createdAt,updatedAt");  
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
 
         if (process.ExitCode != 0)
@@ -60,8 +51,42 @@ public static class GitHubCliService
         }
         catch (System.Text.Json.JsonException ex)
         {
-            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output: {ex.Message}. Output: {process.Output}");    
+            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output",ex);    
+        }        
+    }
+
+    private static string? BuildSearchQuery(IssueFilters filters)
+    {
+        var searchTerms = new List<string>();
+
+        searchTerms.AddRange(filters.SearchTerms.Where(term => !string.IsNullOrWhiteSpace(term)));
+
+        if (filters.SortBy.HasValue && filters.SortDirection.HasValue)
+        {
+            searchTerms.Add(BuildSortTerm(filters.SortBy.Value, filters.SortDirection.Value));
         }
-        
+
+        return searchTerms.Count == 0
+            ? null
+            : string.Join(' ', searchTerms);
+    }
+
+    private static string BuildSortTerm(IssueSortField field, SortDirection direction)
+    {
+        var fieldName = field switch
+        {
+            IssueSortField.CreatedAt => "created",
+            IssueSortField.UpdatedAt => "updated",
+            _ => throw new ArgumentOutOfRangeException(nameof(field),field, null)
+        };
+
+        var directionName = direction switch
+        {
+            SortDirection.Ascending => "asc",
+            SortDirection.Descending => "desc",
+            _ => throw new ArgumentOutOfRangeException(nameof(direction),direction,null)
+        };
+
+        return $"sort:{fieldName}-{directionName}";
     }
 }

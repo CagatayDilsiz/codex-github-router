@@ -1,13 +1,16 @@
+using CodexGithubRouter.Configurations;
+
 namespace CodexGithubRouter.GitHub;
 
-public class IssueFilters
+public sealed class IssueFilters
 {
-    public List<string> Labels { get; set; } = ["codex:ready"];
-    public int? Limit { get; set; } = 1;
-    public SearchFilters Search { get; set; } = new SearchFilters();
-}
+    public List<string> Labels { get; init; } = [];
 
-public class SearchFilters
-{
-    public bool? SortByCreationDate { get; set; } = true;
+    public List<string> SearchTerms { get; init; } = [];
+
+    public int? Limit { get; init; }
+
+    public IssueSortField? SortBy { get; init; }
+
+    public SortDirection? SortDirection { get; init; }
 }

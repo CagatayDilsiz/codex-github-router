@@ -7,7 +7,7 @@ using CodexGithubRouter.Hooks;
 Console.InputEncoding = Encoding.UTF8;
 Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-await Startup.InitializeAsync();
+
 if (args.Length == 0)
 {
     PrintHelp();
@@ -21,6 +21,7 @@ return args[0].ToLowerInvariant() switch
     "hook" => await HookService.RunAsync(),
     "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "issues" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
+    "init" => await Configurations.InitializeAsync(),
     _ => UnknownCommand(args[0])
 };
 
