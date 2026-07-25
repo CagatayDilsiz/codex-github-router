@@ -4,7 +4,7 @@ namespace CodexGithubRouter.Workflow;
 
 public sealed class IssueSelectionConfiguration
 {
-    public int Limit { get; init; } = 1;
+    public int? Limit { get; init; } = 1;
 
     public IssueSortField SortBy { get; init; } = IssueSortField.CreatedAt;
 

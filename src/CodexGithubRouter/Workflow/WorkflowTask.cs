@@ -11,17 +11,21 @@ public sealed class WorkflowTask
 
 public enum TaskType
 {
-    None = 0,
+   
     ChangeRequest = 1,
     LinkPullRequestsToIssues = 2,
-    NewIssue = 3,    
-    
+    NewIssue = 3,
+    AwaitingReview,
+    AwaitingMerge,
+    Deferred,
+    ClosedWithoutMerge,
+    UnknownPullRequestState,
+    CloseIssue 
 }
 
 public class WorkflowTaskStatus
 {
-    public List<int> LinkedPullRequests { get; init; } = new List<int>();
-    public bool HookBlocker { get; init; } = false;
+    public List<int> LinkedPullRequests { get; init; } = new List<int>(); 
 
     public string Message { get; init; } = "";
 }

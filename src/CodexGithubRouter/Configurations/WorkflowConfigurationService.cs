@@ -83,7 +83,7 @@ public static class WorkflowConfigurationService
             }
         }
 
-        if (configuration.DefaultIssueSelection.Limit <= 0)
+        if (configuration.DefaultIssueSelection.Limit.HasValue && configuration.DefaultIssueSelection.Limit <= 0)
         {
             throw new InvalidOperationException("Issue selection limit must be greater than zero.");
         }

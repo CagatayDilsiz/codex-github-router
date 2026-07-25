@@ -76,14 +76,30 @@ public static class HookService
                 Tasks = completedIssueTasks.Tasks.Concat(newIssueTask.Tasks).ToList()
             };
 
-            if (combinedTasks.Tasks.Count > 0)
+            var blockingTypes = new HashSet<TaskType>
+            {
+                TaskType.AwaitingReview,
+                TaskType.AwaitingMerge,
+                TaskType.ClosedWithoutMerge,
+                TaskType.UnknownPullRequestState
+            };
+
+            if (combinedTasks.Tasks.Any(y => y.Type != TaskType.Deferred))
             {
                 // find the first hookblocker true task and write the message to the block output
-                var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(t => t.Status != null && t.Status.HookBlocker);
+                var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
+
                 if (hookBlockerTask != null)
                 {
                     await WriteBlockAsync(hookBlockerTask.Status.Message);
                     return 0;
+                }
+
+                var closingIssueTasks = combinedTasks.Tasks.Where(y => y.Type == TaskType.CloseIssue).ToList();
+
+                foreach (var closingIssueTask in closingIssueTasks)
+                {
+                    await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
                 }
 
                 var changeRequestTask = combinedTasks.Tasks.FirstOrDefault(y => y.Type == TaskType.ChangeRequest);
