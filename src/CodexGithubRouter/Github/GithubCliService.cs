@@ -6,7 +6,77 @@ namespace CodexGithubRouter.GitHub;
 
 public static class GitHubCliService
 {
-    public static async Task<List<Issue>> GetIssuesAsync(string workingDirectory, IssueFilters filters, CancellationToken cancellationToken = default)
+
+    public static async Task<PullRequest> GetPullRequestByNumberAsync(string workingDirectory, int pullRequestNumber, PullRequestSelection selection, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "pr",
+            "view",
+            pullRequestNumber.ToString(CultureInfo.InvariantCulture),
+            "--json"          
+        };
+
+        arguments.Add(selection.ToSelectionString());
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        try
+        {
+            var pullRequest = System.Text.Json.JsonSerializer.Deserialize<PullRequest>(process.Output);
+            if (pullRequest == null)
+            {
+                throw new InvalidOperationException("Failed to deserialize GitHub CLI output: output is null");
+            }
+            return pullRequest;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output", ex);
+        }
+    }
+
+    public static async Task<List<PullRequest>> GetPullRequestsAsync(string workingDirectory, PullRequestFilters filters, PullRequestSelection selection, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "pr",
+            "list"           
+        };       
+
+        if (filters is not null && !string.IsNullOrWhiteSpace(filters.State))
+        {
+            arguments.Add("--state");
+            arguments.Add(filters.State);
+        }
+
+        arguments.Add("--json");
+        arguments.Add(selection.ToSelectionString());
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        try
+        {
+            var pullRequests = System.Text.Json.JsonSerializer.Deserialize<List<PullRequest>>(process.Output) ?? new List<PullRequest>();
+            return pullRequests;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidOperationException($"Failed to deserialize GitHub CLI output", ex);
+        }
+    }
+
+    public static async Task<List<Issue>> GetIssuesAsync(string workingDirectory, IssueFilters filters, bool addLinkedPRToSelection = false, CancellationToken cancellationToken = default)
     {      
 
         var arguments = new List<string>();
@@ -36,7 +106,16 @@ public static class GitHubCliService
         }
 
         arguments.Add("--json");
-        arguments.Add("number,title,url,labels,createdAt,updatedAt");  
+
+        if (addLinkedPRToSelection)
+        {
+            arguments.Add("number,title,url,labels,createdAt,updatedAt,closedByPullRequestsReferences");
+        }
+        else
+        {
+            arguments.Add("number,title,url,labels,createdAt,updatedAt");
+        }
+        
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
 
         if (process.ExitCode != 0)
@@ -116,6 +195,23 @@ public static class GitHubCliService
             throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
         }
         return true;
+    }
+
+    public static async Task CloseIssueAsync(string workingDirectory, int issueNumber, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "issue",
+            "close",
+            issueNumber.ToString(CultureInfo.InvariantCulture)
+        };
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }      
     }
 
     

@@ -12,9 +12,9 @@ public static class IssueTransitionPlanner
             throw new InvalidOperationException($"No match rules found for workflow state '{targetState}'.");
         }
 
-        var targetLables = stateRules.Where(rule => rule.Type == IssueMatchRuleType.Label).SelectMany(state => state.Values).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var targetLabels = stateRules.Where(rule => rule.Type == IssueMatchRuleType.Label).SelectMany(state => state.Values).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
 
-        if (targetLables.Count == 0)
+        if (targetLabels.Count == 0)
         {
             throw new InvalidOperationException($"No labels found for workflow state '{targetState}'.");
         }
@@ -26,7 +26,7 @@ public static class IssueTransitionPlanner
         return new IssueTransition
         {
             IssueNumber = issue.Number,
-            LabelsToAdd = targetLables.Except(currentLabels, StringComparer.OrdinalIgnoreCase).ToList(),
+            LabelsToAdd = targetLabels.Except(currentLabels, StringComparer.OrdinalIgnoreCase).ToList(),
             LabelsToRemove = currentLabels.Intersect(otherLabels, StringComparer.OrdinalIgnoreCase).ToList()
         };
            

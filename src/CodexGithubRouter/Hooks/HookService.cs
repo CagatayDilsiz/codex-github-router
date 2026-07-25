@@ -52,45 +52,51 @@ public static class HookService
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
 
-            var completedIssueFilters = IssueFilterResolver.ByState(configuration,WorkflowState.Completed);
+            var workflowTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
-            if (completedIssueFilters is null)
+            if (!workflowTasks.IsSuccessful)
             {
-                await WriteBlockAsync("Could not resolve issue filters from workflow configuration.");
+                await WriteBlockAsync(workflowTasks.Message);
                 return 0;
             }
 
-            var completedIssues = await GitHubCliService.GetIssuesAsync(payload.Cwd, completedIssueFilters);
-
-            if (completedIssues.Count > 0)
+            if (workflowTasks.Tasks.Count > 0)
             {
-                // for now, we will block, later we will check pr status and decide to continue or block based on that.
-                await WriteBlockAsync("There are completed issues that need to be closed before proceeding.");
+                var tasks = workflowTasks.Tasks.Where(y => y.Type != TaskType.NewIssue).OrderBy(t => t.Type); // in hook service we do not handle new issue task type here but in else.
+
+                var firstTask = tasks.FirstOrDefault(y => y.PullRequestNumber.HasValue);
+                
+                if (firstTask != null && firstTask.PullRequestNumber.HasValue && firstTask.Type == TaskType.ChangeRequest)
+                {
+                    await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(firstTask.IssueNumber, firstTask.PullRequestNumber.Value));
+                }
+                else if (firstTask != null && firstTask.Type == TaskType.ReviewPRForOpenIssues)
+                {
+                    await WriteAdditionalContextAsync(ContextPromptService.GetReviewPRForOpenIssuesPrompt(tasks.Select(t => t.IssueNumber).ToArray()));
+                }
+                else
+                {
+                    await WriteBlockAsync("No actionable tasks found in the workflow.");                   
+                }
+                
                 return 0;
             }
+            else
+            {
+                var workflowResponse = await WorkflowService.CheckNewIssuesAsync(configuration, payload.Cwd);
+
+                if (!workflowResponse.IsSuccessful || workflowResponse.Tasks.Count == 0)
+                {
+                    await WriteBlockAsync(workflowResponse.Message);
+                    return 0;
+                }           
             
-            var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready);
+                var nextIssue = workflowResponse.Tasks.First().IssueNumber;
 
-            if (openIssueFilters is null)
-            {
-                await WriteBlockAsync("Could not resolve open issue filters from workflow configuration.");
-                return 0;
+                var context = ContextPromptService.GetNewIssuePrompt(nextIssue);
+
+                await WriteAdditionalContextAsync(context);
             }
-
-            var openIssues = await GitHubCliService.GetIssuesAsync(payload.Cwd, openIssueFilters);
-
-            if (openIssues.Count == 0)
-            {
-                await WriteBlockAsync("No open issues found for the current repository.");
-                return 0;
-            }
-            
-            var nextIssue = openIssues.First();
-            
-            var context = NewIssuePrompt.GetPrompt(nextIssue.Number);          
-           
-
-            await WriteAdditionalContextAsync(context);
 
             return 0;
         }

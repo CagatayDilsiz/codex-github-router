@@ -1,4 +1,3 @@
-using System.Security.Cryptography.X509Certificates;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
 using CodexGithubRouter.Helpers;
@@ -25,8 +24,6 @@ public static class IssuesCommandHandler
                 PrintUsage();
                 return 1;
         }
-
-
     }
 
     private static async Task<int> TransitionIssueAsync(string[] strings)
@@ -66,24 +63,18 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
-            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();
-
-            if (routerConfig is null)
-            {
-                Console.Error.WriteLine("No router configuration found.");
-                return 1;
-            }
+            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
 
 
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
-
-            if (issueToTransition is null)
-            {
-                Console.Error.WriteLine($"Issue #{issueNumber} not found.");
-                return 1;
-            }
+          
             var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
 
+            if (issueTransition.LabelsToAdd.Count == 0 && issueTransition.LabelsToRemove.Count == 0)
+            {
+                Console.WriteLine($"Issue #{issueNumber} is already in state '{targetState}'.");
+                return 0;
+            }
 
             await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
@@ -139,7 +130,7 @@ public static class IssuesCommandHandler
 
             var stateValue = arguments[stateArgIndex + 1];
 
-            if (!Enum.TryParse(stateValue, true, out state))
+            if (!WorkflowStateParser.TryParse(stateValue, out state))
             {
                 Console.Error.WriteLine($"Invalid workflow state: {stateValue}");
                 return 1;
@@ -175,10 +166,10 @@ public static class IssuesCommandHandler
                     return 1;
                 }
 
-                issueFilters = IssueFilterResolver.ByState(routerConfig, state) ?? new IssueFilters();
+                issueFilters = IssueFilterResolver.ByState(routerConfig, state);
             }
 
-            var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, issueFilters, CancellationToken.None);
+            var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, issueFilters, false,CancellationToken.None);
 
             if (issues.Count == 0)
             {

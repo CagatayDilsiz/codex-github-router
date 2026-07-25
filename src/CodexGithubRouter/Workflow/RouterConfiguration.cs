@@ -6,7 +6,25 @@ public sealed class RouterConfiguration
 
     public Dictionary<WorkflowState, List<IssueMatchRule>> States { get; init; } = GetDefaultStates();
 
-   
+    public Dictionary<PullRequestState, List<IssueMatchRule>> PullRequestStates { get; init; } = new Dictionary<PullRequestState, List<IssueMatchRule>>
+    {
+        [PullRequestState.reviewRequested] = new List<IssueMatchRule>
+        {
+            new IssueMatchRule
+            {
+                Type = IssueMatchRuleType.Label,
+                Values = new List<string> { "codex:rr" }
+            }
+        },
+        [PullRequestState.changesRequested] = new List<IssueMatchRule>
+        {
+            new IssueMatchRule
+            {
+                Type = IssueMatchRuleType.Label,
+                Values = new List<string> { "codex:cr" }
+            }
+        }
+    };
 
     public IssueSelectionConfiguration IssueSelection { get; init; } = new IssueSelectionConfiguration();
 

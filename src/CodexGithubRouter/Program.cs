@@ -22,6 +22,7 @@ return args[0].ToLowerInvariant() switch
     "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),   
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
+    "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     _ => UnknownCommand(args[0])
 };
 
@@ -44,12 +45,14 @@ static int PrintHelp()
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
           cgr init [--force]
+          cgr pull-request|pr <list> [--state <state>] [working-directory]
 
         Commands:
           hook        Run the hook service to process incoming codex payloads.
           auto        Manage autonomous mode for the repository.
           issue       Manage issues in the repository.
           init        Initialize the configuration for the Codex Github Router.
+          pull-request|pr  Manage pull requests in the repository.
         """);
 
     return 0;
