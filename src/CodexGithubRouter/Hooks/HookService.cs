@@ -76,7 +76,7 @@ public static class HookService
 
                 if (issuesNeedingPRLink.Count > 0)
                 {
-                    await WriteAdditionalContextAsync(ContextPromptService.GetReviewPRForOpenIssuesPrompt(issuesNeedingPRLink.ToArray()));
+                    await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
                     return 0;
                 }                
                 

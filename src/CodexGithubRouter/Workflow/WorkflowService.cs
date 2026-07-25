@@ -120,56 +120,62 @@ public static class WorkflowService
 
             if (prList.Any(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)))
             {
-                // If any of the linked PRs is open, we need to check their labels to determine the next steps.
-                var openPRs = prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
 
-                foreach (var openPR in openPRs)
+                var openPullRequests = prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
+
+                var changesRequested = openPullRequests.Where(pr => HasPullRequestState(pr, configuration, PullRequestState.ChangesRequested)).ToList();
+
+                if (changesRequested.Count > 0)
                 {
-                    var prLabels = openPR.Labels.Select(label => label.Name).ToList();
-
-                    var reviewRequestedLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.ReviewRequested).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
-
-                    if (prLabels.Any(x => reviewRequestedLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
-                    {
-                        return new WorkflowResponse
-                        {
-                            IsSuccessful = false,
-                            Message = $"Linked pull request #{openPR.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed."
-                        };
-                    }
-
-                    var changeRequestedLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.ChangesRequested).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
-
-                    if (prLabels.Any(x => changeRequestedLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
+                    foreach (var pr in changesRequested)
                     {
                         workflowTasks.Add(new WorkflowTask()
                         {
                             Type = TaskType.ChangeRequest,
                             IssueNumber = issue.Number,
-                            PullRequestNumber = openPR.Number,
+                            PullRequestNumber = pr.Number
                         });
-                        continue;
                     }
 
-                    var awaitingMergeLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.AwaitingMerge).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
-
-                    if (prLabels.Any(x => awaitingMergeLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
-                    {
-                        return new WorkflowResponse
-                        {
-                            IsSuccessful = false,
-                            Message = $"Linked pull request #{openPR.Number} for issue #{issue.Number} is awaiting merge. Please wait until the pull request is merged."
-                        };
-                    }
-
-                    var deferredLabels = configuration.PullRequestStates.Where(x => x.Key == PullRequestState.Deferred).SelectMany(x => x.Value).Where(y => y.Type == IssueMatchRuleType.Label).SelectMany(a => a.Values).ToList();
-
-                    if (prLabels.Any(x => deferredLabels.Contains(x, StringComparer.OrdinalIgnoreCase)))
-                    {
-                        // if the remaining open PRs are deferred, we can move to the next issue in the workflow. 
-                        break;
-                    }
+                    continue;
                 }
+
+                var reviewRequested = openPullRequests.FirstOrDefault(pr => HasPullRequestState(pr, configuration, PullRequestState.ReviewRequested));
+
+                if (reviewRequested is not null)
+                {
+                    return new WorkflowResponse
+                    {
+                        IsSuccessful = false,
+                        Message = $"Linked pull request #{reviewRequested.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed."
+                    };
+                }
+
+                var awaitingMerge = openPullRequests.FirstOrDefault(pr => HasPullRequestState(pr, configuration, PullRequestState.AwaitingMerge));
+
+                if (awaitingMerge is not null)
+                {
+                    return new WorkflowResponse
+                    {
+                        IsSuccessful = false,
+                        Message = $"Linked pull request #{awaitingMerge.Number} for issue #{issue.Number} is awaiting merge. Please wait until the pull request is merged."
+                    };
+                }
+
+                var allDeferred = openPullRequests.All(pr => HasPullRequestState(pr, configuration, PullRequestState.Deferred));
+
+                if (allDeferred)
+                {
+                    // if the remaining open PRs are deferred, we can move to the next issue in the workflow. 
+                    continue;
+                }
+
+
+                return new WorkflowResponse
+                {
+                    IsSuccessful = false,
+                    Message = $"Linked pull requests for issue #{issue.Number} are in an unknown state. Please review the pull requests and ensure they are in a valid state."
+                };
             }
             else 
             {
@@ -204,5 +210,24 @@ public static class WorkflowService
             IsSuccessful = true,
             Message = "Workflow check completed successfully."
         };
+    }
+
+    private static bool HasPullRequestState(PullRequest pullRequest, RouterConfiguration configuration, PullRequestState targetState)
+    {
+        if (!configuration.PullRequestStates.TryGetValue(targetState, out var stateRules) || stateRules.Count == 0)
+        {
+            return false;
+        }
+
+        var targetLabels = stateRules.Where(rule => rule.Type == IssueMatchRuleType.Label).SelectMany(state => state.Values).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+        if (targetLabels.Count == 0)
+        {
+            return false;
+        }
+
+        var currentLabels = pullRequest.Labels.Select(label => label.Name).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return targetLabels.Any(label => currentLabels.Contains(label, StringComparer.OrdinalIgnoreCase));
     }
 }

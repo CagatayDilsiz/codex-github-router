@@ -24,14 +24,14 @@ public static class ContextPromptService
         """;
     }
 
-    public static string GetReviewPRForOpenIssuesPrompt(int[] issueNumbers)
+    public static string GetIssuesNeedPRLinkPrompt(int[] issueNumbers)
     {
         return $"""
             Next task is to review open pull requests against the following issues: {string.Join(", ", issueNumbers)}.
 
             1. Please use `gh pr list --state open` to view the list of open pull requests in the repository.
 
-            2. For each open pull request, please review the changes and see if any given issue is addressed in the pull request. If the pull request addresses any of the issues, please edit the pull request body and add closing issue references for the issues that are addressed in the pull request. This will help the issue author know that their issue is being addressed and avoid duplicate work.
+            2. For each open pull request, please review the changes and see if any given issue is addressed in the pull request. If the pull request addresses any of the issues, please edit the pull request body and add closing issue references for the issues that are addressed in the pull request. This will help the issue author know that their issue is being addressed and avoid duplicate work. Run `cgr pr transition <pull-request-number> ready-for-review` to indicate that the pull request is ready for review if no label is set yet. If the pull request does not address any of the issues, please leave it as is.
 
             3. Do not code, do not merge the pull request, do not close the issue, do not leave any comments on the pull request or the issue. Just edit the pull request body and add closing issue references for the issues that are addressed in the pull request otherwise leave it as is. 
         """;
