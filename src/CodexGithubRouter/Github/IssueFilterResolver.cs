@@ -5,7 +5,7 @@ namespace CodexGithubRouter.GitHub;
 
 public static class IssueFilterResolver
 {
-    public static IssueFilters ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready)
+    public static IssueFilters ByState(RouterConfiguration configuration, WorkflowState state = WorkflowState.Ready, IssueSelectionConfiguration? issueSelection = null)
     {      
 
         if (!configuration.States.TryGetValue(state, out var stateRules) || stateRules.Count == 0)
@@ -13,7 +13,9 @@ public static class IssueFilterResolver
             throw new InvalidOperationException($"No match rules found for workflow state '{state}'.");
         }
 
-        var issueFilters = IssueFilterCompiler.Compile(stateRules, configuration.IssueSelection);
+        issueSelection ??= configuration.DefaultIssueSelection;
+
+        var issueFilters = IssueFilterCompiler.Compile(stateRules, issueSelection);
 
        
         return issueFilters;

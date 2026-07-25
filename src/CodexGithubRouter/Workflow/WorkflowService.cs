@@ -6,7 +6,11 @@ public static class WorkflowService
 {
     public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory)
     {
-        var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready);
+         var customIssueSelection = new IssueSelectionConfiguration
+        {
+            Limit = 0 // No limit, we let gh cli handle the default which seems to be 30           
+        };
+        var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, customIssueSelection);
 
         if (openIssueFilters is null)
         {
@@ -38,7 +42,8 @@ public static class WorkflowService
         {
             return new WorkflowResponse
             {
-                IsSuccessful = false,
+                Tasks = new List<WorkflowTask>(),
+                IsSuccessful = true,
                 Message = "No new issues found."
             };
         }
@@ -46,7 +51,11 @@ public static class WorkflowService
 
     public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory)
     {
-        var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed);
+        var customIssueSelection = new IssueSelectionConfiguration
+        {
+            Limit = 0 // No limit, we let gh cli handle the default which seems to be 30           
+        };
+        var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, customIssueSelection);
 
         if (completedIssueFilters is null)
         {
@@ -55,7 +64,7 @@ public static class WorkflowService
                 IsSuccessful = false,
                 Message = "Could not resolve issue filters from workflow configuration."
             };
-        }
+        }       
 
         var completedIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, completedIssueFilters, true);
 
@@ -67,6 +76,7 @@ public static class WorkflowService
         {
             return new WorkflowResponse
             {
+                Tasks = new List<WorkflowTask>(),
                 IsSuccessful = true,
                 Message = "No completed issues found."
             };
@@ -77,7 +87,8 @@ public static class WorkflowService
     {
         var workflowTasks = new List<WorkflowTask>();
         var noIssuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count == 0).ToList();
-        var issuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();
+        var issuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();        
+
         foreach (var issue in issuesWithLinkedPRs)
         {
             var linkedPullRequests = issue.ClosingPullRequestsReferences;
@@ -97,7 +108,7 @@ public static class WorkflowService
 
             if (prList.Count == 0)
             {
-                // this should not happen?                
+                // this should not happen? but if it does, what to do?               
                 continue;
             }
 
@@ -111,11 +122,20 @@ public static class WorkflowService
             if (prList.All(pr => pr.State.Equals("closed", StringComparison.OrdinalIgnoreCase)))
             {
                 // If all of the linked PRs are closed but not merged, we cannot close the issue automatically.
-                return new WorkflowResponse
+
+                workflowTasks.Add(new WorkflowTask()
                 {
-                    IsSuccessful = false,
-                    Message = $"Linked pull request for issue #{issue.Number} is closed but not merged. Please review the pull request and ensure it is either merged or reopened or mark the issue to be worked on again."
-                };
+                    Type = TaskType.None,
+                    IssueNumber = issue.Number,
+                    PullRequestNumber = prList.First().Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = "All linked pull requests are closed but not merged. Please review the pull requests and ensure they are either merged or reopened or mark the issue to be worked on again.",
+                        LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                        HookBlocker = true
+                    }
+                    
+                });                
             }
 
             if (prList.Any(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)))
@@ -133,7 +153,13 @@ public static class WorkflowService
                         {
                             Type = TaskType.ChangeRequest,
                             IssueNumber = issue.Number,
-                            PullRequestNumber = pr.Number
+                            PullRequestNumber = pr.Number,
+                            Status = new WorkflowTaskStatus
+                            {
+                                Message = $"Linked pull request #{pr.Number} for issue #{issue.Number} has requested changes. Please review the pull request and address the requested changes.",
+                                LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                                HookBlocker = false
+                            }
                         });
                     }
 
@@ -144,22 +170,41 @@ public static class WorkflowService
 
                 if (reviewRequested is not null)
                 {
-                    return new WorkflowResponse
+
+                    workflowTasks.Add(new WorkflowTask()
                     {
-                        IsSuccessful = false,
-                        Message = $"Linked pull request #{reviewRequested.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed."
-                    };
+                        Type = TaskType.None,
+                        IssueNumber = issue.Number,
+                        PullRequestNumber = reviewRequested.Number,
+                        Status = new WorkflowTaskStatus
+                        {
+                            Message = $"Linked pull request #{reviewRequested.Number} for issue #{issue.Number} is still under review. Please wait until the review is completed.",
+                            LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                            HookBlocker = true
+                        }
+                    });
+
+                    continue;
                 }
 
                 var awaitingMerge = openPullRequests.FirstOrDefault(pr => HasPullRequestState(pr, configuration, PullRequestState.AwaitingMerge));
 
                 if (awaitingMerge is not null)
                 {
-                    return new WorkflowResponse
+                    workflowTasks.Add(new WorkflowTask()
                     {
-                        IsSuccessful = false,
-                        Message = $"Linked pull request #{awaitingMerge.Number} for issue #{issue.Number} is awaiting merge. Please wait until the pull request is merged."
-                    };
+                        Type = TaskType.None,
+                        IssueNumber = issue.Number,
+                        PullRequestNumber = awaitingMerge.Number,
+                        Status = new WorkflowTaskStatus
+                        {
+                            Message = $"Linked pull request #{awaitingMerge.Number} for issue #{issue.Number} is awaiting merge. Please wait until the pull request is merged.",
+                            LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                            HookBlocker = true
+                        }
+                    });
+
+                    continue;
                 }
 
                 var allDeferred = openPullRequests.All(pr => HasPullRequestState(pr, configuration, PullRequestState.Deferred));
@@ -171,11 +216,18 @@ public static class WorkflowService
                 }
 
 
-                return new WorkflowResponse
+                workflowTasks.Add(new WorkflowTask()
                 {
-                    IsSuccessful = false,
-                    Message = $"Linked pull requests for issue #{issue.Number} are in an unknown state. Please review the pull requests and ensure they are in a valid state."
-                };
+                    Type = TaskType.None,
+                    IssueNumber = issue.Number,
+                    PullRequestNumber = openPullRequests.First().Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Linked pull requests for issue #{issue.Number} are in an unknown state. Please review the pull requests and ensure they are in a valid state.",
+                        LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                        HookBlocker = true
+                    }
+                });               
             }
             else 
             {
@@ -184,11 +236,19 @@ public static class WorkflowService
 
                 var unknownStates = prStates.Where(state => !state.Equals("merged", StringComparison.OrdinalIgnoreCase) && !state.Equals("closed", StringComparison.OrdinalIgnoreCase) && !state.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
                 // we checked all linked PRs and none of them is merged, closed, or open. This means they are in an unknown state.
-                return new WorkflowResponse
+
+                workflowTasks.Add(new WorkflowTask()
                 {
-                    IsSuccessful = false,
-                    Message = $"Linked pull requests for issue #{issue.Number} are in unknown states: {string.Join(", ", unknownStates)}. Please review the pull requests and ensure they are in a valid state."
-                };
+                    Type = TaskType.None,
+                    IssueNumber = issue.Number,
+                    PullRequestNumber = prList.First().Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Linked pull requests for issue #{issue.Number} are in unknown states: {string.Join(", ", unknownStates)}. Please review the pull requests and ensure they are in a valid state.",
+                        LinkedPullRequests = prList.Select(pr => pr.Number).ToList(),
+                        HookBlocker = true
+                    }
+                });                
             }            
         }
 

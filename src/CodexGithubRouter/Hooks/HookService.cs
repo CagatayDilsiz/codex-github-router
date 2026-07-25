@@ -52,54 +52,75 @@ public static class HookService
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
 
-            var workflowTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
+            var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
-            if (!workflowTasks.IsSuccessful)
+           
+            if (!completedIssueTasks.IsSuccessful)
             {
-                await WriteBlockAsync(workflowTasks.Message);
+                await WriteBlockAsync(completedIssueTasks.Message);
                 return 0;
             }
 
-            if (workflowTasks.Tasks.Count > 0)
-            {
-                var tasks = workflowTasks.Tasks.Where(y => y.Type != TaskType.NewIssue).OrderBy(t => t.Type); // in hook service we do not handle new issue task type here but in else.
+            var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, payload.Cwd);
 
-                var changeRequestTask = tasks.FirstOrDefault(y => y.Type == TaskType.ChangeRequest);
-                
+            if (!newIssueTask.IsSuccessful)
+            {
+                await WriteBlockAsync(newIssueTask.Message);
+                return 0;
+            }
+
+            var combinedTasks = new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Message = "Combined workflow tasks.",
+                Tasks = completedIssueTasks.Tasks.Concat(newIssueTask.Tasks).ToList()
+            };
+
+            if (combinedTasks.Tasks.Count > 0)
+            {
+                // find the first hookblocker true task and write the message to the block output
+                var hookBlockerTask = combinedTasks.Tasks.FirstOrDefault(t => t.Status != null && t.Status.HookBlocker);
+                if (hookBlockerTask != null)
+                {
+                    await WriteBlockAsync(hookBlockerTask.Status.Message);
+                    return 0;
+                }
+
+                var changeRequestTask = combinedTasks.Tasks.FirstOrDefault(y => y.Type == TaskType.ChangeRequest);
+
                 if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
                 {
                     await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(changeRequestTask.IssueNumber, changeRequestTask.PullRequestNumber.Value));
                     return 0;
                 }
 
-                var issuesNeedingPRLink = tasks.Where(t => t.Type == TaskType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
+                var issuesNeedingPRLink = combinedTasks.Tasks.Where(t => t.Type == TaskType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
 
                 if (issuesNeedingPRLink.Count > 0)
                 {
                     await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
                     return 0;
-                }                
-                
+                }
+
+                var newIssueTaskToPrompt = combinedTasks.Tasks.FirstOrDefault(t => t.Type == TaskType.NewIssue);
+
+                if (newIssueTaskToPrompt != null)
+                {
+                    var context = ContextPromptService.GetNewIssuePrompt(newIssueTaskToPrompt.IssueNumber);
+
+                    await WriteAdditionalContextAsync(context);
+                    return 0;
+                }
+
+
+                await WriteBlockAsync("No actionable workflow tasks found.");
                 return 0;
             }
             else
             {
-                var workflowResponse = await WorkflowService.CheckNewIssuesAsync(configuration, payload.Cwd);
-
-                if (!workflowResponse.IsSuccessful || workflowResponse.Tasks.Count == 0)
-                {
-                    await WriteBlockAsync(workflowResponse.Message);
-                    return 0;
-                }           
-            
-                var nextIssue = workflowResponse.Tasks.First().IssueNumber;
-
-                var context = ContextPromptService.GetNewIssuePrompt(nextIssue);
-
-                await WriteAdditionalContextAsync(context);
-            }
-
-            return 0;
+                await WriteBlockAsync("No workflow tasks found.");
+                return 0;
+            }          
         }
         catch (JsonException exception)
         {

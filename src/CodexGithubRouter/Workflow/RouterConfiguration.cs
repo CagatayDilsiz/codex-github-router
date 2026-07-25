@@ -42,7 +42,7 @@ public sealed class RouterConfiguration
         }
     };
 
-    public IssueSelectionConfiguration IssueSelection { get; init; } = new IssueSelectionConfiguration();
+    public IssueSelectionConfiguration DefaultIssueSelection { get; init; } = new IssueSelectionConfiguration();    
 
     private static Dictionary<WorkflowState, List<IssueMatchRule>> GetDefaultStates()
     {
