@@ -34,7 +34,7 @@ static int PrintVersion()
         .FirstOrDefault()?.InformationalVersion ?? assembly.GetName().Version?.ToString() ?? "Unknown";
 
 
-    Console.WriteLine("v" + infoVersion);
+    Console.WriteLine("v" + VersionFormatter.Normalize(infoVersion));
     return 0;
 }
 
