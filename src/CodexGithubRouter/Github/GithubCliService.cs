@@ -6,6 +6,49 @@ namespace CodexGithubRouter.GitHub;
 
 public static class GitHubCliService
 {
+    private const string ManagedLabelColor = "0E8A16";
+    private const string ManagedLabelDescription = "Managed by Codex GitHub Router";
+
+    public static async Task<HashSet<string>> GetRepositoryLabelNamesAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(
+            workingDirectory,
+            "gh",
+            new[] { "label", "list", "--limit", "1000", "--json", "name" },
+            cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        try
+        {
+            var labels = System.Text.Json.JsonSerializer.Deserialize<List<GithubLabel>>(process.Output) ?? new List<GithubLabel>();
+            return labels
+                .Select(label => label.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (System.Text.Json.JsonException exception)
+        {
+            throw new InvalidOperationException("Failed to deserialize GitHub CLI label output.", exception);
+        }
+    }
+
+    public static async Task CreateLabelAsync(string workingDirectory, string labelName, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(
+            workingDirectory,
+            "gh",
+            new[] { "label", "create", labelName, "--color", ManagedLabelColor, "--description", ManagedLabelDescription },
+            cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+    }
 
     public static async Task<PullRequest> GetPullRequestByNumberAsync(string workingDirectory, int pullRequestNumber, PullRequestSelection selection, CancellationToken cancellationToken = default)
     {

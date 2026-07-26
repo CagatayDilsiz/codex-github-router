@@ -87,5 +87,7 @@ public static class WorkflowConfigurationService
         {
             throw new InvalidOperationException("Issue selection limit must be greater than zero.");
         }
+
+        WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
     }
 }
