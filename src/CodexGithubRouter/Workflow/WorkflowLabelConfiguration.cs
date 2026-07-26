@@ -11,7 +11,7 @@ public static class WorkflowLabelConfiguration
 
         return GetLabelMappings(configuration.States)
             .Concat(GetLabelMappings(configuration.PullRequestStates))
-            .Select(mapping => mapping.Label)
+            .Select(mapping => mapping.Label.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -22,9 +22,9 @@ public static class WorkflowLabelConfiguration
         ArgumentNullException.ThrowIfNull(configuration);
 
         var content = string.Join("\n", GetLabelMappings(configuration.States)
-            .Select(mapping => $"issue:{mapping.State}:{mapping.Label.ToLowerInvariant()}")
+            .Select(mapping => $"issue:{mapping.State}:{mapping.Label.Trim().ToLowerInvariant()}")
             .Concat(GetLabelMappings(configuration.PullRequestStates)
-                .Select(mapping => $"pull-request:{mapping.State}:{mapping.Label.ToLowerInvariant()}"))
+                .Select(mapping => $"pull-request:{mapping.State}:{mapping.Label.Trim().ToLowerInvariant()}"))
             .OrderBy(value => value, StringComparer.Ordinal));
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
@@ -34,8 +34,13 @@ public static class WorkflowLabelConfiguration
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
-        ValidateDomain("issue", GetLabelMappings(configuration.States));
-        ValidateDomain("pull request", GetLabelMappings(configuration.PullRequestStates));
+        var issueLabels = GetLabelMappings(configuration.States).ToList();
+        var pullRequestLabels = GetLabelMappings(configuration.PullRequestStates).ToList();
+
+        ValidateNormalizedLabelNames(issueLabels);
+        ValidateNormalizedLabelNames(pullRequestLabels);
+        ValidateDomain("issue", issueLabels);
+        ValidateDomain("pull request", pullRequestLabels);
     }
 
     private static IEnumerable<(string State, string Label)> GetLabelMappings<TState>(Dictionary<TState, List<IssueMatchRule>> states)
@@ -45,7 +50,7 @@ public static class WorkflowLabelConfiguration
             .Where(rule => rule.Type == IssueMatchRuleType.Label)
             .SelectMany(rule => rule.Values)
             .Where(label => !string.IsNullOrWhiteSpace(label))
-            .Select(label => (entry.Key.ToString(), label.Trim())));
+            .Select(label => (entry.Key.ToString(), label)));
     }
 
     private static void ValidateDomain(string domain, IEnumerable<(string State, string Label)> mappings)
@@ -58,6 +63,17 @@ public static class WorkflowLabelConfiguration
             {
                 throw new InvalidOperationException(
                     $"Workflow label '{labels.Key}' is configured for multiple {domain} states: {string.Join(", ", states)}.");
+            }
+        }
+    }
+
+    private static void ValidateNormalizedLabelNames(IEnumerable<(string State, string Label)> mappings)
+    {
+        foreach (var mapping in mappings)
+        {
+            if (!string.Equals(mapping.Label, mapping.Label.Trim(), StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Workflow label '{mapping.Label}' for state '{mapping.State}' must not have leading or trailing whitespace.");
             }
         }
     }
