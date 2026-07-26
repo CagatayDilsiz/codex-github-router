@@ -1,4 +1,5 @@
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Workflow;
@@ -12,6 +13,7 @@ AssertHookRoutePrecedence();
 AssertWorkflowLabelConflictResolution();
 await AssertPullRequestLabelConflictHandlingAsync();
 AssertIssueAliasSearchUsesOrSemantics();
+AssertVersionNormalization();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -140,6 +142,13 @@ static void AssertIssueAliasSearchUsesOrSemantics()
     });
 
     Assert(query == "label:\"codex:ready\",\"codex:queued\" is:open", "Configured state-label aliases must be sent as one GitHub search OR group, not separate AND label filters.");
+}
+
+static void AssertVersionNormalization()
+{
+    Assert(VersionFormatter.Normalize("0.0.1-alpha+23523532463463463") == "0.0.1-alpha", "Build metadata must be removed while preserving prerelease versions.");
+    Assert(VersionFormatter.Normalize("1.2.3") == "1.2.3", "Stable versions must remain unchanged.");
+    Assert(VersionFormatter.Normalize(null) == "Unknown", "Missing version metadata must use the safe fallback.");
 }
 
 static void Assert(bool condition, string message)
