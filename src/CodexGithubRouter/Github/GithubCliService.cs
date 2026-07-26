@@ -128,12 +128,6 @@ public static class GitHubCliService
         arguments.Add("--state");
         arguments.Add("open");
         
-         foreach (var label in filters.Labels)
-        {
-            arguments.Add("--label");
-            arguments.Add(label);
-        }
-
         var searchQuery = BuildSearchQuery(filters);
 
         if (!string.IsNullOrWhiteSpace(searchQuery))
@@ -288,9 +282,15 @@ public static class GitHubCliService
     }
 
     
-    private static string? BuildSearchQuery(IssueFilters filters)
+    public static string? BuildSearchQuery(IssueFilters filters)
     {
         var searchTerms = new List<string>();
+
+        var labels = filters.Labels.Where(label => !string.IsNullOrWhiteSpace(label)).Select(label => label.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (labels.Count > 0)
+        {
+            searchTerms.Add($"label:\"{string.Join("\",\"", labels.Select(label => label.Replace("\"", "\\\"", StringComparison.Ordinal)))}\"");
+        }
 
         searchTerms.AddRange(filters.SearchTerms.Where(term => !string.IsNullOrWhiteSpace(term)));
 

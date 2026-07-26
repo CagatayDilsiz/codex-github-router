@@ -9,6 +9,9 @@ await AssertWorkingIssueWithOpenPullRequestAsync();
 AssertResumePromptIsSafe();
 AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
 AssertHookRoutePrecedence();
+AssertWorkflowLabelConflictResolution();
+await AssertPullRequestLabelConflictHandlingAsync();
+AssertIssueAliasSearchUsesOrSemantics();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -92,6 +95,51 @@ static void AssertHookRoutePrecedence()
     Assert(HookTaskRouter.Route(new[] { resume, newIssue }).AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Resume work must take precedence over new work.");
     Assert(HookTaskRouter.Route(new[] { newIssue }).AdditionalContext?.Contains("issue #5", StringComparison.Ordinal) == true, "A ready issue should produce new-issue context when no higher-priority work exists.");
     Assert(HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason == "No actionable workflow tasks found.", "Empty work must use the safe fallback.");
+}
+
+static void AssertWorkflowLabelConflictResolution()
+{
+    var configuration = new RouterConfiguration();
+    configuration.States[WorkflowState.Ready][0].Values.Add("codex:queued");
+
+    var oneState = WorkflowStateResolver.Resolve(new[] { "unrelated", "codex:ready", "codex:queued" }, configuration.States);
+    Assert(!oneState.IsAmbiguous && oneState.MatchedLabels[WorkflowState.Ready].Count == 2, "Multiple labels configured for one state must be valid OR matches.");
+
+    var conflict = WorkflowStateResolver.Resolve(new[] { "codex:ready", "codex:working" }, configuration.States);
+    Assert(conflict.IsAmbiguous && conflict.DescribeConflict("issue #4").Contains("codex:ready", StringComparison.Ordinal) && conflict.DescribeConflict("issue #4").Contains("codex:working", StringComparison.Ordinal), "Different issue states must be reported as an order-independent conflict.");
+
+    var transition = IssueTransitionPlanner.Plan(new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:ready" }, new() { Name = "codex:working" }, new() { Name = "unrelated" } } }, WorkflowState.Completed, configuration);
+    Assert(transition.LabelsToAdd.SequenceEqual(new[] { "codex:done" }) && transition.LabelsToRemove.OrderBy(label => label).SequenceEqual(new[] { "codex:ready", "codex:working" }), "A transition must repair a conflicting workflow label set without touching unrelated labels.");
+
+    var reverseConflict = WorkflowStateResolver.Resolve(new[] { "codex:working", "codex:ready" }, configuration.States);
+    Assert(conflict.DescribeConflict("issue #4") == reverseConflict.DescribeConflict("issue #4"), "Conflict diagnostics must not depend on label order.");
+
+    var pullRequestResolution = WorkflowStateResolver.Resolve(new[] { "codex:rr" }, configuration.PullRequestStates);
+    Assert(!pullRequestResolution.IsAmbiguous && !oneState.IsAmbiguous, "Issue and pull-request label domains must be resolved independently.");
+}
+
+static async Task AssertPullRequestLabelConflictHandlingAsync()
+{
+    var issue = new Issue { Number = 4 };
+    issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 8 });
+    var configuration = new RouterConfiguration();
+
+    var openConflict = await WorkflowService.CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, _ => Task.FromResult(new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" }, new() { Name = "codex:cr" } } }));
+    Assert(openConflict.Tasks.Single().Type == WorkflowItemType.UnknownPullRequestState, "Conflicting labels on an open pull request must block routing.");
+
+    var mergedStale = await WorkflowService.CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, _ => Task.FromResult(new PullRequest { Number = 8, State = "merged", Labels = new List<GithubLabel> { new() { Name = "codex:rr" }, new() { Name = "codex:cr" } } }));
+    Assert(mergedStale.Tasks.Single().Type == WorkflowItemType.CloseIssue, "A merged pull request must close its issue despite stale conflicting labels.");
+}
+
+static void AssertIssueAliasSearchUsesOrSemantics()
+{
+    var query = GitHubCliService.BuildSearchQuery(new IssueFilters
+    {
+        Labels = new List<string> { "codex:ready", "codex:queued" },
+        SearchTerms = new List<string> { "is:open" }
+    });
+
+    Assert(query == "label:\"codex:ready\",\"codex:queued\" is:open", "Configured state-label aliases must be sent as one GitHub search OR group, not separate AND label filters.");
 }
 
 static void Assert(bool condition, string message)

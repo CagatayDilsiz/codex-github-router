@@ -9,6 +9,9 @@ public static class WorkflowService
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);
         var inProgressIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, inProgressFilters, true);
 
+        var conflict = FindIssueConflict(inProgressIssues, configuration);
+        if (conflict is not null) return conflict;
+
         return await EvaluateInProgressIssuesAsync(
             configuration,
             inProgressIssues,
@@ -75,6 +78,9 @@ public static class WorkflowService
 
         var openIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, openIssueFilters, false);
 
+        var conflict = FindIssueConflict(openIssues, configuration);
+        if (conflict is not null) return conflict;
+
         if (openIssues.Count > 0)
         {
             var workflowTasks = openIssues.Select(issue => new WorkflowItem
@@ -116,6 +122,9 @@ public static class WorkflowService
         }       
 
         var completedIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, completedIssueFilters, true);
+
+        var conflict = FindIssueConflict(completedIssues, configuration);
+        if (conflict is not null) return conflict;
 
         if (completedIssues.Count > 0)
         {
@@ -183,6 +192,13 @@ public static class WorkflowService
                     }
                 });
                 
+                continue;
+            }
+
+            var pullRequestConflict = prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).Select(pr => new { PullRequest = pr, Resolution = WorkflowStateResolver.Resolve(pr.Labels.Select(label => label.Name), configuration.PullRequestStates) }).FirstOrDefault(entry => entry.Resolution.IsAmbiguous);
+            if (pullRequestConflict is not null)
+            {
+                workflowTasks.Add(new WorkflowItem { Type = WorkflowItemType.UnknownPullRequestState, IssueNumber = issue.Number, PullRequestNumber = pullRequestConflict.PullRequest.Number, Status = new WorkflowTaskStatus { Message = pullRequestConflict.Resolution.DescribeConflict($"pull request #{pullRequestConflict.PullRequest.Number}"), LinkedPullRequests = prList.Select(pr => pr.Number).ToList() } });
                 continue;
             }
 
@@ -349,6 +365,12 @@ public static class WorkflowService
 
     private static bool HasPullRequestState(PullRequest pullRequest, RouterConfiguration configuration, PullRequestState targetState)
     {
+        var resolution = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
+        if (resolution.IsAmbiguous)
+        {
+            return false;
+        }
+
         if (!configuration.PullRequestStates.TryGetValue(targetState, out var stateRules) || stateRules.Count == 0)
         {
             return false;
@@ -364,5 +386,11 @@ public static class WorkflowService
         var currentLabels = pullRequest.Labels.Select(label => label.Name).Where(value => !string.IsNullOrWhiteSpace(value)).Distinct(StringComparer.OrdinalIgnoreCase).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return targetLabels.Any(label => currentLabels.Contains(label, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static WorkflowResponse? FindIssueConflict(IEnumerable<Issue> issues, RouterConfiguration configuration)
+    {
+        var conflict = issues.Select(issue => new { Issue = issue, Resolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States) }).FirstOrDefault(entry => entry.Resolution.IsAmbiguous);
+        return conflict is null ? null : new WorkflowResponse { IsSuccessful = false, Message = conflict.Resolution.DescribeConflict($"issue #{conflict.Issue.Number}") };
     }
 }
