@@ -61,14 +61,12 @@ public static class ConfigurationInitializer
         {
             var hooksConfig = new JsonObject
             {
-                ["description"] = "Codex hooks configuration", ["hooks"] = new JsonObject
+                ["description"] = "Codex hooks configuration",
+                ["hooks"] = new JsonObject
                 {
                     ["UserPromptSubmit"] = new JsonArray
                     {
-                        ["hooks"] = new JsonArray
-                        {
-                            GetUserPromptSubmitHookConfiguration()
-                        }
+                       GetUserPromptSubmitHookGroup()
                     }
                 }
             };
@@ -109,10 +107,7 @@ public static class ConfigurationInitializer
             {
                 rootHooks["UserPromptSubmit"] = new JsonArray()
                 {
-                    ["hooks"] = new JsonArray
-                    {
-                        GetUserPromptSubmitHookConfiguration()
-                    }
+                    GetUserPromptSubmitHookGroup()
                 };
 
 
@@ -122,54 +117,27 @@ public static class ConfigurationInitializer
             }
             else
             {
-                // find if the command already exists
-                var existingCommands = rootHooks["UserPromptSubmit"] as JsonArray;
-
-                if (existingCommands is null)
+                var userPrompt = rootHooks["UserPromptSubmit"] as JsonArray;
+                if (userPrompt is null)
                 {
                     throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' is not a valid JSON array.");
                 }
 
-                var commandExists = ContainsCgrHook(existingCommands);
+                var isUserPromptHookExists = ContainsCgrCommandBlock(userPrompt);
 
-                if (!commandExists)
-                {
-                    var commandHooks = existingCommands["hooks"] as JsonArray;
-
-                    if (commandHooks is null)
-                    {
-                        throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' does not contain a 'hooks' array.");
-                    }
-
-                    commandHooks.Add(GetUserPromptSubmitHookConfiguration());
-
-                    await WriteJsonAtomicallyAsync(path, root, cancellationToken);
-
-                    return 0;
-                }
-                else
+                if (isUserPromptHookExists)
                 {
                     if (force)
                     {
-                        var commandHooks = existingCommands["hooks"] as JsonArray;
+                        var userPromptHooks = GetUserPromptHookGroup(userPrompt);
 
-                        if (commandHooks is null)
+                        foreach (var hooks in userPromptHooks)
                         {
-                            throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' does not contain a 'hooks' array.");
+                            var block = GetExistingCgrCommandBlock(hooks, out var existingCgrHook);
+
+                            hooks.Remove(existingCgrHook);
+                            hooks.Add(GetCgrCommandBlock());
                         }
-
-                        // Remove existing cgr hook
-                        var existingCgrHook = commandHooks.FirstOrDefault(hook =>
-                            string.Equals(hook?["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(hook?["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
-
-                        if (existingCgrHook != null)
-                        {
-                            commandHooks.Remove(existingCgrHook);
-                        }
-
-                        // Add the new cgr hook
-                        commandHooks.Add(GetUserPromptSubmitHookConfiguration());
 
                         await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
@@ -181,6 +149,19 @@ public static class ConfigurationInitializer
                         return 0;
                     }
                 }
+                else
+                {
+                    var userPromptHooks = GetUserPromptHookGroup(userPrompt);
+
+                    foreach (var hooks in userPromptHooks)
+                    {
+                        hooks.Add(GetCgrCommandBlock());
+                    }
+
+                    await WriteJsonAtomicallyAsync(path, root, cancellationToken);
+
+                    return 0;
+                }
             }
 
         }
@@ -191,20 +172,31 @@ public static class ConfigurationInitializer
         }
     }
 
-    public static JsonObject GetUserPromptSubmitHookConfiguration()
+    private static JsonObject GetUserPromptSubmitHookGroup()
+    {
+        return new JsonObject
+        {
+            ["hooks"] = new JsonArray
+            {
+                GetCgrCommandBlock()
+            }
+        };
+    }
+
+    public static JsonObject GetCgrCommandBlock()
     {
 
         return new JsonObject
         {
-            ["type"] = "command", 
+            ["type"] = "command",
             ["command"] = "cgr hook",
-            ["commandWindows"] = "cgr hook", 
+            ["commandWindows"] = "cgr hook",
             ["timeout"] = 120,
-             ["statusMessage"] = "Running cgr hook"
+            ["statusMessage"] = "Running cgr hook"
         };
     }
 
-    private static bool ContainsCgrHook(JsonArray groups)
+    private static bool ContainsCgrCommandBlock(JsonArray groups)
     {
         return groups
             .OfType<JsonObject>()
@@ -216,15 +208,33 @@ public static class ConfigurationInitializer
                 string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
     }
 
+    private static JsonObject? GetExistingCgrCommandBlock(JsonArray groups, out JsonObject? existingCgrHook)
+    {
+        existingCgrHook = groups.FirstOrDefault(handler => handler is not null &&
+                string.Equals(handler["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase)) as JsonObject;
+
+        return existingCgrHook;
+    }
+
+    private static IEnumerable<JsonArray> GetUserPromptHookGroup(JsonArray userPrompt)
+    {
+        return userPrompt
+            .OfType<JsonObject>()
+            .Select(group => group["hooks"] as JsonArray)
+            .Where(handlers => handlers is not null)
+            .Select(handlers => handlers!);
+    }
+
     private static async Task WriteJsonAtomicallyAsync(string path, JsonNode root, CancellationToken cancellationToken)
     {
         var tempPath = path + ".tmp";
         var backupPath = path + ".bak";
 
         var json = root.ToJsonString(new JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
+        {
+            WriteIndented = true
+        });
 
         await File.WriteAllTextAsync(tempPath, json, cancellationToken);
 

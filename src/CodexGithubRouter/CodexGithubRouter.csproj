@@ -8,8 +8,9 @@
     <AssemblyName>cgr</AssemblyName>
     <Version>0.0.1-alfa</Version>    
     <PackAsTool>true</PackAsTool>
-    <ToolCommandName>codex-github-router</ToolCommandName>
+    <ToolCommandName>cgr</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
+    <PackageId>codex-github-router</PackageId>
   </PropertyGroup>
 
 </Project>
