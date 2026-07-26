@@ -178,13 +178,6 @@ public static class WorkflowService
                 continue;
             }
 
-            var pullRequestConflict = prList.Select(pr => new { PullRequest = pr, Resolution = WorkflowStateResolver.Resolve(pr.Labels.Select(label => label.Name), configuration.PullRequestStates) }).FirstOrDefault(entry => entry.Resolution.IsAmbiguous);
-            if (pullRequestConflict is not null)
-            {
-                workflowTasks.Add(new WorkflowItem { Type = WorkflowItemType.UnknownPullRequestState, IssueNumber = issue.Number, PullRequestNumber = pullRequestConflict.PullRequest.Number, Status = new WorkflowTaskStatus { Message = pullRequestConflict.Resolution.DescribeConflict($"pull request #{pullRequestConflict.PullRequest.Number}"), LinkedPullRequests = prList.Select(pr => pr.Number).ToList() } });
-                continue;
-            }
-
             if (prList.Any(pr => pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase)))
             {
                 workflowTasks.Add(new WorkflowItem()
@@ -199,6 +192,13 @@ public static class WorkflowService
                     }
                 });
                 
+                continue;
+            }
+
+            var pullRequestConflict = prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).Select(pr => new { PullRequest = pr, Resolution = WorkflowStateResolver.Resolve(pr.Labels.Select(label => label.Name), configuration.PullRequestStates) }).FirstOrDefault(entry => entry.Resolution.IsAmbiguous);
+            if (pullRequestConflict is not null)
+            {
+                workflowTasks.Add(new WorkflowItem { Type = WorkflowItemType.UnknownPullRequestState, IssueNumber = issue.Number, PullRequestNumber = pullRequestConflict.PullRequest.Number, Status = new WorkflowTaskStatus { Message = pullRequestConflict.Resolution.DescribeConflict($"pull request #{pullRequestConflict.PullRequest.Number}"), LinkedPullRequests = prList.Select(pr => pr.Number).ToList() } });
                 continue;
             }
 

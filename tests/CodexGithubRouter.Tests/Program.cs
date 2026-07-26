@@ -10,6 +10,7 @@ AssertResumePromptIsSafe();
 AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
 AssertHookRoutePrecedence();
 AssertWorkflowLabelConflictResolution();
+await AssertPullRequestLabelConflictHandlingAsync();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -108,6 +109,25 @@ static void AssertWorkflowLabelConflictResolution()
 
     var transition = IssueTransitionPlanner.Plan(new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:ready" }, new() { Name = "codex:working" }, new() { Name = "unrelated" } } }, WorkflowState.Completed, configuration);
     Assert(transition.LabelsToAdd.SequenceEqual(new[] { "codex:done" }) && transition.LabelsToRemove.OrderBy(label => label).SequenceEqual(new[] { "codex:ready", "codex:working" }), "A transition must repair a conflicting workflow label set without touching unrelated labels.");
+
+    var reverseConflict = WorkflowStateResolver.Resolve(new[] { "codex:working", "codex:ready" }, configuration.States);
+    Assert(conflict.DescribeConflict("issue #4") == reverseConflict.DescribeConflict("issue #4"), "Conflict diagnostics must not depend on label order.");
+
+    var pullRequestResolution = WorkflowStateResolver.Resolve(new[] { "codex:rr" }, configuration.PullRequestStates);
+    Assert(!pullRequestResolution.IsAmbiguous && !oneState.IsAmbiguous, "Issue and pull-request label domains must be resolved independently.");
+}
+
+static async Task AssertPullRequestLabelConflictHandlingAsync()
+{
+    var issue = new Issue { Number = 4 };
+    issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 8 });
+    var configuration = new RouterConfiguration();
+
+    var openConflict = await WorkflowService.CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, _ => Task.FromResult(new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" }, new() { Name = "codex:cr" } } }));
+    Assert(openConflict.Tasks.Single().Type == WorkflowItemType.UnknownPullRequestState, "Conflicting labels on an open pull request must block routing.");
+
+    var mergedStale = await WorkflowService.CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, _ => Task.FromResult(new PullRequest { Number = 8, State = "merged", Labels = new List<GithubLabel> { new() { Name = "codex:rr" }, new() { Name = "codex:cr" } } }));
+    Assert(mergedStale.Tasks.Single().Type == WorkflowItemType.CloseIssue, "A merged pull request must close its issue despite stale conflicting labels.");
 }
 
 static void Assert(bool condition, string message)

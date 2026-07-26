@@ -128,10 +128,10 @@ public static class GitHubCliService
         arguments.Add("--state");
         arguments.Add("open");
         
-         foreach (var label in filters.Labels)
+        if (filters.Labels.Count > 0)
         {
             arguments.Add("--label");
-            arguments.Add(label);
+            arguments.Add(string.Join(',', filters.Labels));
         }
 
         var searchQuery = BuildSearchQuery(filters);
