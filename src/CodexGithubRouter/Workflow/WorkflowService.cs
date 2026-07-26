@@ -4,6 +4,62 @@ namespace CodexGithubRouter.Workflow;
 
 public static class WorkflowService
 {
+    public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
+    {
+        var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);
+        var inProgressIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, inProgressFilters, true);
+
+        return await EvaluateInProgressIssuesAsync(
+            configuration,
+            inProgressIssues,
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None));
+    }
+
+    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest)
+    {
+        if (inProgressIssues.Count > 1)
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = false,
+                Message = $"Multiple issues are marked as in progress: {string.Join(", ", inProgressIssues.Select(issue => $"#{issue.Number}"))}. Resolve the workflow state before starting new work."
+            };
+        }
+
+        if (inProgressIssues.Count == 0)
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Message = "No in-progress issues found."
+            };
+        }
+
+        var issue = inProgressIssues[0];
+        if (issue.ClosingPullRequestsReferences.Count > 0)
+        {
+            return await CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, getPullRequest);
+        }
+
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Message = $"Issue #{issue.Number} is already in progress.",
+            Tasks = new List<WorkflowItem>
+            {
+                new()
+                {
+                    Type = WorkflowItemType.ResumeInProgressIssue,
+                    IssueNumber = issue.Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Issue #{issue.Number} is already in progress and has no linked pull request. Resume or report the existing work; do not start a new issue."
+                    }
+                }
+            }
+        };
+    }
+
     public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
     {        
         var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, scanLimit);
@@ -78,6 +134,14 @@ public static class WorkflowService
 
     public static async Task<WorkflowResponse> CheckIssueLinkedPullRequestsAsync(RouterConfiguration configuration, string workingDirectory, IEnumerable<Issue> completedIssues)
     {
+        return await CheckIssueLinkedPullRequestsAsync(
+            configuration,
+            completedIssues,
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None));
+    }
+
+    public static async Task<WorkflowResponse> CheckIssueLinkedPullRequestsAsync(RouterConfiguration configuration, IEnumerable<Issue> completedIssues, Func<int, Task<PullRequest>> getPullRequest)
+    {
         var workflowTasks = new List<WorkflowItem>();
         var noIssuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count == 0).ToList();
         var issuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();        
@@ -91,7 +155,7 @@ public static class WorkflowService
             foreach (var prReference in linkedPullRequests)
             {
                 var prNumber = prReference.Number;
-                var pr = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, prNumber, new PullRequestSelection() { Number=true, State=true, Labels = true }, CancellationToken.None);
+                var pr = await getPullRequest(prNumber);
 
                 if (pr is not null)
                 {

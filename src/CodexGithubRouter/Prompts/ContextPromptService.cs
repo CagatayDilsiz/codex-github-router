@@ -15,12 +15,31 @@ public static class ContextPromptService
 
             3. If the issue is clear and the working directory is clean, run `cgr issue transition {number} working` to claim the work. Stop immediately if the transition fails; do not modify files, update branches, or create a work branch.
 
-            4. After the transition succeeds, update the default branch and create a new branch for the issue from that up-to-date default branch. Only then start modifying files.
+            4. After the transition succeeds, update the default branch and create a new branch named `codex/issue-{number}-<short-description>` from that up-to-date default branch. Only then start modifying files.
 
             5. Once you have completed the work on the issue, please submit a pull request and link it to the issue. Do not close the issue yourself, as it will be closed automatically when the pull request is merged. run `cgr issue transition {number} completed` to indicate that the work is complete and run `cgr pr transition <newly-created-pr-number> ready-for-review` to indicate that the issue/PR is ready for review.
 
             6. Pull request title and description should be in same language as the issue so that the issue author can understand it. If the issue is in a different language, please provide a translation of the pull request title and description in the same language as the issue.
 
+        """;
+    }
+
+    public static string GetInProgressIssuePrompt(int number)
+    {
+        return $"""
+            Issue #{number} is already marked as working and has no linked pull request. Resume or report this existing work; do not start a new issue.
+
+            1. Use `gh issue view {number} --comments` to review the issue and any available comments. An empty comments result is normal and does not need to be reported.
+
+            2. Run `git status --short`. If the working tree has unrelated changes, do not modify files or create a branch.
+
+            3. The only valid work-branch prefix for this issue is `codex/issue-{number}-`. Inspect matching branches with `git branch --all --list "codex/issue-{number}-*"` and `git ls-remote --heads origin "codex/issue-{number}-*"`. Reconcile the local and remote results into exactly one candidate. If there are zero or multiple candidates, stop and report the ambiguity; do not create a branch.
+
+            4. If the candidate exists only on origin, check out a tracking branch. If it exists only locally, preserve and continue that branch. If it exists both locally and remotely, continue the existing local branch after syncing it.
+
+            5. Before modifying files, run `gh pr list --head <candidate-branch> --state all --json number,state,url`. Zero pull requests means interrupted work: resume the existing branch, do not create a PR while work is incomplete, and create exactly one linked PR only after implementation is complete. Then run the normal completed and ready-for-review transitions. One open pull request means add a closing reference such as `Fixes #{number}` to its description if missing, then stop so the next hook invocation evaluates it through the configured pull-request workflow. One closed pull request means report the closed-unmerged work and stop. Multiple pull requests are ambiguous: stop and report every PR number and state.
+
+            6. Do not recreate the branch, restart the issue, open a duplicate pull request, or transition the issue to working again.
         """;
     }
 

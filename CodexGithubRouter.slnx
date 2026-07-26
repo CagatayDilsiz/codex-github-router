@@ -2,4 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/CodexGithubRouter/CodexGithubRouter.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CodexGithubRouter.Tests/CodexGithubRouter.Tests.csproj" />
+  </Folder>
 </Solution>
