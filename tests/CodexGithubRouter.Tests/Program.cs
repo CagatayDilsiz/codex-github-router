@@ -9,6 +9,7 @@ await AssertWorkingIssueWithOpenPullRequestAsync();
 AssertResumePromptIsSafe();
 AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
 AssertHookRoutePrecedence();
+AssertWorkflowLabelConflictResolution();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -92,6 +93,21 @@ static void AssertHookRoutePrecedence()
     Assert(HookTaskRouter.Route(new[] { resume, newIssue }).AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Resume work must take precedence over new work.");
     Assert(HookTaskRouter.Route(new[] { newIssue }).AdditionalContext?.Contains("issue #5", StringComparison.Ordinal) == true, "A ready issue should produce new-issue context when no higher-priority work exists.");
     Assert(HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason == "No actionable workflow tasks found.", "Empty work must use the safe fallback.");
+}
+
+static void AssertWorkflowLabelConflictResolution()
+{
+    var configuration = new RouterConfiguration();
+    configuration.States[WorkflowState.Ready][0].Values.Add("codex:queued");
+
+    var oneState = WorkflowStateResolver.Resolve(new[] { "unrelated", "codex:ready", "codex:queued" }, configuration.States);
+    Assert(!oneState.IsAmbiguous && oneState.MatchedLabels[WorkflowState.Ready].Count == 2, "Multiple labels configured for one state must be valid OR matches.");
+
+    var conflict = WorkflowStateResolver.Resolve(new[] { "codex:ready", "codex:working" }, configuration.States);
+    Assert(conflict.IsAmbiguous && conflict.DescribeConflict("issue #4").Contains("codex:ready", StringComparison.Ordinal) && conflict.DescribeConflict("issue #4").Contains("codex:working", StringComparison.Ordinal), "Different issue states must be reported as an order-independent conflict.");
+
+    var transition = IssueTransitionPlanner.Plan(new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:ready" }, new() { Name = "codex:working" }, new() { Name = "unrelated" } } }, WorkflowState.Completed, configuration);
+    Assert(transition.LabelsToAdd.SequenceEqual(new[] { "codex:done" }) && transition.LabelsToRemove.OrderBy(label => label).SequenceEqual(new[] { "codex:ready", "codex:working" }), "A transition must repair a conflicting workflow label set without touching unrelated labels.");
 }
 
 static void Assert(bool condition, string message)
