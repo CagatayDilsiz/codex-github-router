@@ -37,7 +37,7 @@ public static class ContextPromptService
 
             4. If the candidate exists only on origin, check out a tracking branch. If it exists only locally, preserve and continue that branch. If it exists both locally and remotely, continue the existing local branch after syncing it.
 
-            5. Before modifying files, run `gh pr list --head <candidate-branch> --state all --json number,state,url`. Zero pull requests means the existing work has no linked PR; report that fact and do not create one. One open pull request means inspect it with `gh pr view <number> --comments` and continue only on that branch. One closed pull request means report the closed-unmerged work and stop. Multiple pull requests are ambiguous: stop and report every PR number and state.
+            5. Before modifying files, run `gh pr list --head <candidate-branch> --state all --json number,state,url`. Zero pull requests means interrupted work: resume the existing branch, do not create a PR while work is incomplete, and create exactly one linked PR only after implementation is complete. Then run the normal completed and ready-for-review transitions. One open pull request means add a closing reference such as `Fixes #{number}` to its description if missing, then stop so the next hook invocation evaluates it through the configured pull-request workflow. One closed pull request means report the closed-unmerged work and stop. Multiple pull requests are ambiguous: stop and report every PR number and state.
 
             6. Do not recreate the branch, restart the issue, open a duplicate pull request, or transition the issue to working again.
         """;
