@@ -1,10 +1,15 @@
 using CodexGithubRouter.Git;
+using CodexGithubRouter.Configurations;
+using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Workflow;
+using System.Text.Json;
 
 namespace CodexGithubRouter.Autonomous;
 
 public static class AutonomousService
 {
     private const string AutonomousFileName = "codex-github-router.auto";
+    private const string AutonomousStateFileName = "codex-github-router.auto.json";
 
     public static async Task<bool> IsAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
@@ -48,14 +53,49 @@ public static class AutonomousService
         return Path.Combine(gitCommonDirectory, AutonomousFileName);
     }
 
-    public static async Task EnableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
         var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, cancellationToken);
+        var configuration = await WorkflowConfigurationService.LoadOrCreateAsync(cancellationToken);
+        var requiredLabels = WorkflowLabelConfiguration.GetRequiredLabels(configuration);
+        var existingLabels = await GitHubCliService.GetRepositoryLabelNamesAsync(workingDirectory, cancellationToken);
+
+        var createdCount = 0;
+        foreach (var label in requiredLabels)
+        {
+            if (existingLabels.Contains(label))
+            {
+                continue;
+            }
+
+            await GitHubCliService.CreateLabelAsync(workingDirectory, label, cancellationToken);
+            existingLabels.Add(label);
+            createdCount++;
+        }
+
+        var stateFilePath = Path.Combine(Path.GetDirectoryName(autonomousFilePath)!, AutonomousStateFileName);
+        var fingerprint = WorkflowLabelConfiguration.GetFingerprint(configuration);
+        var previousState = await ReadStateAsync(stateFilePath, cancellationToken);
+        var state = new AutonomousState
+        {
+            ConfigurationFingerprint = fingerprint
+        };
+
+        await using (var stream = File.Create(stateFilePath))
+        {
+            await JsonSerializer.SerializeAsync(stream, state, cancellationToken: cancellationToken);
+        }
 
         if (!File.Exists(autonomousFilePath))
         {
             File.WriteAllText(autonomousFilePath, "Autonomous mode enabled.");
         }
+
+        return new AutonomousEnableResult
+        {
+            CreatedLabelCount = createdCount,
+            ConfigurationChanged = previousState is not null && !string.Equals(previousState.ConfigurationFingerprint, fingerprint, StringComparison.Ordinal)
+        };
     }
 
     public static async Task DisableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
@@ -66,6 +106,23 @@ public static class AutonomousService
         {
             File.Delete(autonomousFilePath);
         }
+
+        var stateFilePath = Path.Combine(Path.GetDirectoryName(autonomousFilePath)!, AutonomousStateFileName);
+        if (File.Exists(stateFilePath))
+        {
+            File.Delete(stateFilePath);
+        }
+    }
+
+    private static async Task<AutonomousState?> ReadStateAsync(string stateFilePath, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(stateFilePath))
+        {
+            return null;
+        }
+
+        await using var stream = File.OpenRead(stateFilePath);
+        return await JsonSerializer.DeserializeAsync<AutonomousState>(stream, cancellationToken: cancellationToken);
     }
 
 }

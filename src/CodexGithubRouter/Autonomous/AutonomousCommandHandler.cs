@@ -18,8 +18,9 @@ public static class AutonomousCommandHandler
             switch (command)
             {
                 case "on":
-                    await AutonomousService.EnableAutonomousAsync(workingDirectory);
-                    Console.WriteLine($"Autonomous mode enabled for {workingDirectory}");
+                    var enableResult = await AutonomousService.EnableAutonomousAsync(workingDirectory);
+                    var configurationChangeMessage = enableResult.ConfigurationChanged ? " Workflow configuration changed and missing labels were provisioned." : string.Empty;
+                    Console.WriteLine($"Autonomous mode enabled for {workingDirectory}. Created {enableResult.CreatedLabelCount} missing workflow label(s).{configurationChangeMessage}");
                     return 0;
 
                 case "off":
