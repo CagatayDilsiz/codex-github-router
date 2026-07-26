@@ -17,9 +17,9 @@ if (args.Length == 0)
 return args[0].ToLowerInvariant() switch
 {
     "--version" or "-v" => PrintVersion(),
-    "--help" or "-h" => PrintHelp(), 
+    "--help" or "-h" => PrintHelp(),
     "hook" => await HookService.RunAsync(),
-    "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),   
+    "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
     "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
@@ -28,19 +28,18 @@ return args[0].ToLowerInvariant() switch
 
 static int PrintVersion()
 {
-    // get informationalVersion that is in cspoj
-
     var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-    var informationalVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+    var infoVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
-        .FirstOrDefault()?.InformationalVersion ?? assembly.GetName().Version?.ToString() ?? "unknown";
+        .FirstOrDefault()?.InformationalVersion;
 
-    Console.WriteLine("v" + informationalVersion);
+
+    Console.WriteLine("v" + infoVersion);
     return 0;
 }
 
 static int PrintHelp()
-{ 
+{
     Console.WriteLine(
         """
         Codex Github Router

@@ -12,7 +12,7 @@ public static class IssueFilterResolver
             Limit = limitOverride ?? configuration.DefaultIssueSelection.Limit
         };
 
-        if (issueSelection.Limit is null or <= 0)
+        if (issueSelection.Limit <= 0)
         {
             throw new InvalidOperationException("Limit must be a positive integer.");
         }

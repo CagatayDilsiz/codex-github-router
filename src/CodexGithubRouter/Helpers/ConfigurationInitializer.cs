@@ -10,7 +10,7 @@ public static class ConfigurationInitializer
     public static async Task<int> InitAsync(string[] args, CancellationToken cancellationToken = default)
     {
         var force = args.Any(argument => string.Equals(argument, "--force", StringComparison.OrdinalIgnoreCase));
-        
+
         if (await SetupCodexHooksAsync(force, cancellationToken) != 0)
         {
             return 1;
@@ -40,31 +40,35 @@ public static class ConfigurationInitializer
     private static async Task<int> SetupCodexHooksAsync(bool force, CancellationToken cancellationToken = default)
     {
         var path = ConfigurationPaths.CodexDirectory;
-        
+
         if (!Directory.Exists(path))
         {
-           Console.Error.WriteLine($"Codex directory does not exist: {path}");
-           return 1;
+            Directory.CreateDirectory(path);
         }
 
         var hooksFilePath = ConfigurationPaths.CodexHooksFile;
 
         if (File.Exists(hooksFilePath))
         {
-            await AppendToCodexHooksAsync(hooksFilePath, cancellationToken);
-            Console.WriteLine($"Codex hooks configuration updated: {hooksFilePath}");
-            return 0;
+            var result = await AppendToCodexHooksAsync(force, hooksFilePath, cancellationToken);
+            if (result == 0)
+            {
+                Console.WriteLine($"Codex hooks configuration updated: {hooksFilePath}");
+            }
+            return result;
         }
         else
         {
             var hooksConfig = new JsonObject
             {
-                ["description"] = "Codex hooks configuration",
-                ["hooks"] = new JsonObject
+                ["description"] = "Codex hooks configuration", ["hooks"] = new JsonObject
                 {
                     ["UserPromptSubmit"] = new JsonArray
                     {
-                        GetUserPromptSubmitHookConfiguration()
+                        ["hooks"] = new JsonArray
+                        {
+                            GetUserPromptSubmitHookConfiguration()
+                        }
                     }
                 }
             };
@@ -73,23 +77,23 @@ public static class ConfigurationInitializer
 
             Console.WriteLine($"Codex hooks configuration created: {hooksFilePath}");
             return 0;
-        }       
+        }
     }
 
-    private static async Task AppendToCodexHooksAsync(string path, CancellationToken cancellationToken = default)
+    private static async Task<int> AppendToCodexHooksAsync(bool force, string path, CancellationToken cancellationToken = default)
     {
-       try
+        try
         {
             var json = await File.ReadAllTextAsync(path, cancellationToken);
 
             var root = JsonNode.Parse(json);
 
             if (root is null)
-            {                
+            {
                 throw new InvalidOperationException("Codex hooks configuration is empty.");
             }
 
-            if (root["hooks"] is null) 
+            if (root["hooks"] is null)
             {
                 throw new InvalidOperationException("Codex hooks configuration does not contain a 'hooks' array.");
             }
@@ -103,12 +107,18 @@ public static class ConfigurationInitializer
 
             if (rootHooks["UserPromptSubmit"] is null)
             {
-                rootHooks["UserPromptSubmit"] = new JsonArray() {
-                    GetUserPromptSubmitHookConfiguration()
+                rootHooks["UserPromptSubmit"] = new JsonArray()
+                {
+                    ["hooks"] = new JsonArray
+                    {
+                        GetUserPromptSubmitHookConfiguration()
+                    }
                 };
 
-                
-                await File.WriteAllTextAsync(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+
+                await WriteJsonAtomicallyAsync(path, root, cancellationToken);
+
+                return 0;
             }
             else
             {
@@ -120,16 +130,56 @@ public static class ConfigurationInitializer
                     throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' is not a valid JSON array.");
                 }
 
-                var commandExists = existingCommands.Any(command =>
-                    command is JsonObject obj &&
-                    obj["type"]?.ToString() == "command" &&
-                    obj["command"]?.ToString() == "cgr hook");
+                var commandExists = ContainsCgrHook(existingCommands);
 
                 if (!commandExists)
                 {
-                    existingCommands.Add(GetUserPromptSubmitHookConfiguration());
+                    var commandHooks = existingCommands["hooks"] as JsonArray;
 
-                    await File.WriteAllTextAsync(path, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
+                    if (commandHooks is null)
+                    {
+                        throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' does not contain a 'hooks' array.");
+                    }
+
+                    commandHooks.Add(GetUserPromptSubmitHookConfiguration());
+
+                    await WriteJsonAtomicallyAsync(path, root, cancellationToken);
+
+                    return 0;
+                }
+                else
+                {
+                    if (force)
+                    {
+                        var commandHooks = existingCommands["hooks"] as JsonArray;
+
+                        if (commandHooks is null)
+                        {
+                            throw new InvalidOperationException("Codex hooks configuration 'UserPromptSubmit' does not contain a 'hooks' array.");
+                        }
+
+                        // Remove existing cgr hook
+                        var existingCgrHook = commandHooks.FirstOrDefault(hook =>
+                            string.Equals(hook?["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(hook?["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
+
+                        if (existingCgrHook != null)
+                        {
+                            commandHooks.Remove(existingCgrHook);
+                        }
+
+                        // Add the new cgr hook
+                        commandHooks.Add(GetUserPromptSubmitHookConfiguration());
+
+                        await WriteJsonAtomicallyAsync(path, root, cancellationToken);
+
+                        return 0;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"Codex hooks configuration already contains the 'cgr hook' command. Use --force to overwrite.");
+                        return 0;
+                    }
                 }
             }
 
@@ -137,20 +187,58 @@ public static class ConfigurationInitializer
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error updating Codex hooks configuration: {ex.Message}");
-        }        
+            return 1;
+        }
     }
 
     public static JsonObject GetUserPromptSubmitHookConfiguration()
     {
-        var hookConfig = new JsonObject
-        {
-            ["type"] = "command",
-            ["command"] = "cgr hook",
-            ["commandWindow"] = "cgr hook",
-            ["timeout"] = 120,
-            ["statusMessage"] = "Running cgr hook"
-        };
 
-        return hookConfig;
+        return new JsonObject
+        {
+            ["type"] = "command", 
+            ["command"] = "cgr hook",
+            ["commandWindows"] = "cgr hook", 
+            ["timeout"] = 120,
+             ["statusMessage"] = "Running cgr hook"
+        };
+    }
+
+    private static bool ContainsCgrHook(JsonArray groups)
+    {
+        return groups
+            .OfType<JsonObject>()
+            .Select(group => group["hooks"] as JsonArray)
+            .Where(handlers => handlers is not null)
+            .SelectMany(handlers => handlers!.OfType<JsonObject>())
+            .Any(handler =>
+                string.Equals(handler["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static async Task WriteJsonAtomicallyAsync(string path, JsonNode root, CancellationToken cancellationToken)
+    {
+        var tempPath = path + ".tmp";
+        var backupPath = path + ".bak";
+
+        var json = root.ToJsonString(new JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
+
+        _ = JsonNode.Parse(await File.ReadAllTextAsync(tempPath, cancellationToken))
+            ?? throw new InvalidOperationException("Generated hooks configuration is invalid.");
+
+        if (File.Exists(path))
+        {
+            File.Copy(path, backupPath, overwrite: true);
+            File.Move(tempPath, path, overwrite: true);
+        }
+        else
+        {
+            File.Move(tempPath, path);
+        }
     }
 }

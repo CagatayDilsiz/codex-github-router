@@ -6,8 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>cgr</AssemblyName>
-    <Version>0.0.1</Version>
-    <InformationalVersion>0.0.1-beta</InformationalVersion>  
+    <Version>0.0.1-alfa</Version>    
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>codex-github-router</ToolCommandName>
+    <PackageOutputPath>./nupkg</PackageOutputPath>
   </PropertyGroup>
 
 </Project>
