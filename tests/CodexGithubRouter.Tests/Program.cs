@@ -11,6 +11,7 @@ AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
 AssertHookRoutePrecedence();
 AssertWorkflowLabelConflictResolution();
 await AssertPullRequestLabelConflictHandlingAsync();
+AssertIssueAliasSearchUsesOrSemantics();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -128,6 +129,17 @@ static async Task AssertPullRequestLabelConflictHandlingAsync()
 
     var mergedStale = await WorkflowService.CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, _ => Task.FromResult(new PullRequest { Number = 8, State = "merged", Labels = new List<GithubLabel> { new() { Name = "codex:rr" }, new() { Name = "codex:cr" } } }));
     Assert(mergedStale.Tasks.Single().Type == WorkflowItemType.CloseIssue, "A merged pull request must close its issue despite stale conflicting labels.");
+}
+
+static void AssertIssueAliasSearchUsesOrSemantics()
+{
+    var query = GitHubCliService.BuildSearchQuery(new IssueFilters
+    {
+        Labels = new List<string> { "codex:ready", "codex:queued" },
+        SearchTerms = new List<string> { "is:open" }
+    });
+
+    Assert(query == "label:\"codex:ready\",\"codex:queued\" is:open", "Configured state-label aliases must be sent as one GitHub search OR group, not separate AND label filters.");
 }
 
 static void Assert(bool condition, string message)
