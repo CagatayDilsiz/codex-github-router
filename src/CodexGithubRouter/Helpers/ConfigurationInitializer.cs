@@ -50,11 +50,7 @@ public static class ConfigurationInitializer
 
         if (File.Exists(hooksFilePath))
         {
-            var result = await AppendToCodexHooksAsync(force, hooksFilePath, cancellationToken);
-            if (result == 0)
-            {
-                Console.WriteLine($"Codex hooks configuration updated: {hooksFilePath}");
-            }
+            var result = await AppendToCodexHooksAsync(force, hooksFilePath, cancellationToken);          
             return result;
         }
         else
@@ -71,8 +67,7 @@ public static class ConfigurationInitializer
                 }
             };
 
-            await File.WriteAllTextAsync(hooksFilePath, hooksConfig.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), cancellationToken);
-
+            await WriteJsonAtomicallyAsync(hooksFilePath, hooksConfig, cancellationToken);
             Console.WriteLine($"Codex hooks configuration created: {hooksFilePath}");
             return 0;
         }
@@ -110,7 +105,6 @@ public static class ConfigurationInitializer
                     GetUserPromptSubmitHookGroup()
                 };
 
-
                 await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
                 return 0;
@@ -129,16 +123,8 @@ public static class ConfigurationInitializer
                 {
                     if (force)
                     {
-                        var userPromptHooks = GetUserPromptHookGroup(userPrompt);
-
-                        foreach (var hooks in userPromptHooks)
-                        {
-                            var block = GetExistingCgrCommandBlock(hooks, out var existingCgrHook);
-
-                            hooks.Remove(existingCgrHook);
-                            hooks.Add(GetCgrCommandBlock());
-                        }
-
+                        RemoveAllCgrCommandBlocks(userPrompt);
+                        userPrompt.Add(GetUserPromptSubmitHookGroup());
                         await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
                         return 0;
@@ -151,12 +137,7 @@ public static class ConfigurationInitializer
                 }
                 else
                 {
-                    var userPromptHooks = GetUserPromptHookGroup(userPrompt);
-
-                    foreach (var hooks in userPromptHooks)
-                    {
-                        hooks.Add(GetCgrCommandBlock());
-                    }
+                    userPrompt.Add(GetUserPromptSubmitHookGroup());
 
                     await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
@@ -250,5 +231,39 @@ public static class ConfigurationInitializer
         {
             File.Move(tempPath, path);
         }
+    }
+
+    private static void RemoveAllCgrCommandBlocks(JsonArray groups)
+    {
+        foreach (var group in groups.OfType<JsonObject>())
+        {
+            if (group["hooks"] is not JsonArray hooks)
+            {
+                continue;
+            }
+
+            var existingCgrHooks = hooks
+                .OfType<JsonObject>()
+                .Where(IsCgrCommandBlock)
+                .ToList();
+
+            foreach (var hook in existingCgrHooks)
+            {
+                hooks.Remove(hook);
+            }
+        }
+    }
+
+    private static bool IsCgrCommandBlock(JsonObject hook)
+    {
+        return
+            string.Equals(
+                hook["type"]?.GetValue<string>(),
+                "command",
+                StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(
+                hook["command"]?.GetValue<string>(),
+                "cgr hook",
+                StringComparison.OrdinalIgnoreCase);
     }
 }
