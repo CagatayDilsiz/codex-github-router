@@ -2,7 +2,6 @@ using System.Text.Json;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
-using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Hooks;
@@ -99,17 +98,6 @@ public static class HookService
                 return 0;
             }
 
-
-            var blockingTypes = new HashSet<WorkflowItemType>
-            {
-                WorkflowItemType.AwaitingReview,
-                WorkflowItemType.AwaitingMerge,
-                WorkflowItemType.ClosedWithoutMerge,
-                WorkflowItemType.UnknownPullRequestState,
-                WorkflowItemType.Unknown
-            };
-
-
             // close any issues that are marked for closure before hook blocker
             var closingIssueTasks = actionableTasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
 
@@ -118,51 +106,15 @@ public static class HookService
                 await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
             }
 
-            // find the first hookblocker true task and write the message to the block output
-            var hookBlockerTask = actionableTasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));
+            var decision = HookTaskRouter.Route(actionableTasks);
 
-            if (hookBlockerTask != null)
+            if (!string.IsNullOrWhiteSpace(decision.BlockReason))
             {
-                await WriteBlockAsync(hookBlockerTask.Status.Message);
+                await WriteBlockAsync(decision.BlockReason);
                 return 0;
             }
 
-            var changeRequestTask = actionableTasks.FirstOrDefault(y => y.Type == WorkflowItemType.ChangeRequest);
-
-            if (changeRequestTask != null && changeRequestTask.PullRequestNumber.HasValue)
-            {
-                await WriteAdditionalContextAsync(ContextPromptService.GetChangeRequestPrompt(changeRequestTask.IssueNumber, changeRequestTask.PullRequestNumber.Value));
-                return 0;
-            }
-
-            var issuesNeedingPRLink = actionableTasks.Where(t => t.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(t => t.IssueNumber).ToList();
-
-            if (issuesNeedingPRLink.Count > 0)
-            {
-                await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
-                return 0;
-            }
-
-            var inProgressIssueTask = actionableTasks.FirstOrDefault(t => t.Type == WorkflowItemType.ResumeInProgressIssue);
-
-            if (inProgressIssueTask != null)
-            {
-                await WriteAdditionalContextAsync(ContextPromptService.GetInProgressIssuePrompt(inProgressIssueTask.IssueNumber));
-                return 0;
-            }
-
-            var newIssueTaskToPrompt = actionableTasks.FirstOrDefault(t => t.Type == WorkflowItemType.NewIssue);
-
-            if (newIssueTaskToPrompt != null)
-            {
-                var context = ContextPromptService.GetNewIssuePrompt(newIssueTaskToPrompt.IssueNumber);
-
-                await WriteAdditionalContextAsync(context);
-                return 0;
-            }
-
-
-            await WriteBlockAsync("No actionable workflow tasks found.");
+            await WriteAdditionalContextAsync(decision.AdditionalContext!);
             return 0;
 
         }

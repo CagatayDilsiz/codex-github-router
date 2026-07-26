@@ -1,4 +1,5 @@
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Workflow;
 
@@ -6,6 +7,7 @@ await AssertSingleWorkingIssueWithoutPullRequestAsync();
 await AssertMultipleWorkingIssuesBlockAsync();
 await AssertWorkingIssueWithOpenPullRequestAsync();
 AssertResumePromptIsSafe();
+AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -54,10 +56,23 @@ static void AssertResumePromptIsSafe()
 {
     var prompt = ContextPromptService.GetInProgressIssuePrompt(4);
 
-    Assert(prompt.Contains("git branch --all", StringComparison.Ordinal), "The resume prompt should inspect local branches.");
-    Assert(prompt.Contains("git ls-remote --heads origin", StringComparison.Ordinal), "The resume prompt should inspect remote branches.");
-    Assert(prompt.Contains("exists locally", StringComparison.Ordinal) && prompt.Contains("only on origin", StringComparison.Ordinal) && prompt.Contains("only locally", StringComparison.Ordinal) && prompt.Contains("no matching local or remote branch", StringComparison.Ordinal), "The resume prompt should cover local, remote, and missing-branch recovery cases.");
-    Assert(prompt.Contains("Do not create a new branch or pull request", StringComparison.Ordinal), "The resume prompt must prevent duplicate work.");
+    Assert(prompt.Contains("codex/issue-4-*", StringComparison.Ordinal), "The resume prompt should use the exact issue branch prefix.");
+    Assert(prompt.Contains("zero or multiple candidates", StringComparison.Ordinal), "The resume prompt should block ambiguous branch recovery.");
+    Assert(prompt.Contains("gh pr list --head <candidate-branch> --state all", StringComparison.Ordinal), "The resume prompt should inspect pull requests for the recovered branch.");
+    Assert(prompt.Contains("One open pull request", StringComparison.Ordinal) && prompt.Contains("One closed pull request", StringComparison.Ordinal) && prompt.Contains("Multiple pull requests", StringComparison.Ordinal), "The resume prompt should cover every recovered-branch pull request state.");
+    Assert(prompt.Contains("Do not recreate the branch", StringComparison.Ordinal), "The resume prompt must prevent duplicate work.");
+}
+
+static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
+{
+    var decision = HookTaskRouter.Route(new List<WorkflowItem>
+    {
+        new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 4 },
+        new() { Type = WorkflowItemType.NewIssue, IssueNumber = 5 }
+    });
+
+    Assert(decision.BlockReason is null, "A single working issue should not be blocked by routing.");
+    Assert(decision.AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Hook routing should emit resume context before ready-issue context.");
 }
 
 static void Assert(bool condition, string message)

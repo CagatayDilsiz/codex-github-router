@@ -15,7 +15,7 @@ public static class ContextPromptService
 
             3. If the issue is clear and the working directory is clean, run `cgr issue transition {number} working` to claim the work. Stop immediately if the transition fails; do not modify files, update branches, or create a work branch.
 
-            4. After the transition succeeds, update the default branch and create a new branch for the issue from that up-to-date default branch. Only then start modifying files.
+            4. After the transition succeeds, update the default branch and create a new branch named `codex/issue-{number}-<short-description>` from that up-to-date default branch. Only then start modifying files.
 
             5. Once you have completed the work on the issue, please submit a pull request and link it to the issue. Do not close the issue yourself, as it will be closed automatically when the pull request is merged. run `cgr issue transition {number} completed` to indicate that the work is complete and run `cgr pr transition <newly-created-pr-number> ready-for-review` to indicate that the issue/PR is ready for review.
 
@@ -33,11 +33,13 @@ public static class ContextPromptService
 
             2. Run `git status --short`. If the working tree has unrelated changes, do not modify files or create a branch.
 
-            3. Inspect existing branches with `git branch --all --list "*{number}*"` and `git ls-remote --heads origin "*{number}*"`. If the work branch exists locally, continue on it. If it exists only on origin, check out a tracking branch. If it exists only locally, preserve and continue that branch.
+            3. The only valid work-branch prefix for this issue is `codex/issue-{number}-`. Inspect matching branches with `git branch --all --list "codex/issue-{number}-*"` and `git ls-remote --heads origin "codex/issue-{number}-*"`. Reconcile the local and remote results into exactly one candidate. If there are zero or multiple candidates, stop and report the ambiguity; do not create a branch.
 
-            4. If no matching local or remote branch exists, report that the issue is already claimed but has no recoverable branch or linked pull request. Do not create a new branch or pull request, and do not transition the issue to working again.
+            4. If the candidate exists only on origin, check out a tracking branch. If it exists only locally, preserve and continue that branch. If it exists both locally and remotely, continue the existing local branch after syncing it.
 
-            5. If an existing branch is found and the issue is clear, continue the existing work. Do not recreate the branch, restart the issue, or open a duplicate pull request.
+            5. Before modifying files, run `gh pr list --head <candidate-branch> --state all --json number,state,url`. Zero pull requests means the existing work has no linked PR; report that fact and do not create one. One open pull request means inspect it with `gh pr view <number> --comments` and continue only on that branch. One closed pull request means report the closed-unmerged work and stop. Multiple pull requests are ambiguous: stop and report every PR number and state.
+
+            6. Do not recreate the branch, restart the issue, open a duplicate pull request, or transition the issue to working again.
         """;
     }
 
