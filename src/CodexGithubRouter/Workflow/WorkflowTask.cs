@@ -15,6 +15,7 @@ public enum WorkflowItemType
     ChangeRequest = 1,
     LinkPullRequestsToIssues = 2,
     NewIssue = 3,
+    ResumeInProgressIssue,
     AwaitingReview,
     AwaitingMerge,
     Deferred,

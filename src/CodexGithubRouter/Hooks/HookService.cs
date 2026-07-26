@@ -61,6 +61,14 @@ public static class HookService
                 return 0;
             }
 
+            var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, payload.Cwd);
+
+            if (!inProgressIssueTasks.IsSuccessful)
+            {
+                await WriteBlockAsync(inProgressIssueTasks.Message);
+                return 0;
+            }
+
             var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, payload.Cwd);
 
             if (!newIssueTask.IsSuccessful)
@@ -73,7 +81,7 @@ public static class HookService
             {
                 IsSuccessful = true,
                 Message = "Combined workflow tasks.",
-                Tasks = completedIssueTasks.Tasks.Concat(newIssueTask.Tasks).ToList()
+                Tasks = completedIssueTasks.Tasks.Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
             };
 
 
@@ -132,6 +140,14 @@ public static class HookService
             if (issuesNeedingPRLink.Count > 0)
             {
                 await WriteAdditionalContextAsync(ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()));
+                return 0;
+            }
+
+            var inProgressIssueTask = actionableTasks.FirstOrDefault(t => t.Type == WorkflowItemType.ResumeInProgressIssue);
+
+            if (inProgressIssueTask != null)
+            {
+                await WriteAdditionalContextAsync(ContextPromptService.GetInProgressIssuePrompt(inProgressIssueTask.IssueNumber));
                 return 0;
             }
 

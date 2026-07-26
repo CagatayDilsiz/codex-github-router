@@ -24,6 +24,23 @@ public static class ContextPromptService
         """;
     }
 
+    public static string GetInProgressIssuePrompt(int number)
+    {
+        return $"""
+            Issue #{number} is already marked as working and has no linked pull request. Resume or report this existing work; do not start a new issue.
+
+            1. Use `gh issue view {number} --comments` to review the issue and any available comments. An empty comments result is normal and does not need to be reported.
+
+            2. Run `git status --short`. If the working tree has unrelated changes, do not modify files or create a branch.
+
+            3. Inspect existing branches with `git branch --all --list "*{number}*"` and `git ls-remote --heads origin "*{number}*"`. If the work branch exists locally, continue on it. If it exists only on origin, check out a tracking branch. If it exists only locally, preserve and continue that branch.
+
+            4. If no matching local or remote branch exists, report that the issue is already claimed but has no recoverable branch or linked pull request. Do not create a new branch or pull request, and do not transition the issue to working again.
+
+            5. If an existing branch is found and the issue is clear, continue the existing work. Do not recreate the branch, restart the issue, or open a duplicate pull request.
+        """;
+    }
+
     public static string GetIssuesNeedPRLinkPrompt(int[] issueNumbers)
     {
         return $"""
