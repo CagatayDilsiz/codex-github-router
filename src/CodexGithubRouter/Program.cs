@@ -31,7 +31,7 @@ static int PrintVersion()
     var assembly = System.Reflection.Assembly.GetExecutingAssembly();
     var infoVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
         .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
-        .FirstOrDefault()?.InformationalVersion;
+        .FirstOrDefault()?.InformationalVersion ?? assembly.GetName().Version?.ToString() ?? "Unknown";
 
 
     Console.WriteLine("v" + infoVersion);

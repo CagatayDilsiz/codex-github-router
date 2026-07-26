@@ -28,7 +28,6 @@ public static class ConfigurationInitializer
         if (File.Exists(path) && !force)
         {
             Console.WriteLine($"Configuration already exists: {path}");
-
             return;
         }
 
@@ -50,7 +49,7 @@ public static class ConfigurationInitializer
 
         if (File.Exists(hooksFilePath))
         {
-            var result = await AppendToCodexHooksAsync(force, hooksFilePath, cancellationToken);          
+            var result = await AppendToCodexHooksAsync(force, hooksFilePath, cancellationToken);
             return result;
         }
         else
@@ -107,6 +106,8 @@ public static class ConfigurationInitializer
 
                 await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
+                Console.WriteLine($"Codex hooks configuration updated with 'cgr hook' command: {path}");
+
                 return 0;
             }
             else
@@ -127,6 +128,7 @@ public static class ConfigurationInitializer
                         userPrompt.Add(GetUserPromptSubmitHookGroup());
                         await WriteJsonAtomicallyAsync(path, root, cancellationToken);
 
+                        Console.WriteLine($"Codex hooks configuration updated with 'cgr hook' command: {path}");
                         return 0;
                     }
                     else
@@ -140,7 +142,7 @@ public static class ConfigurationInitializer
                     userPrompt.Add(GetUserPromptSubmitHookGroup());
 
                     await WriteJsonAtomicallyAsync(path, root, cancellationToken);
-
+                    Console.WriteLine($"Codex hooks configuration updated with 'cgr hook' command: {path}");
                     return 0;
                 }
             }
@@ -164,9 +166,8 @@ public static class ConfigurationInitializer
         };
     }
 
-    public static JsonObject GetCgrCommandBlock()
+    private static JsonObject GetCgrCommandBlock()
     {
-
         return new JsonObject
         {
             ["type"] = "command",
@@ -187,24 +188,6 @@ public static class ConfigurationInitializer
             .Any(handler =>
                 string.Equals(handler["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static JsonObject? GetExistingCgrCommandBlock(JsonArray groups, out JsonObject? existingCgrHook)
-    {
-        existingCgrHook = groups.FirstOrDefault(handler => handler is not null &&
-                string.Equals(handler["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase)) as JsonObject;
-
-        return existingCgrHook;
-    }
-
-    private static IEnumerable<JsonArray> GetUserPromptHookGroup(JsonArray userPrompt)
-    {
-        return userPrompt
-            .OfType<JsonObject>()
-            .Select(group => group["hooks"] as JsonArray)
-            .Where(handlers => handlers is not null)
-            .Select(handlers => handlers!);
     }
 
     private static async Task WriteJsonAtomicallyAsync(string path, JsonNode root, CancellationToken cancellationToken)
@@ -235,6 +218,8 @@ public static class ConfigurationInitializer
 
     private static void RemoveAllCgrCommandBlocks(JsonArray groups)
     {
+        var emptyGroups = new List<JsonObject>();
+
         foreach (var group in groups.OfType<JsonObject>())
         {
             if (group["hooks"] is not JsonArray hooks)
@@ -251,6 +236,16 @@ public static class ConfigurationInitializer
             {
                 hooks.Remove(hook);
             }
+
+            if (hooks.Count == 0)
+            {
+                emptyGroups.Add(group);
+            }
+        }
+
+        foreach (var emptyGroup in emptyGroups)
+        {
+            groups.Remove(emptyGroup);
         }
     }
 
