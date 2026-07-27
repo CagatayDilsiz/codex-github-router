@@ -14,6 +14,7 @@ public sealed class PullRequestSelection
     public bool ClosingIssuesReferences { get; init; } = false;
 
     public bool CreatedAt { get; init; } = false;
+    public bool HeadRefName { get; init; } = false;
     public bool UpdatedAt { get; init; } = false;
 
     public string ToSelectionString()
@@ -22,6 +23,7 @@ public sealed class PullRequestSelection
 
         if (Id) selectedFields.Add("id");
         if (CreatedAt) selectedFields.Add("createdAt");
+        if (HeadRefName) selectedFields.Add("headRefName");
         if (Number) selectedFields.Add("number");
         if (State) selectedFields.Add("state");
         if (Labels) selectedFields.Add("labels");
@@ -47,6 +49,7 @@ public sealed class PullRequestSelection
             Comments = true,
             ClosingIssuesReferences = true,
             CreatedAt = true,
+            HeadRefName = true,
             UpdatedAt = true
         };
     }

@@ -66,6 +66,10 @@ public static class GitHubCliService
 
         if (process.ExitCode != 0)
         {
+            if (IsConfirmedNotFound(process.Error))
+            {
+                throw new GitHubItemNotFoundException($"GitHub pull request was not found: {process.Error}");
+            }
             throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
         }
 
@@ -179,13 +183,17 @@ public static class GitHubCliService
             "view",
             issueNumber.ToString(CultureInfo.InvariantCulture),
             "--json",
-            "number,title,url,labels,createdAt,updatedAt"
+            "number,title,url,labels,createdAt,updatedAt,state,closedByPullRequestsReferences"
         };
 
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
 
         if (process.ExitCode != 0)
         {
+            if (IsConfirmedNotFound(process.Error))
+            {
+                throw new GitHubItemNotFoundException($"GitHub issue was not found: {process.Error}");
+            }
             throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
         }
 
@@ -322,4 +330,9 @@ public static class GitHubCliService
 
         return $"sort:{fieldName}-{directionName}";
     }
+
+    public static bool IsConfirmedNotFound(string error) =>
+        error.Contains("could not resolve to an issue", StringComparison.OrdinalIgnoreCase) ||
+        error.Contains("could not resolve to a pull request", StringComparison.OrdinalIgnoreCase) ||
+        error.Contains("could not resolve to a pullrequest", StringComparison.OrdinalIgnoreCase);
 }

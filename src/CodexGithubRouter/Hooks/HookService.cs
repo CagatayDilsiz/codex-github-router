@@ -3,6 +3,8 @@ using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Git;
+using CodexGithubRouter.Work;
 
 namespace CodexGithubRouter.Hooks;
 
@@ -50,73 +52,39 @@ public static class HookService
             }
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+            var gitCommonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(payload.Cwd)
+                ?? throw new InvalidOperationException("Not a valid Git repository.");
 
-            var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
-
-
-            if (!completedIssueTasks.IsSuccessful)
+            await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory);
+            if (activeClaim is not null && !string.Equals(activeClaim.OwnerSessionId, payload.SessionId, StringComparison.Ordinal))
             {
-                await WriteBlockAsync(completedIssueTasks.Message);
+                await WriteBlockAsync($"Active work claim for issue #{activeClaim.IssueNumber}{(activeClaim.PullRequestNumber.HasValue ? $" / pull request #{activeClaim.PullRequestNumber.Value}" : string.Empty)} is owned by another Codex session.");
                 return 0;
             }
 
-            var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, payload.Cwd);
-
-            if (!inProgressIssueTasks.IsSuccessful)
+            if (activeClaim is not null)
             {
-                await WriteBlockAsync(inProgressIssueTasks.Message);
-                return 0;
+                var claimedDecision = await RouteActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, activeClaim);
+                if (claimedDecision is not null)
+                {
+                    if (!string.IsNullOrWhiteSpace(claimedDecision.BlockReason))
+                    {
+                        await WriteBlockAsync(claimedDecision.BlockReason);
+                    }
+                    else
+                    {
+                        await WriteAdditionalContextAsync(claimedDecision.AdditionalContext!);
+                    }
+
+                    return 0;
+                }
+
+                // The claim was safely released during claimed-work recovery. Continue through
+                // the normal no-claim route in this same hook invocation.
             }
 
-            var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, payload.Cwd);
-
-            if (!newIssueTask.IsSuccessful)
-            {
-                await WriteBlockAsync(newIssueTask.Message);
-                return 0;
-            }
-
-            var combinedTasks = new WorkflowResponse
-            {
-                IsSuccessful = true,
-                Message = "Combined workflow tasks.",
-                Tasks = completedIssueTasks.Tasks.Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
-            };
-
-
-            if (combinedTasks.Tasks.Count == 0)
-            {
-                await WriteBlockAsync("No actionable workflow tasks found.");
-                return 0;
-            }
-
-            var actionableTasks = combinedTasks.Tasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
-
-            if (actionableTasks.Count == 0)
-            {
-                await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");
-                return 0;
-            }
-
-            // close any issues that are marked for closure before hook blocker
-            var closingIssueTasks = actionableTasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
-
-            foreach (var closingIssueTask in closingIssueTasks)
-            {
-                await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
-            }
-
-            var decision = HookTaskRouter.Route(actionableTasks);
-
-            if (!string.IsNullOrWhiteSpace(decision.BlockReason))
-            {
-                await WriteBlockAsync(decision.BlockReason);
-                return 0;
-            }
-
-            await WriteAdditionalContextAsync(decision.AdditionalContext!);
-            return 0;
-
+            return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId);
         }
         catch (JsonException exception)
         {
@@ -135,6 +103,162 @@ public static class HookService
             return 0;
         }
     }
+
+    private static Task<HookTaskDecision?> RouteActiveClaimAsync(
+        string workingDirectory,
+        string gitCommonDirectory,
+        RouterConfiguration configuration,
+        string? sessionId,
+        WorkClaim activeClaim)
+        => ActiveClaimRouteService.Create(workingDirectory, gitCommonDirectory, configuration)
+            .RouteAsync(activeClaim, sessionId);
+
+    private static async Task<int> RunWithoutActiveClaimAsync(
+        string workingDirectory,
+        string gitCommonDirectory,
+        RouterConfiguration configuration,
+        string? sessionId,
+        bool allowNoClaimReroute = true)
+    {
+        var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory);
+        if (!completedIssueTasks.IsSuccessful)
+        {
+            await WriteBlockAsync(completedIssueTasks.Message);
+            return 0;
+        }
+
+        var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, workingDirectory);
+        if (!inProgressIssueTasks.IsSuccessful)
+        {
+            await WriteBlockAsync(inProgressIssueTasks.Message);
+            return 0;
+        }
+
+        var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, workingDirectory);
+        if (!newIssueTask.IsSuccessful)
+        {
+            await WriteBlockAsync(newIssueTask.Message);
+            return 0;
+        }
+
+        var combinedTasks = new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Message = "Combined workflow tasks.",
+            Tasks = completedIssueTasks.Tasks.Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
+        };
+
+        if (combinedTasks.Tasks.Count == 0)
+        {
+            await WriteBlockAsync("No actionable workflow tasks found.");
+            return 0;
+        }
+
+        var actionableTasks = combinedTasks.Tasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
+        if (actionableTasks.Count == 0)
+        {
+            await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");
+            return 0;
+        }
+
+        // Close issues marked for closure before evaluating hook blockers.
+        foreach (var closingIssueTask in actionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue))
+        {
+            await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber, CancellationToken.None);
+        }
+
+        var decision = HookTaskRouter.Route(actionableTasks);
+        if (!string.IsNullOrWhiteSpace(decision.BlockReason))
+        {
+            await WriteBlockAsync(decision.BlockReason);
+            return 0;
+        }
+
+        if (decision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(decision.SelectedTask))
+        {
+            if (string.IsNullOrWhiteSpace(sessionId))
+            {
+                await WriteBlockAsync("Cannot acquire repository work: the hook payload did not include a session ID.");
+                return 0;
+            }
+
+            var claimType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
+                ? WorkClaimType.ChangeRequest
+                : WorkClaimType.Implementation;
+            var claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
+            var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
+            {
+                OwnerSessionId = sessionId,
+                IssueNumber = decision.SelectedTask.IssueNumber,
+                PullRequestNumber = decision.SelectedTask.PullRequestNumber,
+                WorkType = claimType,
+                ClaimedIssueUpdatedAt = claimedIssue.UpdatedAt
+            });
+            if (!acquisition.Acquired)
+            {
+                await WriteBlockAsync(acquisition.BlockReason ?? "Could not acquire the repository work claim.");
+                return 0;
+            }
+
+            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? acquisition.Claim;
+            if (acquiredClaim is null)
+            {
+                await WriteBlockAsync("Repository work was acquired but could not be re-read safely.");
+                return 0;
+            }
+
+            var refreshedClaimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, acquiredClaim);
+            if (!refreshedClaimedWork.IsSuccessful)
+            {
+                await WriteBlockAsync(refreshedClaimedWork.Message);
+                return 0;
+            }
+
+            if (IsReleaseCandidate(refreshedClaimedWork))
+            {
+                if (await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, configuration))
+                {
+                    if (allowNoClaimReroute)
+                    {
+                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, configuration, sessionId, false);
+                    }
+
+                    await WriteBlockAsync("The acquired work became passive or terminal during refresh and was released; no second routing pass is allowed in this invocation.");
+                    return 0;
+                }
+
+                await WriteBlockAsync($"Active work claim for issue #{acquiredClaim.IssueNumber}{FormatPullRequest(acquiredClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.");
+                return 0;
+            }
+
+            var refreshedDecision = HookTaskRouter.RouteClaimedWork(
+                acquiredClaim,
+                sessionId,
+                refreshedClaimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList());
+            if (!string.IsNullOrWhiteSpace(refreshedDecision.BlockReason))
+            {
+                await WriteBlockAsync(refreshedDecision.BlockReason);
+                return 0;
+            }
+
+            await WriteAdditionalContextAsync(refreshedDecision.AdditionalContext!);
+            return 0;
+        }
+
+        await WriteAdditionalContextAsync(decision.AdditionalContext!);
+        return 0;
+    }
+
+    private static bool IsReleaseCandidate(WorkflowResponse response) =>
+        response.Tasks.Count == 1 && response.Tasks[0].Type is
+            WorkflowItemType.AwaitingReview or
+            WorkflowItemType.AwaitingMerge or
+            WorkflowItemType.Deferred or
+            WorkflowItemType.CloseIssue or
+            WorkflowItemType.ClosedWithoutMerge;
+
+    private static string FormatPullRequest(int? pullRequestNumber) =>
+        pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 
     private static Task WriteBlockAsync(string reason)
     {

@@ -1,9 +1,244 @@
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Work;
 
 namespace CodexGithubRouter.Workflow;
 
 public static class WorkflowService
 {
+    public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim)
+    {
+        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
+        return await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
+            workingDirectory,
+            pullRequestNumber,
+            new PullRequestSelection
+            {
+                Number = true,
+                State = true,
+                Labels = true,
+                CreatedAt = true,
+                HeadRefName = true,
+                ClosingIssuesReferences = true
+            },
+            CancellationToken.None));
+    }
+
+    public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest)
+    {
+        var issueResolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
+        if (issueResolution.IsAmbiguous)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = issueResolution.DescribeConflict($"claimed issue #{claim.IssueNumber}") };
+        }
+
+        if (!claim.PullRequestNumber.HasValue)
+        {
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.Ready))
+            {
+                return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.NewIssue, IssueNumber = claim.IssueNumber } } };
+            }
+
+            if (!issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress) && !issueResolution.MatchedLabels.ContainsKey(WorkflowState.Completed))
+            {
+                return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} cannot be resolved from its current issue state." };
+            }
+
+            if (issue.ClosingPullRequestsReferences.Count == 0)
+            {
+                return new WorkflowResponse
+                {
+                    IsSuccessful = true,
+                    Tasks = new List<WorkflowItem>
+                    {
+                        new()
+                        {
+                            Type = issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress)
+                                ? WorkflowItemType.ResumeInProgressIssue
+                                : WorkflowItemType.RecoverCompletedIssue,
+                            IssueNumber = claim.IssueNumber
+                        }
+                    }
+                };
+            }
+
+            var currentPullRequests = await GetCurrentClaimPullRequestsAsync(claim, issue, getPullRequest);
+            if (currentPullRequests.Count > 1)
+            {
+                return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} has multiple current pull requests and cannot choose a pull-request identity implicitly." };
+            }
+
+            if (currentPullRequests.Count == 0)
+            {
+                if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress))
+                {
+                    return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = claim.IssueNumber } } };
+                }
+
+                return new WorkflowResponse
+                {
+                    IsSuccessful = true,
+                    Tasks = new List<WorkflowItem>
+                    {
+                        new()
+                        {
+                            Type = WorkflowItemType.RecoverCompletedIssue,
+                            IssueNumber = claim.IssueNumber,
+                            Status = new WorkflowTaskStatus
+                            {
+                                Message = $"Completed issue #{claim.IssueNumber} needs safe branch and pull-request recovery."
+                            }
+                        }
+                    }
+                };
+            }
+
+            return EvaluateClaimedPullRequest(configuration, claim, currentPullRequests[0]);
+        }
+
+        if (!issue.ClosingPullRequestsReferences.Any(reference => reference.Number == claim.PullRequestNumber.Value))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{claim.PullRequestNumber.Value} cannot be resolved because the pull request does not close the claimed issue." };
+        }
+
+        var pullRequest = await getPullRequest(claim.PullRequestNumber.Value);
+        return EvaluateClaimedPullRequest(configuration, claim, pullRequest);
+    }
+
+    private static async Task<List<PullRequest>> GetCurrentClaimPullRequestsAsync(
+        WorkClaim claim,
+        Issue issue,
+        Func<int, Task<PullRequest>> getPullRequest)
+    {
+        var currentPullRequests = new List<PullRequest>();
+        foreach (var reference in issue.ClosingPullRequestsReferences)
+        {
+            PullRequest pullRequest;
+            try
+            {
+                pullRequest = await getPullRequest(reference.Number);
+            }
+            catch (GitHubItemNotFoundException)
+            {
+                continue;
+            }
+
+            if (IsCurrentClaimPullRequest(claim, issue, pullRequest))
+            {
+                currentPullRequests.Add(pullRequest);
+            }
+        }
+
+        return currentPullRequests;
+    }
+
+    public static bool IsCurrentClaimPullRequest(WorkClaim claim, Issue issue, PullRequest pullRequest)
+    {
+        // A claim without a GitHub-derived baseline cannot prove ownership of
+        // a linked PR. This is intentionally conservative for legacy claim
+        // files written before ClaimedIssueUpdatedAt was persisted.
+        if (claim.ClaimedIssueUpdatedAt == default || pullRequest.CreatedAt < claim.ClaimedIssueUpdatedAt)
+        {
+            return false;
+        }
+
+        if (!pullRequest.ClosingIssuesReferences.Any(reference => reference.Number == issue.Number))
+        {
+            return false;
+        }
+
+        var branchPrefix = $"codex/issue-{issue.Number}";
+        return string.Equals(pullRequest.HeadRefName, branchPrefix, StringComparison.OrdinalIgnoreCase) ||
+            pullRequest.HeadRefName.StartsWith(branchPrefix + "-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static WorkflowResponse EvaluateClaimedPullRequest(RouterConfiguration configuration, WorkClaim claim, PullRequest pullRequest)
+    {
+        var pullRequestResolution = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
+        if (pullRequestResolution.IsAmbiguous)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = pullRequestResolution.DescribeConflict($"claimed pull request #{pullRequest.Number}") };
+        }
+
+        if (string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem>
+                {
+                    new()
+                    {
+                        Type = WorkflowItemType.CloseIssue,
+                        IssueNumber = claim.IssueNumber,
+                        PullRequestNumber = pullRequest.Number,
+                        Status = new WorkflowTaskStatus { Message = $"Linked pull request #{pullRequest.Number} is merged and issue #{claim.IssueNumber} can be closed." }
+                    }
+                }
+            };
+        }
+
+        if (string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem>
+                {
+                    new()
+                    {
+                        Type = WorkflowItemType.ClosedWithoutMerge,
+                        IssueNumber = claim.IssueNumber,
+                        PullRequestNumber = pullRequest.Number,
+                        Status = new WorkflowTaskStatus { Message = $"Linked pull request #{pullRequest.Number} is closed without merge. Review the pull request before continuing." }
+                    }
+                }
+            };
+        }
+
+        if (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{pullRequest.Number} cannot be resolved because the pull request is {pullRequest.State}." };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.ChangesRequested))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ChangeRequest, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.ReviewRequested))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.AwaitingReview, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.AwaitingMerge, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.Deferred))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.Deferred, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
+        }
+
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new()
+                {
+                    Type = WorkflowItemType.RecoverCurrentPullRequest,
+                    IssueNumber = claim.IssueNumber,
+                    PullRequestNumber = pullRequest.Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Current pull request #{pullRequest.Number} for issue #{claim.IssueNumber} has no workflow label and needs lifecycle recovery."
+                    }
+                }
+            }
+        };
+    }
+
     public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
     {
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);

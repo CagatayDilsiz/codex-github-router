@@ -2,6 +2,7 @@ using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Work;
 namespace CodexGithubRouter.GitHub;
 
 public static class IssuesCommandHandler
@@ -69,14 +70,23 @@ public static class IssuesCommandHandler
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
           
             var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
 
             if (issueTransition.LabelsToAdd.Count == 0 && issueTransition.LabelsToRemove.Count == 0)
             {
+                if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
+                {
+                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                }
                 Console.WriteLine($"Issue #{issueNumber} is already in state '{targetState}'.");
                 return 0;
             }
 
             await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
+            if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
+            {
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+            }
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }
         catch (Exception ex)

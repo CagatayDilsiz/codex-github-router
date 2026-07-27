@@ -21,7 +21,9 @@ public enum WorkflowItemType
     Deferred,
     ClosedWithoutMerge,
     UnknownPullRequestState,
-    CloseIssue 
+    CloseIssue,
+    RecoverCompletedIssue,
+    RecoverCurrentPullRequest
 }
 
 public class WorkflowTaskStatus

@@ -56,6 +56,40 @@ public static class ContextPromptService
         """;
     }
 
+    public static string GetCompletedIssueRecoveryPrompt(int issueNumber)
+    {
+        return $"""
+            Recover the completed implementation for issue #{issueNumber} without starting unrelated work or recreating the implementation.
+
+            1. Confirm the issue is still completed and inspect its closing pull-request references. Historical or closed pull requests are evidence only; do not attach one as the current implementation.
+
+            2. Inspect the exact implementation branch candidates with `git branch --all --list "codex/issue-{issueNumber}-*"` and `git ls-remote --heads origin "codex/issue-{issueNumber}-*"`. Reconcile local and remote results by branch identity. Stop safely and report the ambiguity if there are zero or multiple candidate branch identities; never invent a branch name.
+
+            3. For the single candidate branch, inspect every pull request across all states with `gh pr list --head <candidate-branch> --state all --json number,state,headRefName,body`. Stop if multiple pull requests exist. A closed-unmerged pull request is historical and must not be recreated or silently reused.
+
+            4. If no pull request exists, inspect the branch to confirm it contains the completed implementation, then create exactly one pull request from that existing branch with a closing reference such as `Fixes #{issueNumber}`. Do not create a second pull request.
+
+            5. If exactly one current pull request exists but it is not linked to the issue, edit only its body to add `Fixes #{issueNumber}`. Then run `cgr issue transition {issueNumber} completed` and, when the pull request is ready, run `cgr pr transition <pull-request-number> ready-for-review`.
+
+            6. Do not start the issue again, create a new implementation branch, merge a pull request, close the issue manually, or route unrelated work. If branch identity, pull-request identity, or implementation completeness cannot be proven, stop and report the evidence.
+        """;
+    }
+
+    public static string GetCurrentPullRequestRecoveryPrompt(int issueNumber, int pullRequestNumber)
+    {
+        return $"""
+            Recover the exact current pull request #{pullRequestNumber} for issue #{issueNumber}. Do not create another pull request or route unrelated work.
+
+            1. Inspect pull request #{pullRequestNumber} and its head branch. Confirm it is the current implementation PR for issue #{issueNumber}; preserve this exact issue/PR identity.
+
+            2. If the pull request body does not contain a closing reference, edit only the body and add `Fixes #{issueNumber}`. Do not create a duplicate pull request.
+
+            3. If implementation is complete, run `cgr issue transition {issueNumber} completed` and then run `cgr pr transition {pullRequestNumber} ready-for-review`. If either transition is already in the requested state, retrying it must remain safe.
+
+            4. Do not merge or close the pull request, create a new branch, restart the issue, or work on unrelated tasks. If the exact pull request or implementation state cannot be verified, stop and report the evidence.
+        """;
+    }
+
     public static string GetChangeRequestPrompt(int issueNumber, int pullRequestNumber)
     {
         return $"""
