@@ -26,7 +26,7 @@ public static class WorkflowService
                 return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.NewIssue, IssueNumber = claim.IssueNumber } } };
             }
 
-            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress) && issue.ClosingPullRequestsReferences.Count == 0)
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress))
             {
                 return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = claim.IssueNumber } } };
             }
@@ -65,6 +65,42 @@ public static class WorkflowService
         if (pullRequestResolution.IsAmbiguous)
         {
             return new WorkflowResponse { IsSuccessful = false, Message = pullRequestResolution.DescribeConflict($"claimed pull request #{pullRequest.Number}") };
+        }
+
+        if (string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem>
+                {
+                    new()
+                    {
+                        Type = WorkflowItemType.CloseIssue,
+                        IssueNumber = claim.IssueNumber,
+                        PullRequestNumber = pullRequest.Number,
+                        Status = new WorkflowTaskStatus { Message = $"Linked pull request #{pullRequest.Number} is merged and issue #{claim.IssueNumber} can be closed." }
+                    }
+                }
+            };
+        }
+
+        if (string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem>
+                {
+                    new()
+                    {
+                        Type = WorkflowItemType.ClosedWithoutMerge,
+                        IssueNumber = claim.IssueNumber,
+                        PullRequestNumber = pullRequest.Number,
+                        Status = new WorkflowTaskStatus { Message = $"Linked pull request #{pullRequest.Number} is closed without merge. Review the pull request before continuing." }
+                    }
+                }
+            };
         }
 
         if (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase))

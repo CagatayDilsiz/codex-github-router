@@ -267,12 +267,16 @@ static async Task AssertClaimedWorkRecoveryAsync()
     var working = WorkingIssue(4);
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => throw new InvalidOperationException())).Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A working PR-less claim without a linked pull request must resume implementation.");
     working.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 21 });
-    var changeRequest = new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
-    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => Task.FromResult(changeRequest))).Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A working PR-less claim with a linked pull request must evaluate that pull request.");
+    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => throw new InvalidOperationException("Historical passive PR must not be associated while work is in progress."))).Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A new PR-less implementation claim must ignore an old passive linked pull request while the issue is working.");
     var completed = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:done" } } };
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => throw new InvalidOperationException())).Tasks.Single().Type == WorkflowItemType.LinkPullRequestsToIssues, "A completed PR-less claim without a linked pull request must recover PR-link work.");
     completed.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 21 });
+    var changeRequest = new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(changeRequest))).Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A completed PR-less claim with a linked active pull request must evaluate that pull request.");
+    var mergedPullRequest = new PullRequest { Number = 21, State = "merged" };
+    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(mergedPullRequest))).Tasks.Single().Type == WorkflowItemType.CloseIssue, "A completed PR-less claim with a merged linked pull request must become terminal cleanup work.");
+    var closedPullRequest = new PullRequest { Number = 21, State = "closed" };
+    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(closedPullRequest))).Tasks.Single().Type == WorkflowItemType.ClosedWithoutMerge, "A completed PR-less claim with a closed-unmerged linked pull request must become terminal cleanup work.");
     var prClaim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest };
     var deferred = new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:deferred" } } };
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, prClaim, completed, _ => Task.FromResult(deferred))).Tasks.Single().Type == WorkflowItemType.Deferred, "A deferred claimed pull request must be represented as passive work.");

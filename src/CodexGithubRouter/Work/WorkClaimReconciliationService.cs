@@ -17,7 +17,8 @@ public static class WorkClaimReconciliationService
 
     public static bool IsPassiveOrTerminal(PullRequest pullRequest, RouterConfiguration configuration)
     {
-        if (string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase)) return true;
+        if (string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase)) return true;
         if (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase)) return false;
 
         var state = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
@@ -56,8 +57,37 @@ public static class WorkClaimReconciliationService
                 return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
             }
         }
+        else if (IsCompleted(issue, configuration) && issue.ClosingPullRequestsReferences.Count == 1)
+        {
+            var linkedPullRequestNumber = issue.ClosingPullRequestsReferences[0].Number;
+            try
+            {
+                claimedPullRequest = await GitHubCliService.GetPullRequestByNumberAsync(
+                    workingDirectory,
+                    linkedPullRequestNumber,
+                    new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true },
+                    cancellationToken);
+            }
+            catch (GitHubItemNotFoundException)
+            {
+                claimedPullRequest = null;
+            }
+
+            if (claimedPullRequest is not null &&
+                claimedPullRequest.ClosingIssuesReferences.Any(reference => reference.Number == claim.IssueNumber) &&
+                IsPassiveOrTerminal(claimedPullRequest, configuration))
+            {
+                return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
+            }
+        }
 
         return ShouldRelease(claim, issue, claimedPullRequest, configuration) && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
+    }
+
+    private static bool IsCompleted(Issue issue, RouterConfiguration configuration)
+    {
+        var resolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
+        return !resolution.IsAmbiguous && resolution.MatchedLabels.ContainsKey(WorkflowState.Completed);
     }
 
     public static bool ShouldReleaseForPullRequestTransition(WorkClaim? claim, int pullRequestNumber, PullRequestState targetState) =>
