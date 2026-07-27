@@ -62,6 +62,18 @@ cgr auto status
 cgr auto on
 ```
 
+### Active work claims
+
+CGR keeps at most one active coding claim in the repository Git common directory, so every worktree observes the same owner. Inspect or recover the claim with:
+
+```bash
+cgr work status
+cgr work reconcile
+cgr work release --issue <number>
+```
+
+`reconcile` removes only claims that GitHub shows as passive or terminal. `release` is an explicit user recovery action and only removes the claim for the supplied issue.
+
 Autonomous mode is repository-specific. When it is enabled, the Codex hook can route prompts according to the configured GitHub issue and pull-request workflow. `cgr auto on` validates the workflow configuration and creates only missing labels referenced by its issue and pull-request label rules; existing labels are never changed. CGR stores the applied configuration fingerprint in the repository's shared Git directory so the same setup also works from Git worktrees. After changing the workflow configuration, run `cgr auto on` again to provision any newly required labels safely.
 
 When a single issue is already in the configured `working` state, it takes precedence over ready issues. New work branches use `codex/issue-<number>-<short-description>`; CGR only recovers branches with that exact issue prefix, then checks pull requests for the recovered branch before allowing work to continue. CGR never starts a second issue, branch, or pull request. Multiple working issues are treated as an ambiguous workflow state and block the hook until resolved. A working issue whose linked open pull requests are all `deferred` is non-blocking, so ready work may proceed.

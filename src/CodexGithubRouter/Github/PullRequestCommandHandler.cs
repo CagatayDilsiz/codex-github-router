@@ -2,6 +2,7 @@ using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Work;
 namespace CodexGithubRouter.GitHub;
 
 public static class PullRequestCommandHandler
@@ -87,6 +88,7 @@ public static class PullRequestCommandHandler
             {
                 Number = true,
                 Labels = true,
+                ClosingIssuesReferences = true,
             }; // You can customize the selection as needed
 
             var pullRequestToTransition = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, pullRequestSelection, CancellationToken.None);
@@ -100,6 +102,13 @@ public static class PullRequestCommandHandler
             }
 
             await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
+            if (targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge)
+            {
+                foreach (var issue in pullRequestToTransition.ClosingIssuesReferences)
+                {
+                    await WorkClaimStore.ReleaseForIssueAsync(gitCommonDir, issue.Number);
+                }
+            }
             Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
         }
         catch (Exception ex)

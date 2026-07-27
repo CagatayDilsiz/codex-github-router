@@ -21,6 +21,9 @@ public class Issue
     [JsonPropertyName("updatedAt")]
     public DateTimeOffset UpdatedAt { get; set; }
 
+    [JsonPropertyName("state")]
+    public string State { get; set; } = string.Empty;
+
     [JsonPropertyName("closedByPullRequestsReferences")]
     public List<ClosingIssueReference> ClosingPullRequestsReferences { get; set; } = new List<ClosingIssueReference>();
 }

@@ -2,6 +2,7 @@ using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Work;
 namespace CodexGithubRouter.GitHub;
 
 public static class IssuesCommandHandler
@@ -77,6 +78,10 @@ public static class IssuesCommandHandler
             }
 
             await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
+            if (targetState is WorkflowState.Blocked or WorkflowState.NeedsInfo or WorkflowState.Abandoned)
+            {
+                await WorkClaimStore.ReleaseForIssueAsync(gitCommonDir, issueNumber);
+            }
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }
         catch (Exception ex)

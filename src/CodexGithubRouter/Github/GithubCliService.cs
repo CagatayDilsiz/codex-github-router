@@ -179,7 +179,7 @@ public static class GitHubCliService
             "view",
             issueNumber.ToString(CultureInfo.InvariantCulture),
             "--json",
-            "number,title,url,labels,createdAt,updatedAt"
+            "number,title,url,labels,createdAt,updatedAt,state,closedByPullRequestsReferences"
         };
 
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);

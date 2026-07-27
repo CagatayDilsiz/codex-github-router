@@ -7,6 +7,7 @@ public sealed class HookTaskDecision
 {
     public string? BlockReason { get; init; }
     public string? AdditionalContext { get; init; }
+    public WorkflowItem? SelectedTask { get; init; }
 }
 
 public static class HookTaskRouter
@@ -15,8 +16,6 @@ public static class HookTaskRouter
     {
         var blockingTypes = new HashSet<WorkflowItemType>
         {
-            WorkflowItemType.AwaitingReview,
-            WorkflowItemType.AwaitingMerge,
             WorkflowItemType.ClosedWithoutMerge,
             WorkflowItemType.UnknownPullRequestState,
             WorkflowItemType.Unknown
@@ -31,7 +30,7 @@ public static class HookTaskRouter
         var changeRequest = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.ChangeRequest && task.PullRequestNumber.HasValue);
         if (changeRequest is not null)
         {
-            return new HookTaskDecision { AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
+            return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
         }
 
         var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber).ToList();
@@ -43,13 +42,13 @@ public static class HookTaskRouter
         var inProgressIssue = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.ResumeInProgressIssue);
         if (inProgressIssue is not null)
         {
-            return new HookTaskDecision { AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber) };
         }
 
         var newIssue = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.NewIssue);
         if (newIssue is not null)
         {
-            return new HookTaskDecision { AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber) };
         }
 
         return new HookTaskDecision { BlockReason = "No actionable workflow tasks found." };

@@ -3,6 +3,8 @@ using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Git;
+using CodexGithubRouter.Work;
 
 namespace CodexGithubRouter.Hooks;
 
@@ -50,6 +52,10 @@ public static class HookService
             }
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+            var gitCommonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(payload.Cwd)
+                ?? throw new InvalidOperationException("Not a valid Git repository.");
+
+            await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
 
             var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
@@ -112,6 +118,31 @@ public static class HookService
             {
                 await WriteBlockAsync(decision.BlockReason);
                 return 0;
+            }
+
+            if (decision.SelectedTask is not null)
+            {
+                if (string.IsNullOrWhiteSpace(payload.SessionId))
+                {
+                    await WriteBlockAsync("Cannot acquire repository work: the hook payload did not include a session ID.");
+                    return 0;
+                }
+
+                var claimType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
+                    ? WorkClaimType.ChangeRequest
+                    : WorkClaimType.Implementation;
+                var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
+                {
+                    OwnerSessionId = payload.SessionId,
+                    IssueNumber = decision.SelectedTask.IssueNumber,
+                    PullRequestNumber = decision.SelectedTask.PullRequestNumber,
+                    WorkType = claimType
+                });
+                if (!acquisition.Acquired)
+                {
+                    await WriteBlockAsync(acquisition.BlockReason ?? "Could not acquire the repository work claim.");
+                    return 0;
+                }
             }
 
             await WriteAdditionalContextAsync(decision.AdditionalContext!);

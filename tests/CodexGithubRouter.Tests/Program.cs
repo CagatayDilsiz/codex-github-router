@@ -2,6 +2,7 @@ using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Prompts;
+using CodexGithubRouter.Work;
 using CodexGithubRouter.Workflow;
 
 await AssertSingleWorkingIssueWithoutPullRequestAsync();
@@ -14,6 +15,9 @@ AssertWorkflowLabelConflictResolution();
 await AssertPullRequestLabelConflictHandlingAsync();
 AssertIssueAliasSearchUsesOrSemantics();
 AssertVersionNormalization();
+await AssertWorkClaimsAsync();
+AssertPassiveReviewDoesNotBlockNewWork();
+AssertWorkClaimReconciliation();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -85,13 +89,13 @@ static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
 
 static void AssertHookRoutePrecedence()
 {
-    var blocker = new WorkflowItem { Type = WorkflowItemType.AwaitingReview, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Review pending." } };
+    var blocker = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
     var changeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20 };
     var linkPullRequest = new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 3 };
     var resume = new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 4 };
     var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 };
 
-    Assert(HookTaskRouter.Route(new[] { blocker, changeRequest, linkPullRequest, resume, newIssue }).BlockReason == "Review pending.", "Blockers must take precedence over every hook context.");
+    Assert(HookTaskRouter.Route(new[] { blocker, changeRequest, linkPullRequest, resume, newIssue }).BlockReason == "Closed without merge.", "Blockers must take precedence over every hook context.");
     Assert(HookTaskRouter.Route(new[] { changeRequest, linkPullRequest, resume, newIssue }).AdditionalContext?.Contains("pull request #20", StringComparison.Ordinal) == true, "Change requests must take precedence after blockers.");
     Assert(HookTaskRouter.Route(new[] { linkPullRequest, resume, newIssue }).AdditionalContext?.Contains("following issues: 3", StringComparison.Ordinal) == true, "PR-linking work must take precedence over resume and new work.");
     Assert(HookTaskRouter.Route(new[] { resume, newIssue }).AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Resume work must take precedence over new work.");
@@ -149,6 +153,49 @@ static void AssertVersionNormalization()
     Assert(VersionFormatter.Normalize("0.0.1-alpha+23523532463463463") == "0.0.1-alpha", "Build metadata must be removed while preserving prerelease versions.");
     Assert(VersionFormatter.Normalize("1.2.3") == "1.2.3", "Stable versions must remain unchanged.");
     Assert(VersionFormatter.Normalize(null) == "Unknown", "Missing version metadata must use the safe fallback.");
+}
+
+static async Task AssertWorkClaimsAsync()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"cgr-work-claim-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var attempts = await Task.WhenAll(Enumerable.Range(0, 8).Select(number => WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = $"session-{number}", IssueNumber = 4, WorkType = WorkClaimType.Implementation })));
+    Assert(attempts.Count(result => result.Acquired) == 1, "Simultaneous claim attempts must produce exactly one owner.");
+    var owner = attempts.Single(result => result.Acquired).Claim!.OwnerSessionId;
+    var continuation = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    Assert(continuation.Acquired, "The owning session must be able to continue its existing claim.");
+    var otherSession = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-other", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    Assert(!otherSession.Acquired && otherSession.BlockReason?.Contains("another Codex session", StringComparison.Ordinal) == true, "A different session must be blocked from the same claim.");
+    var otherIssue = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 5, WorkType = WorkClaimType.Implementation });
+    Assert(!otherIssue.Acquired, "A repository may have only one active claim.");
+    Assert(await WorkClaimStore.ReleaseForIssueAsync(directory, 4), "An explicit release must remove the current claim.");
+    Assert((await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 5, WorkType = WorkClaimType.Implementation })).Acquired, "The same session must be able to claim new work after release.");
+    Directory.Delete(directory, true);
+}
+
+static void AssertPassiveReviewDoesNotBlockNewWork()
+{
+    var decision = HookTaskRouter.Route(new[]
+    {
+        new WorkflowItem { Type = WorkflowItemType.AwaitingReview, IssueNumber = 1 },
+        new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 2 },
+        new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 3 }
+    });
+    Assert(decision.BlockReason is null && decision.SelectedTask?.IssueNumber == 3, "Passive review and merge states must not block unrelated ready work.");
+}
+
+static void AssertWorkClaimReconciliation()
+{
+    var configuration = new RouterConfiguration();
+    var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+    var working = WorkingIssue(4);
+    var reviewRequested = new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } };
+    Assert(WorkClaimReconciliationService.ShouldRelease(claim, working, new[] { reviewRequested }, configuration), "A completed review-requested pull request must release its claim.");
+    var changeRequested = new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
+    Assert(!WorkClaimReconciliationService.ShouldRelease(claim, working, new[] { changeRequested }, configuration), "An active change request must retain its claim.");
+    var terminal = WorkingIssue(4);
+    terminal.Labels = new List<GithubLabel> { new() { Name = "codex:blocked" } };
+    Assert(WorkClaimReconciliationService.ShouldRelease(claim, terminal, Array.Empty<PullRequest>(), configuration), "Blocked work must release its claim immediately.");
 }
 
 static void Assert(bool condition, string message)
