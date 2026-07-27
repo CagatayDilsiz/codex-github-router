@@ -22,7 +22,7 @@ AssertClaimRoutingAuthority();
 await AssertPullRequestTransitionLifecycleAsync();
 await AssertClaimedWorkRecoveryAsync();
 await AssertActiveClaimRouteOrchestrationAsync();
-AssertClarificationPromptRequiresAutomatedNotice();
+AssertClarificationPromptIsLanguageIndependent();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -86,18 +86,18 @@ static void AssertResumePromptIsSafe()
     Assert(currentPullRequestRecoveryPrompt.Contains("pull request #21", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr pr transition 21 ready-for-review", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr issue transition 4 completed", StringComparison.Ordinal), "An unlabeled current PR must receive exact lifecycle recovery instructions.");
 }
 
-static void AssertClarificationPromptRequiresAutomatedNotice()
+static void AssertClarificationPromptIsLanguageIndependent()
 {
     var prompt = ContextPromptService.GetNewIssuePrompt(12);
-    var noticeInstruction = prompt.IndexOf("visible quoted notice", StringComparison.Ordinal);
-    var questionInstruction = prompt.IndexOf("actual question", StringComparison.Ordinal);
+    const string canonicalNotice = "> 🤖 This clarification request was generated automatically by a Codex session through CGR. After providing the requested information, transition this issue back to `ready`.";
+    var noticeInstruction = prompt.IndexOf(canonicalNotice, StringComparison.Ordinal);
+    var questionInstruction = prompt.IndexOf("actual clarification question must follow the notice", StringComparison.Ordinal);
 
-    Assert(noticeInstruction >= 0 && questionInstruction > noticeInstruction, "Clarification comments must start with a quoted notice before the question.");
-    Assert(prompt.Contains("generated automatically by a Codex session through CGR", StringComparison.Ordinal), "The English notice must identify the automated Codex session.");
-    Assert(prompt.Contains("transition this issue back to `ready`", StringComparison.Ordinal), "The English notice must direct the user to return the issue to ready.");
-    Assert(prompt.Contains("CGR üzerinden çalışan bir Codex oturumu tarafından otomatik olarak oluşturulmuştur", StringComparison.Ordinal), "The Turkish notice must identify the automated Codex session.");
-    Assert(prompt.Contains("issue'yu tekrar `ready` durumuna geçirin", StringComparison.Ordinal), "The Turkish notice must direct the user to return the issue to ready.");
-    Assert(prompt.Contains("same language as the issue or clarification conversation", StringComparison.Ordinal), "The notice language must follow the issue conversation.");
+    Assert(noticeInstruction >= 0 && questionInstruction > noticeInstruction, "Clarification comments must start with a blockquote notice before the question.");
+    Assert(prompt.Contains("visible Markdown blockquote notice", StringComparison.Ordinal), "The notice must be a visible Markdown blockquote.");
+    Assert(prompt.Contains("translate it naturally when the issue or clarification conversation is not in English", StringComparison.Ordinal), "Non-English clarification notices must be translated naturally.");
+    Assert(prompt.Contains("Keep `Codex`, `CGR`, and `ready` unchanged", StringComparison.Ordinal), "The canonical identifiers must remain unchanged when translating the notice.");
+    Assert(prompt.Contains("cgr issue transition 12 needs-info", StringComparison.Ordinal), "The existing needs-info transition must remain in the clarification instructions.");
 }
 
 static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
