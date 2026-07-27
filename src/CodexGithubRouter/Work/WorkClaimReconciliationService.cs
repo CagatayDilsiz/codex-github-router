@@ -21,7 +21,7 @@ public static class WorkClaimReconciliationService
         if (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase)) return false;
 
         var state = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
-        return !state.IsAmbiguous && (state.MatchedLabels.ContainsKey(PullRequestState.ReviewRequested) || state.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge));
+        return !state.IsAmbiguous && (state.MatchedLabels.ContainsKey(PullRequestState.ReviewRequested) || state.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge) || state.MatchedLabels.ContainsKey(PullRequestState.Deferred));
     }
 
     public static PullRequest? SelectClaimedPullRequest(WorkClaim claim, IEnumerable<PullRequest> linkedPullRequests) =>
@@ -39,7 +39,7 @@ public static class WorkClaimReconciliationService
         {
             issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, cancellationToken);
         }
-        catch (InvalidOperationException exception) when (IsMissingGitHubItem(exception))
+        catch (GitHubItemNotFoundException)
         {
             return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
         }
@@ -51,7 +51,7 @@ public static class WorkClaimReconciliationService
             {
                 claimedPullRequest = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, claim.PullRequestNumber.Value, new PullRequestSelection { Number = true, State = true, Labels = true }, cancellationToken);
             }
-            catch (InvalidOperationException exception) when (IsMissingGitHubItem(exception))
+            catch (GitHubItemNotFoundException)
             {
                 return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
             }
@@ -61,14 +61,10 @@ public static class WorkClaimReconciliationService
     }
 
     public static bool ShouldReleaseForPullRequestTransition(WorkClaim? claim, int pullRequestNumber, PullRequestState targetState) =>
-        claim?.PullRequestNumber == pullRequestNumber && targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge;
+        claim?.PullRequestNumber == pullRequestNumber && IsPassiveTarget(targetState);
 
     public static bool ShouldReleaseForIssueTransition(WorkClaim? claim, int issueNumber, WorkflowState targetState) =>
         claim?.IssueNumber == issueNumber && targetState is WorkflowState.Blocked or WorkflowState.NeedsInfo or WorkflowState.Abandoned;
 
-    public static bool IsPassiveTarget(PullRequestState targetState) => targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge;
-
-    private static bool IsMissingGitHubItem(InvalidOperationException exception) =>
-        exception.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
-        exception.Message.Contains("could not resolve", StringComparison.OrdinalIgnoreCase);
+    public static bool IsPassiveTarget(PullRequestState targetState) => targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge or PullRequestState.Deferred;
 }

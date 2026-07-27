@@ -72,6 +72,29 @@ public static class HookService
                     return 0;
                 }
 
+                var passiveClaimedTask = claimedWork.Tasks.SingleOrDefault(task => task.Type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred);
+                if (activeClaim.PullRequestNumber is null && passiveClaimedTask?.PullRequestNumber is not null)
+                {
+                    var enrichment = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
+                    {
+                        OwnerSessionId = payload.SessionId!,
+                        IssueNumber = activeClaim.IssueNumber,
+                        PullRequestNumber = passiveClaimedTask.PullRequestNumber,
+                        WorkType = activeClaim.WorkType
+                    });
+                    if (!enrichment.Acquired)
+                    {
+                        await WriteBlockAsync(enrichment.BlockReason ?? "Could not associate the active work claim with its linked pull request.");
+                        return 0;
+                    }
+
+                    if (await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration))
+                    {
+                        await WriteBlockAsync("The active work claim was released because its linked pull request is passive.");
+                        return 0;
+                    }
+                }
+
                 var claimedTasks = claimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
                 var claimedDecision = HookTaskRouter.RouteClaimedWork(activeClaim, payload.SessionId, claimedTasks);
                 if (!string.IsNullOrWhiteSpace(claimedDecision.BlockReason))

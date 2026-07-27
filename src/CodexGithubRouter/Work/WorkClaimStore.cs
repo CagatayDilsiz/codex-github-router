@@ -37,6 +37,7 @@ public static class WorkClaimStore
             var claim = new WorkClaim
             {
                 ClaimId = existing is not null && existing.ClaimId != Guid.Empty ? existing.ClaimId : Guid.NewGuid(),
+                Version = (existing?.Version ?? 0) + 1,
                 OwnerSessionId = requested.OwnerSessionId,
                 IssueNumber = requested.IssueNumber,
                 PullRequestNumber = requested.PullRequestNumber ?? existing?.PullRequestNumber,
@@ -61,7 +62,7 @@ public static class WorkClaimStore
         WithLockAsync(gitCommonDirectory, async () =>
         {
             var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (existing is null || existing.ClaimId != expected.ClaimId) return false;
+            if (existing is null || existing.ClaimId != expected.ClaimId || existing.Version != expected.Version) return false;
             DeleteUnsafe(gitCommonDirectory);
             return true;
         }, cancellationToken);
@@ -70,7 +71,7 @@ public static class WorkClaimStore
         WithLockAsync(gitCommonDirectory, async () =>
         {
             var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (!isPassiveTarget || existing is null || existing.ClaimId != expected.ClaimId) return false;
+            if (!isPassiveTarget || existing is null || existing.ClaimId != expected.ClaimId || existing.Version != expected.Version) return false;
 
             var matchesClaimedPullRequest = existing.PullRequestNumber == pullRequestNumber;
             var matchesInitialImplementation = existing.PullRequestNumber is null &&
