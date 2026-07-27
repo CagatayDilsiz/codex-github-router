@@ -22,6 +22,7 @@ AssertClaimRoutingAuthority();
 await AssertPullRequestTransitionLifecycleAsync();
 await AssertClaimedWorkRecoveryAsync();
 await AssertActiveClaimRouteOrchestrationAsync();
+AssertClarificationPromptRequiresAutomatedNotice();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -83,6 +84,20 @@ static void AssertResumePromptIsSafe()
     Assert(completedRecoveryPrompt.Contains("create exactly one pull request", StringComparison.Ordinal) && completedRecoveryPrompt.Contains("Fixes #4", StringComparison.Ordinal), "Completed recovery must provide executable single-PR linking instructions.");
     var currentPullRequestRecoveryPrompt = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(4, 21);
     Assert(currentPullRequestRecoveryPrompt.Contains("pull request #21", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr pr transition 21 ready-for-review", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr issue transition 4 completed", StringComparison.Ordinal), "An unlabeled current PR must receive exact lifecycle recovery instructions.");
+}
+
+static void AssertClarificationPromptRequiresAutomatedNotice()
+{
+    var prompt = ContextPromptService.GetNewIssuePrompt(12);
+    var noticeInstruction = prompt.IndexOf("visible quoted notice", StringComparison.Ordinal);
+    var questionInstruction = prompt.IndexOf("actual question", StringComparison.Ordinal);
+
+    Assert(noticeInstruction >= 0 && questionInstruction > noticeInstruction, "Clarification comments must start with a quoted notice before the question.");
+    Assert(prompt.Contains("generated automatically by a Codex session through CGR", StringComparison.Ordinal), "The English notice must identify the automated Codex session.");
+    Assert(prompt.Contains("transition this issue back to `ready`", StringComparison.Ordinal), "The English notice must direct the user to return the issue to ready.");
+    Assert(prompt.Contains("CGR üzerinden çalışan bir Codex oturumu tarafından otomatik olarak oluşturulmuştur", StringComparison.Ordinal), "The Turkish notice must identify the automated Codex session.");
+    Assert(prompt.Contains("issue'yu tekrar `ready` durumuna geçirin", StringComparison.Ordinal), "The Turkish notice must direct the user to return the issue to ready.");
+    Assert(prompt.Contains("same language as the issue or clarification conversation", StringComparison.Ordinal), "The notice language must follow the issue conversation.");
 }
 
 static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
