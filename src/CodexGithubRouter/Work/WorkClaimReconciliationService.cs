@@ -57,25 +57,27 @@ public static class WorkClaimReconciliationService
                 return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
             }
         }
-        else if (IsCompleted(issue, configuration) && issue.ClosingPullRequestsReferences.Count == 1)
+        else if (IsCompleted(issue, configuration) && issue.ClosingPullRequestsReferences.Count > 0)
         {
-            var linkedPullRequestNumber = issue.ClosingPullRequestsReferences[0].Number;
-            try
+            var linkedPullRequests = new List<PullRequest>();
+            foreach (var reference in issue.ClosingPullRequestsReferences)
             {
-                claimedPullRequest = await GitHubCliService.GetPullRequestByNumberAsync(
-                    workingDirectory,
-                    linkedPullRequestNumber,
-                    new PullRequestSelection { Number = true, State = true, Labels = true, CreatedAt = true, HeadRefName = true, ClosingIssuesReferences = true },
-                    cancellationToken);
-            }
-            catch (GitHubItemNotFoundException)
-            {
-                claimedPullRequest = null;
+                try
+                {
+                    linkedPullRequests.Add(await GitHubCliService.GetPullRequestByNumberAsync(
+                        workingDirectory,
+                        reference.Number,
+                        new PullRequestSelection { Number = true, State = true, Labels = true, CreatedAt = true, HeadRefName = true, ClosingIssuesReferences = true },
+                        cancellationToken));
+                }
+                catch (GitHubItemNotFoundException)
+                {
+                    // A missing historical reference is not a release signal.
+                }
             }
 
-            if (claimedPullRequest is not null &&
-                WorkflowService.IsCurrentClaimPullRequest(claim, issue, claimedPullRequest) &&
-                IsPassiveOrTerminal(claimedPullRequest, configuration))
+            var currentPullRequests = SelectCurrentClaimPullRequests(claim, issue, linkedPullRequests);
+            if (currentPullRequests.Count == 1 && IsPassiveOrTerminal(currentPullRequests[0], configuration))
             {
                 return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
             }
@@ -83,6 +85,9 @@ public static class WorkClaimReconciliationService
 
         return ShouldRelease(claim, issue, claimedPullRequest, configuration) && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
     }
+
+    public static List<PullRequest> SelectCurrentClaimPullRequests(WorkClaim claim, Issue issue, IEnumerable<PullRequest> pullRequests) =>
+        pullRequests.Where(pullRequest => WorkflowService.IsCurrentClaimPullRequest(claim, issue, pullRequest)).ToList();
 
     private static bool IsCompleted(Issue issue, RouterConfiguration configuration)
     {

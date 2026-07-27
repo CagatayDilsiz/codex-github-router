@@ -117,7 +117,8 @@ public static class HookService
         string workingDirectory,
         string gitCommonDirectory,
         RouterConfiguration configuration,
-        string? sessionId)
+        string? sessionId,
+        bool allowNoClaimReroute = true)
     {
         var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory);
         if (!completedIssueTasks.IsSuccessful)
@@ -198,11 +199,66 @@ public static class HookService
                 await WriteBlockAsync(acquisition.BlockReason ?? "Could not acquire the repository work claim.");
                 return 0;
             }
+
+            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? acquisition.Claim;
+            if (acquiredClaim is null)
+            {
+                await WriteBlockAsync("Repository work was acquired but could not be re-read safely.");
+                return 0;
+            }
+
+            var refreshedClaimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, acquiredClaim);
+            if (!refreshedClaimedWork.IsSuccessful)
+            {
+                await WriteBlockAsync(refreshedClaimedWork.Message);
+                return 0;
+            }
+
+            if (IsReleaseCandidate(refreshedClaimedWork))
+            {
+                if (await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, configuration))
+                {
+                    if (allowNoClaimReroute)
+                    {
+                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, configuration, sessionId, false);
+                    }
+
+                    await WriteBlockAsync("The acquired work became passive or terminal during refresh and was released; no second routing pass is allowed in this invocation.");
+                    return 0;
+                }
+
+                await WriteBlockAsync($"Active work claim for issue #{acquiredClaim.IssueNumber}{FormatPullRequest(acquiredClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.");
+                return 0;
+            }
+
+            var refreshedDecision = HookTaskRouter.RouteClaimedWork(
+                acquiredClaim,
+                sessionId,
+                refreshedClaimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList());
+            if (!string.IsNullOrWhiteSpace(refreshedDecision.BlockReason))
+            {
+                await WriteBlockAsync(refreshedDecision.BlockReason);
+                return 0;
+            }
+
+            await WriteAdditionalContextAsync(refreshedDecision.AdditionalContext!);
+            return 0;
         }
 
         await WriteAdditionalContextAsync(decision.AdditionalContext!);
         return 0;
     }
+
+    private static bool IsReleaseCandidate(WorkflowResponse response) =>
+        response.Tasks.Count == 1 && response.Tasks[0].Type is
+            WorkflowItemType.AwaitingReview or
+            WorkflowItemType.AwaitingMerge or
+            WorkflowItemType.Deferred or
+            WorkflowItemType.CloseIssue or
+            WorkflowItemType.ClosedWithoutMerge;
+
+    private static string FormatPullRequest(int? pullRequestNumber) =>
+        pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 
     private static Task WriteBlockAsync(string reason)
     {

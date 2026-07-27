@@ -220,7 +220,23 @@ public static class WorkflowService
             return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.Deferred, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
         }
 
-        return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{pullRequest.Number} has no actionable claimed pull-request state." };
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new()
+                {
+                    Type = WorkflowItemType.RecoverCurrentPullRequest,
+                    IssueNumber = claim.IssueNumber,
+                    PullRequestNumber = pullRequest.Number,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Current pull request #{pullRequest.Number} for issue #{claim.IssueNumber} has no workflow label and needs lifecycle recovery."
+                    }
+                }
+            }
+        };
     }
 
     public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)

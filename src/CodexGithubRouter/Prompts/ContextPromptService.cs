@@ -75,6 +75,21 @@ public static class ContextPromptService
         """;
     }
 
+    public static string GetCurrentPullRequestRecoveryPrompt(int issueNumber, int pullRequestNumber)
+    {
+        return $"""
+            Recover the exact current pull request #{pullRequestNumber} for issue #{issueNumber}. Do not create another pull request or route unrelated work.
+
+            1. Inspect pull request #{pullRequestNumber} and its head branch. Confirm it is the current implementation PR for issue #{issueNumber}; preserve this exact issue/PR identity.
+
+            2. If the pull request body does not contain a closing reference, edit only the body and add `Fixes #{issueNumber}`. Do not create a duplicate pull request.
+
+            3. If implementation is complete, run `cgr issue transition {issueNumber} completed` and then run `cgr pr transition {pullRequestNumber} ready-for-review`. If either transition is already in the requested state, retrying it must remain safe.
+
+            4. Do not merge or close the pull request, create a new branch, restart the issue, or work on unrelated tasks. If the exact pull request or implementation state cannot be verified, stop and report the evidence.
+        """;
+    }
+
     public static string GetChangeRequestPrompt(int issueNumber, int pullRequestNumber)
     {
         return $"""

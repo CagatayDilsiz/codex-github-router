@@ -36,6 +36,16 @@ public static class HookTaskRouter
             return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
         }
 
+        var currentPullRequestRecovery = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.RecoverCurrentPullRequest && task.PullRequestNumber.HasValue);
+        if (currentPullRequestRecovery is not null)
+        {
+            return new HookTaskDecision
+            {
+                SelectedTask = currentPullRequestRecovery,
+                AdditionalContext = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(currentPullRequestRecovery.IssueNumber, currentPullRequestRecovery.PullRequestNumber!.Value)
+            };
+        }
+
         var completedRecovery = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.RecoverCompletedIssue);
         if (completedRecovery is not null)
         {
