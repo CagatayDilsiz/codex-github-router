@@ -21,6 +21,7 @@ AssertWorkClaimReconciliation();
 AssertClaimRoutingAuthority();
 await AssertPullRequestTransitionLifecycleAsync();
 await AssertClaimedWorkRecoveryAsync();
+await AssertActiveClaimRouteOrchestrationAsync();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -261,26 +262,32 @@ static async Task AssertPullRequestTransitionLifecycleAsync()
 static async Task AssertClaimedWorkRecoveryAsync()
 {
     var configuration = new RouterConfiguration();
-    var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+    var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
+    var claim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedAt = claimedAt, LastUpdatedAt = claimedAt };
     var ready = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:ready" } } };
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, ready, _ => throw new InvalidOperationException())).Tasks.Single().Type == WorkflowItemType.NewIssue, "A PR-less claim must recover a ready issue through the new-issue flow.");
     var working = WorkingIssue(4);
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => throw new InvalidOperationException())).Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A working PR-less claim without a linked pull request must resume implementation.");
     working.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 21 });
-    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => throw new InvalidOperationException("Historical passive PR must not be associated while work is in progress."))).Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A new PR-less implementation claim must ignore an old passive linked pull request while the issue is working.");
+    var historicalPassivePullRequest = PullRequestForClaim(claim, "codex/issue-4-old", "open", "codex:rr", createdAt: claimedAt.AddMinutes(-1));
+    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => Task.FromResult(historicalPassivePullRequest))).Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A new PR-less implementation claim must ignore an old passive linked pull request while the issue is working.");
+    var currentWorkingPullRequest = PullRequestForClaim(claim, "codex/issue-4-current", "open", "codex:cr");
+    Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, working, _ => Task.FromResult(currentWorkingPullRequest))).Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A PR-less working claim must recover a proven current linked pull request after a crash.");
     var completed = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:done" } } };
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => throw new InvalidOperationException())).Tasks.Single().Type == WorkflowItemType.LinkPullRequestsToIssues, "A completed PR-less claim without a linked pull request must recover PR-link work.");
     completed.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 21 });
-    var changeRequest = new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
+    var historicalCompleted = await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(historicalPassivePullRequest));
+    Assert(!historicalCompleted.IsSuccessful && historicalCompleted.Message.Contains("no current pull request", StringComparison.Ordinal), "A completed claim must not attach a historical linked pull request and must return a safe recovery diagnostic.");
+    var changeRequest = PullRequestForClaim(claim, "codex/issue-4-current", "open", "codex:cr");
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(changeRequest))).Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A completed PR-less claim with a linked active pull request must evaluate that pull request.");
-    var mergedPullRequest = new PullRequest { Number = 21, State = "merged" };
+    var mergedPullRequest = PullRequestForClaim(claim, "codex/issue-4-current", "merged");
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(mergedPullRequest))).Tasks.Single().Type == WorkflowItemType.CloseIssue, "A completed PR-less claim with a merged linked pull request must become terminal cleanup work.");
-    var closedPullRequest = new PullRequest { Number = 21, State = "closed" };
+    var closedPullRequest = PullRequestForClaim(claim, "codex/issue-4-current", "closed");
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, claim, completed, _ => Task.FromResult(closedPullRequest))).Tasks.Single().Type == WorkflowItemType.ClosedWithoutMerge, "A completed PR-less claim with a closed-unmerged linked pull request must become terminal cleanup work.");
-    var prClaim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest };
-    var deferred = new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:deferred" } } };
+    var prClaim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest, ClaimedAt = claimedAt, LastUpdatedAt = claimedAt };
+    var deferred = PullRequestForClaim(prClaim, "codex/issue-4-current", "open", "codex:deferred");
     Assert((await WorkflowService.EvaluateClaimedWorkAsync(configuration, prClaim, completed, _ => Task.FromResult(deferred))).Tasks.Single().Type == WorkflowItemType.Deferred, "A deferred claimed pull request must be represented as passive work.");
-    Assert(GitHubCliService.IsConfirmedNotFound("HTTP 404: not found") && !GitHubCliService.IsConfirmedNotFound("Could not resolve host: api.github.com") && !GitHubCliService.IsConfirmedNotFound("authentication required") && !GitHubCliService.IsConfirmedNotFound("rate limit exceeded"), "Only confirmed missing GitHub items may trigger claim release.");
+    Assert(!GitHubCliService.IsConfirmedNotFound("HTTP 404: not found") && GitHubCliService.IsConfirmedNotFound("Could not resolve to an issue") && GitHubCliService.IsConfirmedNotFound("Could not resolve to a PullRequest") && !GitHubCliService.IsConfirmedNotFound("Could not resolve host: api.github.com") && !GitHubCliService.IsConfirmedNotFound("authentication required") && !GitHubCliService.IsConfirmedNotFound("rate limit exceeded"), "Only command-specific confirmed missing GitHub items may trigger claim release.");
 
     var directory = Path.Combine(Path.GetTempPath(), $"cgr-work-version-{Guid.NewGuid():N}");
     Directory.CreateDirectory(directory);
@@ -289,6 +296,100 @@ static async Task AssertClaimedWorkRecoveryAsync()
     Assert(continuation.Version > first.Version && !await WorkClaimStore.ReleaseIfMatchesAsync(directory, first) && (await WorkClaimStore.ReadAsync(directory))?.Version == continuation.Version, "A stale same-claim revision must not delete a newer owner continuation.");
     Directory.Delete(directory, true);
 }
+
+static async Task AssertActiveClaimRouteOrchestrationAsync()
+{
+    var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
+    var claim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedAt = claimedAt, LastUpdatedAt = claimedAt };
+    var enrichedClaim = new WorkClaim { ClaimId = claim.ClaimId, Version = 2, OwnerSessionId = claim.OwnerSessionId, IssueNumber = claim.IssueNumber, PullRequestNumber = 21, WorkType = claim.WorkType, ClaimedAt = claim.ClaimedAt, LastUpdatedAt = DateTimeOffset.UtcNow };
+
+    var passiveChecks = 0;
+    var passiveRelease = await new ActiveClaimRouteService(
+        current => Task.FromResult(passiveChecks++ == 0 ? ClaimedResponse(WorkflowItemType.AwaitingReview, 21) : ClaimedResponse(WorkflowItemType.AwaitingReview, 21)),
+        () => Task.FromResult<WorkClaim?>(enrichedClaim),
+        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
+        () => Task.FromResult(true))
+        .RouteAsync(claim, "session-a");
+    Assert(passiveRelease is null, "A proven current passive PR must release the claim through the orchestration service.");
+    var nextReady = HookTaskRouter.Route(new[] { ClaimedTask(WorkflowItemType.AwaitingReview, 21), new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+    Assert(nextReady.SelectedTask?.IssueNumber == 5, "After claim release, the same invocation must allow the next ready issue to route.");
+
+    var historicalChecks = 0;
+    var historicalDecision = await new ActiveClaimRouteService(
+        current => Task.FromResult(historicalChecks++ == 0 ? ClaimedResponse(WorkflowItemType.ResumeInProgressIssue) : ClaimedResponse(WorkflowItemType.ResumeInProgressIssue)),
+        () => Task.FromResult<WorkClaim?>(claim),
+        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = claim }),
+        () => Task.FromResult(false))
+        .RouteAsync(claim, "session-a");
+    Assert(historicalDecision?.SelectedTask?.Type == WorkflowItemType.ResumeInProgressIssue, "A historical PR must leave the new claim active and continue implementation recovery.");
+
+    var workingCurrentDecision = await new ActiveClaimRouteService(
+        current => Task.FromResult(ClaimedResponse(WorkflowItemType.ChangeRequest, 21)),
+        () => Task.FromResult<WorkClaim?>(enrichedClaim),
+        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
+        () => Task.FromResult(false))
+        .RouteAsync(claim, "session-a");
+    Assert(workingCurrentDecision?.SelectedTask?.Type == WorkflowItemType.ChangeRequest && workingCurrentDecision.SelectedTask.PullRequestNumber == 21, "A proven current PR linked while working must route only its claimed change request.");
+
+    var closedDecision = await new ActiveClaimRouteService(
+        current => Task.FromResult(ClaimedResponse(WorkflowItemType.ClosedWithoutMerge, 21)),
+        () => Task.FromResult<WorkClaim?>(enrichedClaim),
+        _ => throw new InvalidOperationException("A claimed PR should not be enriched twice."),
+        () => Task.FromResult(true))
+        .RouteAsync(enrichedClaim, "session-a");
+    Assert(closedDecision is null, "A proven current closed-unmerged PR must release the coding claim.");
+    var closedBlocker = HookTaskRouter.Route(new[] { ClaimedTask(WorkflowItemType.ClosedWithoutMerge, 21, 4, "Closed without merge."), new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+    Assert(closedBlocker.BlockReason?.Contains("Closed without merge", StringComparison.Ordinal) == true, "After releasing a closed-unmerged claim, the normal blocker must remain visible.");
+
+    var stateRaceDecision = await new ActiveClaimRouteService(
+        current => Task.FromResult(current.PullRequestNumber is null ? ClaimedResponse(WorkflowItemType.AwaitingReview, 21) : ClaimedResponse(WorkflowItemType.ChangeRequest, 21)),
+        () => Task.FromResult<WorkClaim?>(enrichedClaim),
+        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
+        () => Task.FromResult(false))
+        .RouteAsync(claim, "session-a");
+    Assert(stateRaceDecision?.SelectedTask?.Type == WorkflowItemType.ChangeRequest, "A passive-to-changes-requested race must refresh and route the current claimed CR.");
+
+    var reconcileCalled = false;
+    var genericFailure = false;
+    try
+    {
+        await new ActiveClaimRouteService(
+            _ => throw new InvalidOperationException("GitHub CLI command failed with exit code 1: HTTP 404: not found"),
+            () => Task.FromResult<WorkClaim?>(claim),
+            _ => throw new InvalidOperationException("Claim must not be changed after a GitHub failure."),
+            () => { reconcileCalled = true; return Task.FromResult(true); })
+            .RouteAsync(claim, "session-a");
+    }
+    catch (InvalidOperationException exception)
+    {
+        genericFailure = exception.Message.Contains("HTTP 404", StringComparison.Ordinal);
+    }
+
+    Assert(genericFailure && !reconcileCalled && !GitHubCliService.IsConfirmedNotFound("HTTP 404: not found"), "A generic HTTP 404 must preserve claim ownership and must not trigger reconciliation release.");
+}
+
+static WorkflowItem ClaimedTask(WorkflowItemType type, int? pullRequestNumber = null, int issueNumber = 4, string? message = null) => new()
+{
+    Type = type,
+    IssueNumber = issueNumber,
+    PullRequestNumber = pullRequestNumber,
+    Status = new WorkflowTaskStatus { Message = message ?? $"Claimed task {type}." }
+};
+
+static WorkflowResponse ClaimedResponse(WorkflowItemType type, int? pullRequestNumber = null, int issueNumber = 4, string? message = null) => new()
+{
+    Tasks = new List<WorkflowItem> { ClaimedTask(type, pullRequestNumber, issueNumber, message) }
+};
+
+static PullRequest PullRequestForClaim(WorkClaim claim, string branch, string state, string? label = null, DateTimeOffset? createdAt = null) => new()
+{
+    Number = claim.PullRequestNumber ?? 21,
+    State = state,
+    CreatedAt = createdAt ?? claim.ClaimedAt.AddMinutes(1),
+    HeadRefName = branch,
+    Labels = label is null ? new List<GithubLabel>() : new List<GithubLabel> { new() { Name = label } },
+    ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = claim.IssueNumber } }
+};
 
 static void Assert(bool condition, string message)
 {

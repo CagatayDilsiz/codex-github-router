@@ -13,6 +13,12 @@ public sealed class PullRequest
     [JsonPropertyName("state")]
     public string State { get; init; } = string.Empty;
 
+    [JsonPropertyName("createdAt")]
+    public DateTimeOffset CreatedAt { get; init; }
+
+    [JsonPropertyName("headRefName")]
+    public string HeadRefName { get; init; } = string.Empty;
+
     [JsonPropertyName("labels")]
     public List<GithubLabel> Labels { get; init; } = new();
 

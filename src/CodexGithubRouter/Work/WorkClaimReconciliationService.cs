@@ -65,7 +65,7 @@ public static class WorkClaimReconciliationService
                 claimedPullRequest = await GitHubCliService.GetPullRequestByNumberAsync(
                     workingDirectory,
                     linkedPullRequestNumber,
-                    new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true },
+                    new PullRequestSelection { Number = true, State = true, Labels = true, CreatedAt = true, HeadRefName = true, ClosingIssuesReferences = true },
                     cancellationToken);
             }
             catch (GitHubItemNotFoundException)
@@ -74,7 +74,7 @@ public static class WorkClaimReconciliationService
             }
 
             if (claimedPullRequest is not null &&
-                claimedPullRequest.ClosingIssuesReferences.Any(reference => reference.Number == claim.IssueNumber) &&
+                WorkflowService.IsCurrentClaimPullRequest(claim, issue, claimedPullRequest) &&
                 IsPassiveOrTerminal(claimedPullRequest, configuration))
             {
                 return await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);

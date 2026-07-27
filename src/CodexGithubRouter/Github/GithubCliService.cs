@@ -332,7 +332,7 @@ public static class GitHubCliService
     }
 
     public static bool IsConfirmedNotFound(string error) =>
-        error.Contains("HTTP 404", StringComparison.OrdinalIgnoreCase) ||
         error.Contains("could not resolve to an issue", StringComparison.OrdinalIgnoreCase) ||
-        error.Contains("could not resolve to a pull request", StringComparison.OrdinalIgnoreCase);
+        error.Contains("could not resolve to a pull request", StringComparison.OrdinalIgnoreCase) ||
+        error.Contains("could not resolve to a pullrequest", StringComparison.OrdinalIgnoreCase);
 }
