@@ -63,6 +63,11 @@ public static class WorkClaimReconciliationService
     public static bool ShouldReleaseForPullRequestTransition(WorkClaim? claim, int pullRequestNumber, PullRequestState targetState) =>
         claim?.PullRequestNumber == pullRequestNumber && targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge;
 
+    public static bool ShouldReleaseForIssueTransition(WorkClaim? claim, int issueNumber, WorkflowState targetState) =>
+        claim?.IssueNumber == issueNumber && targetState is WorkflowState.Blocked or WorkflowState.NeedsInfo or WorkflowState.Abandoned;
+
+    public static bool IsPassiveTarget(PullRequestState targetState) => targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge;
+
     private static bool IsMissingGitHubItem(InvalidOperationException exception) =>
         exception.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
         exception.Message.Contains("could not resolve", StringComparison.OrdinalIgnoreCase);

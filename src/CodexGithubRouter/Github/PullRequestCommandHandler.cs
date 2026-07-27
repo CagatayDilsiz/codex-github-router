@@ -88,23 +88,28 @@ public static class PullRequestCommandHandler
             {
                 Number = true,
                 Labels = true,
+                ClosingIssuesReferences = true,
             }; // You can customize the selection as needed
 
             var pullRequestToTransition = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, pullRequestSelection, CancellationToken.None);
           
             var pullRequestTransition = PullRequestTransitionPlanner.Plan(pullRequestToTransition, targetState, routerConfig);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
 
             if (pullRequestTransition.LabelsToAdd.Count == 0 && pullRequestTransition.LabelsToRemove.Count == 0)
             {
+                if (activeClaim is not null)
+                {
+                    await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState));
+                }
                 Console.WriteLine($"Pull request #{pullRequestNumber} is already in state '{targetState}'.");
                 return 0;
             }
 
             await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
-            if (WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(activeClaim, pullRequestNumber, targetState))
+            if (activeClaim is not null)
             {
-                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState));
             }
             Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
         }

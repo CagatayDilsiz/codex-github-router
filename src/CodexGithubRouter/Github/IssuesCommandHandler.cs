@@ -70,17 +70,22 @@ public static class IssuesCommandHandler
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
           
             var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
 
             if (issueTransition.LabelsToAdd.Count == 0 && issueTransition.LabelsToRemove.Count == 0)
             {
+                if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
+                {
+                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                }
                 Console.WriteLine($"Issue #{issueNumber} is already in state '{targetState}'.");
                 return 0;
             }
 
             await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
-            if (targetState is WorkflowState.Blocked or WorkflowState.NeedsInfo or WorkflowState.Abandoned)
+            if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
             {
-                await WorkClaimStore.ReleaseForIssueAsync(gitCommonDir, issueNumber);
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
             }
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }

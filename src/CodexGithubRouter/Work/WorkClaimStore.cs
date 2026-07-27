@@ -66,6 +66,22 @@ public static class WorkClaimStore
             return true;
         }, cancellationToken);
 
+    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
+            if (!isPassiveTarget || existing is null || existing.ClaimId != expected.ClaimId) return false;
+
+            var matchesClaimedPullRequest = existing.PullRequestNumber == pullRequestNumber;
+            var matchesInitialImplementation = existing.PullRequestNumber is null &&
+                existing.WorkType == WorkClaimType.Implementation &&
+                closingIssueNumbers.Contains(existing.IssueNumber);
+            if (!matchesClaimedPullRequest && !matchesInitialImplementation) return false;
+
+            DeleteUnsafe(gitCommonDirectory);
+            return true;
+        }, cancellationToken);
+
     private static async Task<WorkClaim?> ReadUnsafeAsync(string gitCommonDirectory, CancellationToken cancellationToken)
     {
         var path = Path.Combine(gitCommonDirectory, ClaimFileName);

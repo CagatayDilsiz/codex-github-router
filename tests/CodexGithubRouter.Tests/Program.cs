@@ -19,6 +19,7 @@ await AssertWorkClaimsAsync();
 AssertPassiveReviewDoesNotBlockNewWork();
 AssertWorkClaimReconciliation();
 AssertClaimRoutingAuthority();
+await AssertPullRequestTransitionLifecycleAsync();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -236,6 +237,24 @@ static void AssertClaimRoutingAuthority()
     var ambiguousClaim = new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
     var ambiguousDecision = HookTaskRouter.RouteClaimedWork(ambiguousClaim, "session-b", new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 21 }, new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 22 } });
     Assert(ambiguousDecision.BlockReason?.Contains("multiple candidate pull requests", StringComparison.Ordinal) == true, "A PR-less claim must not implicitly choose between distinct pull-request identities.");
+}
+
+static async Task AssertPullRequestTransitionLifecycleAsync()
+{
+    var directory = Path.Combine(Path.GetTempPath(), $"cgr-work-transition-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(directory);
+    var initial = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    Assert(await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, initial.Claim!, 18, new[] { 4 }, true) && await WorkClaimStore.ReadAsync(directory) is null, "A PR-less implementation claim must release when a passive transitioned pull request closes its claimed issue.");
+
+    var unrelated = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    Assert(!await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, unrelated.Claim!, 19, new[] { 5 }, true) && await WorkClaimStore.ReadAsync(directory) is not null, "An unrelated pull-request transition must retain a PR-less implementation claim.");
+    await WorkClaimStore.ReleaseForIssueAsync(directory, 4);
+
+    var claimedPullRequest = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
+    Assert(!await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, claimedPullRequest.Claim!, 22, new[] { 4 }, true) && await WorkClaimStore.ReadAsync(directory) is not null, "A transition for a different pull request must retain the claimed pull request.");
+    Assert(await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, claimedPullRequest.Claim!, 21, new[] { 4 }, true), "A retry after a passive matching pull-request transition must clean up the matching claim even when labels are already correct.");
+    Assert(WorkClaimReconciliationService.ShouldReleaseForIssueTransition(new WorkClaim { IssueNumber = 4 }, 4, WorkflowState.Blocked), "A no-op terminal issue transition must remain eligible for cleanup.");
+    Directory.Delete(directory, true);
 }
 
 static void Assert(bool condition, string message)

@@ -1,9 +1,68 @@
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Work;
 
 namespace CodexGithubRouter.Workflow;
 
 public static class WorkflowService
 {
+    public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim)
+    {
+        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
+        var issueResolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
+        if (issueResolution.IsAmbiguous)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = issueResolution.DescribeConflict($"claimed issue #{claim.IssueNumber}") };
+        }
+
+        if (!claim.PullRequestNumber.HasValue)
+        {
+            if (!issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress))
+            {
+                return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} cannot be resolved because the issue is no longer in progress." };
+            }
+
+            return new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = claim.IssueNumber } }
+            };
+        }
+
+        if (!issue.ClosingPullRequestsReferences.Any(reference => reference.Number == claim.PullRequestNumber.Value))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{claim.PullRequestNumber.Value} cannot be resolved because the pull request does not close the claimed issue." };
+        }
+
+        var pullRequest = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, claim.PullRequestNumber.Value, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None);
+        var pullRequestResolution = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
+        if (pullRequestResolution.IsAmbiguous)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = pullRequestResolution.DescribeConflict($"claimed pull request #{claim.PullRequestNumber.Value}") };
+        }
+
+        if (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{claim.PullRequestNumber.Value} cannot be resolved because the pull request is {pullRequest.State}." };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.ChangesRequested))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ChangeRequest, IssueNumber = claim.IssueNumber, PullRequestNumber = claim.PullRequestNumber } } };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.ReviewRequested))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.AwaitingReview, IssueNumber = claim.IssueNumber, PullRequestNumber = claim.PullRequestNumber } } };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.AwaitingMerge, IssueNumber = claim.IssueNumber, PullRequestNumber = claim.PullRequestNumber } } };
+        }
+
+        return new WorkflowResponse { IsSuccessful = false, Message = $"Active work claim for issue #{claim.IssueNumber} / pull request #{claim.PullRequestNumber.Value} has no actionable claimed pull-request state." };
+    }
+
     public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
     {
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);

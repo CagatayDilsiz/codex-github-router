@@ -63,6 +63,43 @@ public static class HookService
                 return 0;
             }
 
+            if (activeClaim is not null)
+            {
+                var claimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, payload.Cwd, activeClaim);
+                if (!claimedWork.IsSuccessful)
+                {
+                    await WriteBlockAsync(claimedWork.Message);
+                    return 0;
+                }
+
+                var claimedTasks = claimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
+                var claimedDecision = HookTaskRouter.RouteClaimedWork(activeClaim, payload.SessionId, claimedTasks);
+                if (!string.IsNullOrWhiteSpace(claimedDecision.BlockReason))
+                {
+                    await WriteBlockAsync(claimedDecision.BlockReason);
+                    return 0;
+                }
+
+                if (claimedDecision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(claimedDecision.SelectedTask))
+                {
+                    var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
+                    {
+                        OwnerSessionId = payload.SessionId!,
+                        IssueNumber = claimedDecision.SelectedTask.IssueNumber,
+                        PullRequestNumber = claimedDecision.SelectedTask.PullRequestNumber,
+                        WorkType = claimedDecision.SelectedTask.Type == WorkflowItemType.ChangeRequest ? WorkClaimType.ChangeRequest : WorkClaimType.Implementation
+                    });
+                    if (!acquisition.Acquired)
+                    {
+                        await WriteBlockAsync(acquisition.BlockReason ?? "Could not continue the repository work claim.");
+                        return 0;
+                    }
+                }
+
+                await WriteAdditionalContextAsync(claimedDecision.AdditionalContext!);
+                return 0;
+            }
+
             var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
 
@@ -121,9 +158,7 @@ public static class HookService
                 await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
             }
 
-            var decision = activeClaim is null
-                ? HookTaskRouter.Route(actionableTasks)
-                : HookTaskRouter.RouteClaimedWork(activeClaim, payload.SessionId, actionableTasks);
+            var decision = HookTaskRouter.Route(actionableTasks);
 
             if (!string.IsNullOrWhiteSpace(decision.BlockReason))
             {
