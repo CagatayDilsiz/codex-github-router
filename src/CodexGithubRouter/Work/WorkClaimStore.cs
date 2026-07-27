@@ -42,6 +42,9 @@ public static class WorkClaimStore
                 IssueNumber = requested.IssueNumber,
                 PullRequestNumber = requested.PullRequestNumber ?? existing?.PullRequestNumber,
                 WorkType = existing?.WorkType ?? requested.WorkType,
+                ClaimedIssueUpdatedAt = existing is not null && existing.ClaimedIssueUpdatedAt != default
+                    ? existing.ClaimedIssueUpdatedAt
+                    : requested.ClaimedIssueUpdatedAt,
                 ClaimedAt = existing?.ClaimedAt ?? now,
                 LastUpdatedAt = now
             };
@@ -68,6 +71,9 @@ public static class WorkClaimStore
         }, cancellationToken);
 
     public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, CancellationToken cancellationToken = default) =>
+        ReleaseForPullRequestTransitionAsync(gitCommonDirectory, expected, pullRequestNumber, closingIssueNumbers, isPassiveTarget, false, cancellationToken);
+
+    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, bool isCurrentClaimPullRequest, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
             var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
@@ -76,7 +82,8 @@ public static class WorkClaimStore
             var matchesClaimedPullRequest = existing.PullRequestNumber == pullRequestNumber;
             var matchesInitialImplementation = existing.PullRequestNumber is null &&
                 existing.WorkType == WorkClaimType.Implementation &&
-                closingIssueNumbers.Contains(existing.IssueNumber);
+                closingIssueNumbers.Contains(existing.IssueNumber) &&
+                isCurrentClaimPullRequest;
             if (!matchesClaimedPullRequest && !matchesInitialImplementation) return false;
 
             DeleteUnsafe(gitCommonDirectory);

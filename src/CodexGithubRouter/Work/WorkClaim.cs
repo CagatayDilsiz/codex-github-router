@@ -14,6 +14,7 @@ public sealed class WorkClaim
     public int IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
     public WorkClaimType WorkType { get; init; }
+    public DateTimeOffset ClaimedIssueUpdatedAt { get; init; }
     public DateTimeOffset ClaimedAt { get; init; }
     public DateTimeOffset LastUpdatedAt { get; init; }
 }

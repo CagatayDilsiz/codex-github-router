@@ -54,7 +54,7 @@ public static class WorkflowService
                         {
                             Type = issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress)
                                 ? WorkflowItemType.ResumeInProgressIssue
-                                : WorkflowItemType.LinkPullRequestsToIssues,
+                                : WorkflowItemType.RecoverCompletedIssue,
                             IssueNumber = claim.IssueNumber
                         }
                     }
@@ -76,8 +76,19 @@ public static class WorkflowService
 
                 return new WorkflowResponse
                 {
-                    IsSuccessful = false,
-                    Message = $"Active work claim for completed issue #{claim.IssueNumber} has no current pull request created for this claim. Keep the claim and complete pull-request creation or linking recovery before routing unrelated work."
+                    IsSuccessful = true,
+                    Tasks = new List<WorkflowItem>
+                    {
+                        new()
+                        {
+                            Type = WorkflowItemType.RecoverCompletedIssue,
+                            IssueNumber = claim.IssueNumber,
+                            Status = new WorkflowTaskStatus
+                            {
+                                Message = $"Completed issue #{claim.IssueNumber} needs safe branch and pull-request recovery."
+                            }
+                        }
+                    }
                 };
             }
 
@@ -122,7 +133,10 @@ public static class WorkflowService
 
     public static bool IsCurrentClaimPullRequest(WorkClaim claim, Issue issue, PullRequest pullRequest)
     {
-        if (claim.ClaimedAt == default || pullRequest.CreatedAt < claim.ClaimedAt)
+        // A claim without a GitHub-derived baseline cannot prove ownership of
+        // a linked PR. This is intentionally conservative for legacy claim
+        // files written before ClaimedIssueUpdatedAt was persisted.
+        if (claim.ClaimedIssueUpdatedAt == default || pullRequest.CreatedAt < claim.ClaimedIssueUpdatedAt)
         {
             return false;
         }

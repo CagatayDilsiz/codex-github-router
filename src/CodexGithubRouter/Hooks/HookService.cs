@@ -184,12 +184,14 @@ public static class HookService
             var claimType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
                 ? WorkClaimType.ChangeRequest
                 : WorkClaimType.Implementation;
+            var claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
             var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
             {
                 OwnerSessionId = sessionId,
                 IssueNumber = decision.SelectedTask.IssueNumber,
                 PullRequestNumber = decision.SelectedTask.PullRequestNumber,
-                WorkType = claimType
+                WorkType = claimType,
+                ClaimedIssueUpdatedAt = claimedIssue.UpdatedAt
             });
             if (!acquisition.Acquired)
             {
