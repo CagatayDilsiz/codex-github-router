@@ -88,7 +88,6 @@ public static class PullRequestCommandHandler
             {
                 Number = true,
                 Labels = true,
-                ClosingIssuesReferences = true,
             }; // You can customize the selection as needed
 
             var pullRequestToTransition = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, pullRequestSelection, CancellationToken.None);
@@ -102,12 +101,10 @@ public static class PullRequestCommandHandler
             }
 
             await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
-            if (targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge)
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
+            if (WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(activeClaim, pullRequestNumber, targetState))
             {
-                foreach (var issue in pullRequestToTransition.ClosingIssuesReferences)
-                {
-                    await WorkClaimStore.ReleaseForIssueAsync(gitCommonDir, issue.Number);
-                }
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
             }
             Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
         }

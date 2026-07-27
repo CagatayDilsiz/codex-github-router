@@ -18,6 +18,7 @@ AssertVersionNormalization();
 await AssertWorkClaimsAsync();
 AssertPassiveReviewDoesNotBlockNewWork();
 AssertWorkClaimReconciliation();
+AssertClaimRoutingAuthority();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -171,6 +172,24 @@ static async Task AssertWorkClaimsAsync()
     Assert(await WorkClaimStore.ReleaseForIssueAsync(directory, 4), "An explicit release must remove the current claim.");
     Assert((await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 5, WorkType = WorkClaimType.Implementation })).Acquired, "The same session must be able to claim new work after release.");
     Directory.Delete(directory, true);
+
+    var identityDirectory = Path.Combine(Path.GetTempPath(), $"cgr-work-identity-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(identityDirectory);
+    var first = await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
+    var differentPullRequest = await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest });
+    Assert(first.Acquired && !differentPullRequest.Acquired && (await WorkClaimStore.ReadAsync(identityDirectory))?.PullRequestNumber == 21, "Same-issue claims with different pull requests must remain different work identities.");
+    var staleClaim = (await WorkClaimStore.ReadAsync(identityDirectory))!;
+    await WorkClaimStore.ReleaseForIssueAsync(identityDirectory, 4);
+    var replacement = (await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest })).Claim!;
+    Assert(!await WorkClaimStore.ReleaseIfMatchesAsync(identityDirectory, staleClaim) && (await WorkClaimStore.ReadAsync(identityDirectory))?.ClaimId == replacement.ClaimId, "Stale reconciliation must not delete a replacement claim.");
+    Directory.Delete(identityDirectory, true);
+
+    var enrichmentDirectory = Path.Combine(Path.GetTempPath(), $"cgr-work-enrichment-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(enrichmentDirectory);
+    await WorkClaimStore.TryAcquireAsync(enrichmentDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    var enriched = await WorkClaimStore.TryAcquireAsync(enrichmentDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
+    Assert(enriched.Acquired && enriched.Claim?.PullRequestNumber == 21 && enriched.Claim.WorkType == WorkClaimType.Implementation, "A same-owner claim may enrich a missing pull request without changing work type.");
+    Directory.Delete(enrichmentDirectory, true);
 }
 
 static void AssertPassiveReviewDoesNotBlockNewWork()
@@ -187,15 +206,36 @@ static void AssertPassiveReviewDoesNotBlockNewWork()
 static void AssertWorkClaimReconciliation()
 {
     var configuration = new RouterConfiguration();
-    var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+    var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest };
     var working = WorkingIssue(4);
-    var reviewRequested = new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } };
-    Assert(WorkClaimReconciliationService.ShouldRelease(claim, working, new[] { reviewRequested }, configuration), "A completed review-requested pull request must release its claim.");
-    var changeRequested = new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
-    Assert(!WorkClaimReconciliationService.ShouldRelease(claim, working, new[] { changeRequested }, configuration), "An active change request must retain its claim.");
+    var oldReviewRequested = new PullRequest { Number = 8, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } };
+    var changeRequested = new PullRequest { Number = 22, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } };
+    var claimedPullRequest = WorkClaimReconciliationService.SelectClaimedPullRequest(claim, new[] { oldReviewRequested, changeRequested });
+    Assert(claimedPullRequest?.Number == 22 && !WorkClaimReconciliationService.ShouldRelease(claim, working, claimedPullRequest, configuration), "An older passive pull request must not release an active claim for another pull request on the same issue.");
+    var reviewRequested = new PullRequest { Number = 22, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } };
+    Assert(WorkClaimReconciliationService.ShouldRelease(claim, working, reviewRequested, configuration), "The claimed review-requested pull request must release its claim.");
+    var implementationClaim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+    Assert(!WorkClaimReconciliationService.ShouldRelease(implementationClaim, working, oldReviewRequested, configuration), "A pull-request-less implementation claim must ignore older passive linked pull requests.");
     var terminal = WorkingIssue(4);
     terminal.Labels = new List<GithubLabel> { new() { Name = "codex:blocked" } };
-    Assert(WorkClaimReconciliationService.ShouldRelease(claim, terminal, Array.Empty<PullRequest>(), configuration), "Blocked work must release its claim immediately.");
+    Assert(WorkClaimReconciliationService.ShouldRelease(claim, terminal, null, configuration), "Blocked work must release its claim immediately.");
+    Assert(WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(claim, 22, PullRequestState.ReviewRequested) && !WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(claim, 21, PullRequestState.ReviewRequested), "A pull-request transition must release only the matching claimed pull request.");
+}
+
+static void AssertClaimRoutingAuthority()
+{
+    var claim = new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
+    var unrelatedChangeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 1, PullRequestNumber = 10 };
+    var claimedResume = new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 2 };
+    var ownerDecision = HookTaskRouter.RouteClaimedWork(claim, "session-b", new[] { unrelatedChangeRequest, claimedResume });
+    Assert(ownerDecision.SelectedTask?.IssueNumber == 2, "An active claim owner must continue claimed work before unrelated change requests.");
+    var otherSessionDecision = HookTaskRouter.RouteClaimedWork(claim, "session-a", new[] { new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 1 }, claimedResume });
+    Assert(otherSessionDecision.BlockReason?.Contains("another Codex session", StringComparison.Ordinal) == true && otherSessionDecision.AdditionalContext is null, "A different session must not receive PR-link context while a claim is active.");
+    var missingDecision = HookTaskRouter.RouteClaimedWork(claim, "session-b", new[] { unrelatedChangeRequest });
+    Assert(missingDecision.BlockReason?.Contains("No unrelated work will be routed", StringComparison.Ordinal) == true && missingDecision.AdditionalContext is null, "Missing claimed work must not fall through to unrelated workflow tasks.");
+    var ambiguousClaim = new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
+    var ambiguousDecision = HookTaskRouter.RouteClaimedWork(ambiguousClaim, "session-b", new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 21 }, new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 22 } });
+    Assert(ambiguousDecision.BlockReason?.Contains("multiple candidate pull requests", StringComparison.Ordinal) == true, "A PR-less claim must not implicitly choose between distinct pull-request identities.");
 }
 
 static void Assert(bool condition, string message)

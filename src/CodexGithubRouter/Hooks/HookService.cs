@@ -56,6 +56,12 @@ public static class HookService
                 ?? throw new InvalidOperationException("Not a valid Git repository.");
 
             await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory);
+            if (activeClaim is not null && !string.Equals(activeClaim.OwnerSessionId, payload.SessionId, StringComparison.Ordinal))
+            {
+                await WriteBlockAsync($"Active work claim for issue #{activeClaim.IssueNumber}{(activeClaim.PullRequestNumber.HasValue ? $" / pull request #{activeClaim.PullRequestNumber.Value}" : string.Empty)} is owned by another Codex session.");
+                return 0;
+            }
 
             var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, payload.Cwd);
 
@@ -105,14 +111,19 @@ public static class HookService
             }
 
             // close any issues that are marked for closure before hook blocker
-            var closingIssueTasks = actionableTasks.Where(y => y.Type == WorkflowItemType.CloseIssue).ToList();
+            var closingIssueTasks = actionableTasks
+                .Where(task => task.Type == WorkflowItemType.CloseIssue)
+                .Where(task => activeClaim is null || task.IssueNumber == activeClaim.IssueNumber)
+                .ToList();
 
             foreach (var closingIssueTask in closingIssueTasks)
             {
                 await GitHubCliService.CloseIssueAsync(payload.Cwd, closingIssueTask.IssueNumber, CancellationToken.None);
             }
 
-            var decision = HookTaskRouter.Route(actionableTasks);
+            var decision = activeClaim is null
+                ? HookTaskRouter.Route(actionableTasks)
+                : HookTaskRouter.RouteClaimedWork(activeClaim, payload.SessionId, actionableTasks);
 
             if (!string.IsNullOrWhiteSpace(decision.BlockReason))
             {
@@ -120,7 +131,7 @@ public static class HookService
                 return 0;
             }
 
-            if (decision.SelectedTask is not null)
+            if (decision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(decision.SelectedTask))
             {
                 if (string.IsNullOrWhiteSpace(payload.SessionId))
                 {

@@ -1,5 +1,6 @@
 using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Work;
 
 namespace CodexGithubRouter.Hooks;
 
@@ -12,6 +13,8 @@ public sealed class HookTaskDecision
 
 public static class HookTaskRouter
 {
+    public static bool RequiresWorkClaim(WorkflowItem task) => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue;
+
     public static HookTaskDecision Route(IReadOnlyList<WorkflowItem> actionableTasks)
     {
         var blockingTypes = new HashSet<WorkflowItemType>
@@ -36,7 +39,7 @@ public static class HookTaskRouter
         var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber).ToList();
         if (issuesNeedingPRLink.Count > 0)
         {
-            return new HookTaskDecision { AdditionalContext = ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()) };
+            return new HookTaskDecision { SelectedTask = actionableTasks.First(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues), AdditionalContext = ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()) };
         }
 
         var inProgressIssue = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.ResumeInProgressIssue);
@@ -53,4 +56,33 @@ public static class HookTaskRouter
 
         return new HookTaskDecision { BlockReason = "No actionable workflow tasks found." };
     }
+
+    public static HookTaskDecision RouteClaimedWork(WorkClaim claim, string? sessionId, IReadOnlyList<WorkflowItem> actionableTasks)
+    {
+        if (!string.Equals(claim.OwnerSessionId, sessionId, StringComparison.Ordinal))
+        {
+            return new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} is owned by another Codex session." };
+        }
+
+        var claimedTasks = actionableTasks.Where(task =>
+            task.IssueNumber == claim.IssueNumber &&
+            (!claim.PullRequestNumber.HasValue || task.PullRequestNumber == claim.PullRequestNumber)).ToList();
+        if (claimedTasks.Count == 0)
+        {
+            return new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} was not found in the current workflow discovery. No unrelated work will be routed." };
+        }
+
+        var discoveredPullRequests = claimedTasks.Where(task => task.PullRequestNumber.HasValue).Select(task => task.PullRequestNumber!.Value).Distinct().ToList();
+        if (!claim.PullRequestNumber.HasValue && discoveredPullRequests.Count > 1)
+        {
+            return new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber} has multiple candidate pull requests ({string.Join(", ", discoveredPullRequests.Select(number => $"#{number}"))}). No work identity will be selected implicitly." };
+        }
+
+        var decision = Route(claimedTasks);
+        return string.IsNullOrWhiteSpace(decision.BlockReason)
+            ? decision
+            : new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed." };
+    }
+
+    private static string FormatPullRequest(int? pullRequestNumber) => pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 }

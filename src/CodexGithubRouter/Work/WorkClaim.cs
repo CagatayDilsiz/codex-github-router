@@ -8,6 +8,7 @@ public enum WorkClaimType
 
 public sealed class WorkClaim
 {
+    public Guid ClaimId { get; init; }
     public string OwnerSessionId { get; init; } = string.Empty;
     public int IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }

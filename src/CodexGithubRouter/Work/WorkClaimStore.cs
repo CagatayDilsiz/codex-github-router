@@ -15,15 +15,6 @@ public static class WorkClaimStore
         WithLockAsync(gitCommonDirectory, async () =>
         {
             var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (existing is not null && !SameWork(existing, requested))
-            {
-                return new WorkClaimAcquisitionResult
-                {
-                    Claim = existing,
-                    BlockReason = $"Active work claim is held by session '{existing.OwnerSessionId}' for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)}."
-                };
-            }
-
             if (existing is not null && !string.Equals(existing.OwnerSessionId, requested.OwnerSessionId, StringComparison.Ordinal))
             {
                 return new WorkClaimAcquisitionResult
@@ -33,13 +24,23 @@ public static class WorkClaimStore
                 };
             }
 
+            if (existing is not null && !SameWork(existing, requested) && !CanEnrich(existing, requested))
+            {
+                return new WorkClaimAcquisitionResult
+                {
+                    Claim = existing,
+                    BlockReason = $"Active work claim is already held for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)} and cannot be replaced by a different work identity."
+                };
+            }
+
             var now = DateTimeOffset.UtcNow;
             var claim = new WorkClaim
             {
+                ClaimId = existing is not null && existing.ClaimId != Guid.Empty ? existing.ClaimId : Guid.NewGuid(),
                 OwnerSessionId = requested.OwnerSessionId,
                 IssueNumber = requested.IssueNumber,
                 PullRequestNumber = requested.PullRequestNumber ?? existing?.PullRequestNumber,
-                WorkType = requested.WorkType,
+                WorkType = existing?.WorkType ?? requested.WorkType,
                 ClaimedAt = existing?.ClaimedAt ?? now,
                 LastUpdatedAt = now
             };
@@ -52,6 +53,15 @@ public static class WorkClaimStore
         {
             var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
             if (existing?.IssueNumber != issueNumber) return false;
+            DeleteUnsafe(gitCommonDirectory);
+            return true;
+        }, cancellationToken);
+
+    public static Task<bool> ReleaseIfMatchesAsync(string gitCommonDirectory, WorkClaim expected, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
+            if (existing is null || existing.ClaimId != expected.ClaimId) return false;
             DeleteUnsafe(gitCommonDirectory);
             return true;
         }, cancellationToken);
@@ -95,7 +105,13 @@ public static class WorkClaimStore
         await using (lockStream) return await action();
     }
 
-    private static bool SameWork(WorkClaim left, WorkClaim right) => left.IssueNumber == right.IssueNumber;
+    private static bool SameWork(WorkClaim left, WorkClaim right) =>
+        left.IssueNumber == right.IssueNumber && left.PullRequestNumber == right.PullRequestNumber;
+
+    private static bool CanEnrich(WorkClaim existing, WorkClaim requested) =>
+        existing.IssueNumber == requested.IssueNumber &&
+        existing.PullRequestNumber is null &&
+        requested.PullRequestNumber.HasValue;
 
     private static string FormatPullRequest(int? pullRequestNumber) => pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 }
