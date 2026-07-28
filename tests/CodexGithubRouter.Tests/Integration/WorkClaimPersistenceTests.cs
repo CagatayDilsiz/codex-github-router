@@ -1,5 +1,6 @@
-using System.Text.Json;
+using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Work;
+using CodexGithubRouter.Workflow;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
@@ -14,7 +15,7 @@ public sealed class WorkClaimPersistenceTests
         var claimPath = Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json");
         await File.WriteAllTextAsync(claimPath, "{\"ClaimId\":");
 
-        await Assert.ThrowsAsync<JsonException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
     }
 
     [Fact]
@@ -23,7 +24,7 @@ public sealed class WorkClaimPersistenceTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "null");
 
-        await Assert.ThrowsAsync<JsonException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
     }
 
     [Fact]
@@ -32,7 +33,7 @@ public sealed class WorkClaimPersistenceTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "{}");
 
-        await Assert.ThrowsAsync<JsonException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
     }
 
     [Fact]
@@ -52,5 +53,37 @@ public sealed class WorkClaimPersistenceTests
         Assert.NotNull(read);
         Assert.Equal(acquired.Claim!.ClaimId, read!.ClaimId);
         Assert.Equal(acquired.Claim!.IssueNumber, read.IssueNumber);
+    }
+
+    [Fact]
+    public async Task Legacy_claim_without_issue_baseline_loads_but_cannot_prove_current_pull_request()
+    {
+        using var sandbox = new TestSandbox();
+        var claimId = Guid.NewGuid();
+        await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), $$"""
+        {
+          "ClaimId": "{{claimId}}",
+          "Version": 1,
+          "OwnerSessionId": "legacy-session",
+          "IssueNumber": 4,
+          "WorkType": 0,
+          "ClaimedAt": "2026-07-28T12:00:00+00:00",
+          "LastUpdatedAt": "2026-07-28T12:00:00+00:00"
+        }
+        """);
+
+        var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+        var issue = new Issue { Number = 4 };
+        var pullRequest = new PullRequest
+        {
+            Number = 21,
+            HeadRefName = "codex/issue-4-recovered",
+            CreatedAt = DateTimeOffset.UtcNow,
+            ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = 4 } }
+        };
+
+        Assert.NotNull(claim);
+        Assert.False(WorkflowService.IsCurrentClaimPullRequest(claim!, issue, pullRequest));
+        Assert.NotNull(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
     }
 }

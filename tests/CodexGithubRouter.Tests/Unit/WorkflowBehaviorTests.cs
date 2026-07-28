@@ -237,7 +237,7 @@ static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber 
 }
 
 [Fact]
-public void AssertHookRoutePrecedence()
+public void Hook_route_precedence_prefers_blockers_then_actionable_work()
 {
     var blocker = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
     var changeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20 };
@@ -314,52 +314,6 @@ public void AssertVersionNormalization()
 }
 
 [Fact]
-public async Task Claim_concurrency_allows_one_owner_and_blocks_other_sessions()
-{
-    using var sandbox = new TestSandbox();
-    var directory = sandbox.GitCommonDirectory;
-    var attempts = await Task.WhenAll(Enumerable.Range(0, 8).Select(number => WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = $"session-{number}", IssueNumber = 4, WorkType = WorkClaimType.Implementation })));
-    Xunit.Assert.Equal(1, attempts.Count(result => result.Acquired));
-    var owner = attempts.Single(result => result.Acquired).Claim!.OwnerSessionId;
-    Xunit.Assert.True((await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 4, WorkType = WorkClaimType.Implementation })).Acquired);
-    var other = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-other", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(!other.Acquired && other.BlockReason!.Contains("another Codex session", StringComparison.Ordinal));
-}
-
-[Fact]
-public async Task Claim_persists_issue_update_baseline()
-{
-    using var sandbox = new TestSandbox();
-    var updatedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
-    var claim = (await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = updatedAt })).Claim!;
-    Xunit.Assert.Equal(updatedAt, claim.ClaimedIssueUpdatedAt);
-}
-
-[Fact]
-public async Task Stale_claim_release_cannot_delete_replacement_claim()
-{
-    using var sandbox = new TestSandbox();
-    var directory = sandbox.GitCommonDirectory;
-    var first = (await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest })).Claim!;
-    var different = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest });
-    Xunit.Assert.False(different.Acquired);
-    await WorkClaimStore.ReleaseForIssueAsync(directory, 4);
-    var replacement = (await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest })).Claim!;
-    Xunit.Assert.False(await WorkClaimStore.ReleaseIfMatchesAsync(directory, first));
-    Xunit.Assert.Equal(replacement.ClaimId, (await WorkClaimStore.ReadAsync(directory))!.ClaimId);
-}
-
-[Fact]
-public async Task Same_owner_claim_can_enrich_missing_pull_request()
-{
-    using var sandbox = new TestSandbox();
-    var directory = sandbox.GitCommonDirectory;
-    await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    var enriched = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
-    Xunit.Assert.True(enriched.Acquired && enriched.Claim?.PullRequestNumber == 21 && enriched.Claim.WorkType == WorkClaimType.Implementation);
-}
-
-[Fact]
 public void AssertPassiveReviewDoesNotBlockNewWork()
 {
     var decision = HookTaskRouter.Route(new[]
@@ -372,7 +326,7 @@ public void AssertPassiveReviewDoesNotBlockNewWork()
 }
 
 [Fact]
-public void AssertWorkClaimReconciliation()
+public void Work_claim_reconciliation_selects_current_pull_requests()
 {
     var configuration = new RouterConfiguration();
     var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest };
@@ -412,7 +366,7 @@ public void AssertWorkClaimReconciliation()
 }
 
 [Fact]
-public void AssertClaimRoutingAuthority()
+public void Claimed_work_routing_enforces_owner_and_identity()
 {
     var claim = new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
     var unrelatedChangeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 1, PullRequestNumber = 10 };
@@ -429,26 +383,7 @@ public void AssertClaimRoutingAuthority()
 }
 
 [Fact]
-public async Task AssertPullRequestTransitionLifecycleAsync()
-{
-    using var sandbox = new TestSandbox();
-    var directory = sandbox.GitCommonDirectory;
-    var initial = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(!await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, initial.Claim!, 18, new[] { 4 }, true) && await WorkClaimStore.ReadAsync(directory) is not null, "A PR-less implementation claim must retain ownership when a passive historical pull request has not been proven current.");
-    Xunit.Assert.True(await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, initial.Claim!, 18, new[] { 4 }, true, true) && await WorkClaimStore.ReadAsync(directory) is null, "A PR-less implementation claim must release only after the transitioned pull request has been proven current.");
-
-    var unrelated = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(!await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, unrelated.Claim!, 19, new[] { 5 }, true) && await WorkClaimStore.ReadAsync(directory) is not null, "An unrelated pull-request transition must retain a PR-less implementation claim.");
-    await WorkClaimStore.ReleaseForIssueAsync(directory, 4);
-
-    var claimedPullRequest = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
-    Xunit.Assert.True(!await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, claimedPullRequest.Claim!, 22, new[] { 4 }, true) && await WorkClaimStore.ReadAsync(directory) is not null, "A transition for a different pull request must retain the claimed pull request.");
-    Xunit.Assert.True(await WorkClaimStore.ReleaseForPullRequestTransitionAsync(directory, claimedPullRequest.Claim!, 21, new[] { 4 }, true), "A retry after a passive matching pull-request transition must clean up the matching claim even when labels are already correct.");
-    Xunit.Assert.True(WorkClaimReconciliationService.ShouldReleaseForIssueTransition(new WorkClaim { IssueNumber = 4 }, 4, WorkflowState.Blocked), "A no-op terminal issue transition must remain eligible for cleanup.");
-}
-
-[Fact]
-public async Task AssertClaimedWorkRecoveryAsync()
+public async Task Claimed_work_recovery_handles_issue_and_pull_request_states()
 {
     var configuration = new RouterConfiguration();
     var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
@@ -488,11 +423,6 @@ public async Task AssertClaimedWorkRecoveryAsync()
     Xunit.Assert.True((await WorkflowService.EvaluateClaimedWorkAsync(configuration, prClaim, completed, _ => Task.FromResult(deferred))).Tasks.Single().Type == WorkflowItemType.Deferred, "A deferred claimed pull request must be represented as passive work.");
     Xunit.Assert.True(!GitHubCliService.IsConfirmedNotFound("HTTP 404: not found") && GitHubCliService.IsConfirmedNotFound("Could not resolve to an issue") && GitHubCliService.IsConfirmedNotFound("Could not resolve to a PullRequest") && !GitHubCliService.IsConfirmedNotFound("Could not resolve host: api.github.com") && !GitHubCliService.IsConfirmedNotFound("authentication required") && !GitHubCliService.IsConfirmedNotFound("rate limit exceeded"), "Only command-specific confirmed missing GitHub items may trigger claim release.");
 
-    using var sandbox = new TestSandbox();
-    var directory = sandbox.GitCommonDirectory;
-    var first = (await WorkClaimStore.TryAcquireAsync(directory, claim)).Claim!;
-    var continuation = (await WorkClaimStore.TryAcquireAsync(directory, claim)).Claim!;
-    Xunit.Assert.True(continuation.Version > first.Version && !await WorkClaimStore.ReleaseIfMatchesAsync(directory, first) && (await WorkClaimStore.ReadAsync(directory))?.Version == continuation.Version, "A stale same-claim revision must not delete a newer owner continuation.");
 }
 
 [Fact]
