@@ -89,4 +89,19 @@ public sealed class WorkflowRoutingTests
     {
         Assert.Equal("No actionable workflow tasks found.", HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason);
     }
+
+    [Fact]
+    public async Task Closed_unmerged_active_claim_releases_and_blocker_remains_visible()
+    {
+        var now = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var claim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "owner", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest, ClaimedIssueUpdatedAt = now, ClaimedAt = now, LastUpdatedAt = now };
+        var service = new ActiveClaimRouteService(
+            _ => Task.FromResult(new WorkflowResponse { Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 4, PullRequestNumber = 21, Status = new WorkflowTaskStatus { Message = "Closed without merge." } } } }),
+            () => Task.FromResult<WorkClaim?>(claim),
+            _ => throw new InvalidOperationException("A closed claim must not be acquired again."),
+            () => Task.FromResult(true));
+
+        Assert.Null(await service.RouteAsync(claim, "owner"));
+        Assert.Equal("Closed without merge.", HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 4, Status = new WorkflowTaskStatus { Message = "Closed without merge." } }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } }).BlockReason);
+    }
 }

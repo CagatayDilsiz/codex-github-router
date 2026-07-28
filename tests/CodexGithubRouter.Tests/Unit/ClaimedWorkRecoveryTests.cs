@@ -62,7 +62,8 @@ public sealed class ClaimedWorkRecoveryTests
     [Fact]
     public void Claim_baseline_is_conservative_for_clock_ahead_and_behind_cases()
     {
-        var claim = Claim();
+        var baseline = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var claim = Claim(baseline, baseline.AddDays(1));
         var issue = WorkingIssueWithPullRequestReference();
         Assert.True(WorkflowService.IsCurrentClaimPullRequest(claim, issue, Pull(claim, "codex/issue-4-current", "codex:cr", claim.ClaimedIssueUpdatedAt.AddMinutes(1))));
         Assert.False(WorkflowService.IsCurrentClaimPullRequest(claim, issue, Pull(claim, "codex/issue-4-old", "codex:cr", claim.ClaimedIssueUpdatedAt.AddMinutes(-1))));
@@ -82,6 +83,26 @@ public sealed class ClaimedWorkRecoveryTests
         var issue = CompletedIssue();
         var result = await WorkflowService.EvaluateClaimedWorkAsync(new RouterConfiguration(), claim, issue, _ => Task.FromResult(Pull(claim, "codex/issue-4-old", "codex:rr", claim.ClaimedIssueUpdatedAt.AddMinutes(-1))));
         Assert.Equal(WorkflowItemType.RecoverCompletedIssue, result.Tasks.Single().Type);
+    }
+
+    [Fact]
+    public async Task Explicit_pull_request_claim_with_deferred_pull_request_returns_deferred()
+    {
+        var baseClaim = Claim();
+        var claim = new WorkClaim
+        {
+            ClaimId = baseClaim.ClaimId,
+            Version = baseClaim.Version,
+            OwnerSessionId = baseClaim.OwnerSessionId,
+            IssueNumber = baseClaim.IssueNumber,
+            PullRequestNumber = 21,
+            WorkType = WorkClaimType.ChangeRequest,
+            ClaimedIssueUpdatedAt = baseClaim.ClaimedIssueUpdatedAt,
+            ClaimedAt = baseClaim.ClaimedAt,
+            LastUpdatedAt = baseClaim.LastUpdatedAt
+        };
+        var result = await WorkflowService.EvaluateClaimedWorkAsync(new RouterConfiguration(), claim, CompletedIssue(), _ => Task.FromResult(Pull(claim, "codex/issue-4-current", "codex:deferred", claim.ClaimedIssueUpdatedAt.AddMinutes(1))));
+        Assert.Equal(WorkflowItemType.Deferred, result.Tasks.Single().Type);
     }
 
     [Theory]
@@ -109,10 +130,10 @@ public sealed class ClaimedWorkRecoveryTests
         Assert.False(GitHubCliService.IsConfirmedNotFound("rate limit exceeded"));
     }
 
-    private static WorkClaim Claim()
+    private static WorkClaim Claim(DateTimeOffset? baseline = null, DateTimeOffset? claimedAt = null)
     {
-        var now = DateTimeOffset.UtcNow.AddMinutes(-5);
-        return new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "owner", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = now, ClaimedAt = now, LastUpdatedAt = now };
+        var now = baseline ?? DateTimeOffset.UtcNow.AddMinutes(-5);
+        return new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "owner", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = now, ClaimedAt = claimedAt ?? now, LastUpdatedAt = now };
     }
 
     private static Issue WorkingIssueWithPullRequestReference() => new()
