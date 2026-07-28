@@ -134,6 +134,17 @@ static void AssertRepositoryGateConfiguration()
 
     configuration.Policies.RepositoryGate.Labels.Add("codex:critical");
     Assert(RepositoryGateService.IsGated(new Issue { Labels = new List<GithubLabel> { new() { Name = "codex:critical" } } }, configuration), "Configured repository gate aliases must use OR semantics.");
+
+    configuration.Policies.RepositoryGate.Labels.Clear();
+    configuration.Policies.RepositoryGate.Labels.Add(" codex:gate ");
+    try
+    {
+        WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
+        throw new InvalidOperationException("Whitespace around repository gate labels must be rejected.");
+    }
+    catch (InvalidOperationException exception) when (exception.Message.Contains("leading or trailing whitespace", StringComparison.Ordinal))
+    {
+    }
 }
 
 static async Task AssertRepositoryGateEvaluationAsync()
@@ -179,6 +190,23 @@ static async Task AssertRepositoryGateEvaluationAsync()
         : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } }));
     Assert(currentReview.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && currentReview.Tasks.Single().Status.Message.Contains("Pull request #24", StringComparison.Ordinal), "A historical merged pull request must not hide a newer gated review request.");
 
+    var interrupted = GatedIssue(19, WorkflowState.InProgress, 25);
+    var resumed = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { interrupted }, _ => Task.FromResult(new PullRequest
+    {
+        Number = 25,
+        State = "merged",
+        Labels = new List<GithubLabel>()
+    }));
+    Assert(resumed.Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "An interrupted gated issue must resume even when its linked pull requests are historical merged work.");
+
+    var closed = GatedIssue(26, WorkflowState.Ready);
+    closed.State = "closed";
+    Assert((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { closed }, _ => throw new InvalidOperationException())).Tasks.Count == 0, "A closed issue returned by a stale gate query must be ignored.");
+
+    var removed = GatedIssue(27, WorkflowState.Ready);
+    removed.Labels.RemoveAll(label => string.Equals(label.Name, "codex:gate", StringComparison.OrdinalIgnoreCase));
+    Assert((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { removed }, _ => throw new InvalidOperationException())).Tasks.Count == 0, "An issue whose gate label was removed after discovery must be ignored.");
+
     var gateDecision = HookTaskRouter.Route(new[]
     {
         new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 11, PullRequestNumber = 21 },
@@ -209,6 +237,7 @@ static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber 
     var issue = new Issue
     {
         Number = number,
+        State = "open",
         Labels = new List<GithubLabel>
         {
             new() { Name = stateLabel },

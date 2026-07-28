@@ -362,7 +362,9 @@ public static class WorkflowService
     {
         var tasks = new List<WorkflowItem>();
 
-        foreach (var issue in gatedIssues.OrderBy(issue => issue.Number))
+        foreach (var issue in gatedIssues
+            .Where(issue => string.Equals(issue.State, "open", StringComparison.OrdinalIgnoreCase) && RepositoryGateService.IsGated(issue, configuration))
+            .OrderBy(issue => issue.Number))
         {
             var issueResolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
             if (issueResolution.IsAmbiguous)
@@ -436,6 +438,11 @@ public static class WorkflowService
         var openPullRequests = linkedPullRequests.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)).ToList();
         if (openPullRequests.Count == 0)
         {
+            if (!allowCompletedWithoutPullRequest)
+            {
+                return new List<WorkflowItem> { new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = issue.Number, Status = new WorkflowTaskStatus { Message = $"Repository workflow is gated by issue #{issue.Number}. Resume the interrupted workstream." } } };
+            }
+
             if (linkedPullRequests.All(pr => pr.State.Equals("merged", StringComparison.OrdinalIgnoreCase)))
             {
                 return new List<WorkflowItem>();

@@ -16,11 +16,11 @@ public static class RepositoryGateService
     }
 
     public static IReadOnlyList<string> GetLabels(RouterConfiguration configuration) =>
-        configuration.Policies.RepositoryGate.Labels
+        configuration.Policies?.RepositoryGate?.Labels?
             .Where(label => !string.IsNullOrWhiteSpace(label))
             .Select(label => label.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
+            .ToList() ?? new List<string>();
 
     public static bool IsGated(Issue issue, RouterConfiguration configuration)
     {

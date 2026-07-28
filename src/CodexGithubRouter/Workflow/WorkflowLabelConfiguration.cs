@@ -46,6 +46,25 @@ public static class WorkflowLabelConfiguration
         ValidateDomain("pull request", pullRequestLabels);
 
         var workflowLabels = issueLabels.Concat(pullRequestLabels).Select(mapping => mapping.Label).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var configuredGateLabels = configuration.Policies?.RepositoryGate?.Labels;
+        if (configuredGateLabels is null)
+        {
+            throw new InvalidOperationException("Repository gate labels must be configured.");
+        }
+
+        foreach (var configuredGateLabel in configuredGateLabels)
+        {
+            if (string.IsNullOrWhiteSpace(configuredGateLabel))
+            {
+                throw new InvalidOperationException("Repository gate labels must not be empty.");
+            }
+
+            if (!string.Equals(configuredGateLabel, configuredGateLabel.Trim(), StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Repository gate label '{configuredGateLabel}' must not have leading or trailing whitespace.");
+            }
+        }
+
         var gateLabels = RepositoryGateService.GetLabels(configuration);
         if (gateLabels.Count == 0)
         {
@@ -59,10 +78,6 @@ public static class WorkflowLabelConfiguration
                 throw new InvalidOperationException($"Repository gate label '{gateLabel}' must not also be a workflow state label.");
             }
 
-            if (!string.Equals(gateLabel, gateLabel.Trim(), StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException($"Repository gate label '{gateLabel}' must not have leading or trailing whitespace.");
-            }
         }
     }
 
