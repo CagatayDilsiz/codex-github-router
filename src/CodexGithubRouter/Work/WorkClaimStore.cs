@@ -95,7 +95,24 @@ public static class WorkClaimStore
         var path = Path.Combine(gitCommonDirectory, ClaimFileName);
         if (!File.Exists(path)) return null;
         await using var stream = File.OpenRead(path);
-        return await JsonSerializer.DeserializeAsync<WorkClaim>(stream, JsonOptions, cancellationToken);
+        WorkClaim? claim;
+        try
+        {
+            claim = await JsonSerializer.DeserializeAsync<WorkClaim>(stream, JsonOptions, cancellationToken);
+        }
+        catch (JsonException exception)
+        {
+            throw new WorkClaimFileException("The repository work-claim file is not valid claim JSON.", exception);
+        }
+        if (claim is null || claim.ClaimId == Guid.Empty || claim.Version <= 0 ||
+            string.IsNullOrWhiteSpace(claim.OwnerSessionId) || claim.IssueNumber <= 0 ||
+            !Enum.IsDefined(claim.WorkType) ||
+            claim.ClaimedAt == default || claim.LastUpdatedAt == default)
+        {
+            throw new WorkClaimFileException("The work-claim file contains an invalid claim.");
+        }
+
+        return claim;
     }
 
     private static async Task WriteUnsafeAsync(string gitCommonDirectory, WorkClaim claim, CancellationToken cancellationToken)

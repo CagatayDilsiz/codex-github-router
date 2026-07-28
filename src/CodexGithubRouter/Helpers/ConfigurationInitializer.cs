@@ -8,22 +8,25 @@ namespace CodexGithubRouter.Helpers;
 public static class ConfigurationInitializer
 {
     public static async Task<int> InitAsync(string[] args, CancellationToken cancellationToken = default)
+        => await InitAsync(args, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<int> InitAsync(string[] args, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
         var force = args.Any(argument => string.Equals(argument, "--force", StringComparison.OrdinalIgnoreCase));
 
-        if (await SetupCodexHooksAsync(force, cancellationToken) != 0)
+        if (await SetupCodexHooksAsync(force, paths, cancellationToken) != 0)
         {
             return 1;
         }
 
-        await SetupDefaultConfigurationAsync(force, cancellationToken);
+        await SetupDefaultConfigurationAsync(force, paths, cancellationToken);
 
         return 0;
     }
 
-    private static async Task SetupDefaultConfigurationAsync(bool force, CancellationToken cancellationToken = default)
+    private static async Task SetupDefaultConfigurationAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
-        var path = ConfigurationPaths.WorkflowFile;
+        var path = paths.WorkflowFile;
 
         if (File.Exists(path) && !force)
         {
@@ -36,16 +39,16 @@ public static class ConfigurationInitializer
         Console.WriteLine($"Default configuration written: {path}");
     }
 
-    private static async Task<int> SetupCodexHooksAsync(bool force, CancellationToken cancellationToken = default)
+    private static async Task<int> SetupCodexHooksAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
-        var path = ConfigurationPaths.CodexDirectory;
+        var path = paths.CodexDirectory;
 
         if (!Directory.Exists(path))
         {
             Directory.CreateDirectory(path);
         }
 
-        var hooksFilePath = ConfigurationPaths.CodexHooksFile;
+        var hooksFilePath = paths.CodexHooksFile;
 
         if (File.Exists(hooksFilePath))
         {

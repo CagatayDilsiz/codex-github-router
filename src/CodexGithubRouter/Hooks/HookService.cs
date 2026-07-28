@@ -89,6 +89,13 @@ public static class HookService
 
             return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId);
         }
+        catch (WorkClaimFileException exception)
+        {
+            await Console.Error.WriteLineAsync(exception.ToString());
+            await WriteBlockAsync("The repository work-claim file is invalid and must be repaired before continuing.");
+
+            return 0;
+        }
         catch (JsonException exception)
         {
             await Console.Error.WriteLineAsync(exception.ToString());
