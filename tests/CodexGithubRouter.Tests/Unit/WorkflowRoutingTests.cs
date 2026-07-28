@@ -91,6 +91,15 @@ public sealed class WorkflowRoutingTests
     }
 
     [Fact]
+    public void Passive_tasks_preserve_aggregated_no_eligible_diagnostics()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.AwaitingReview, IssueNumber = 1 } });
+        var response = new WorkflowResponse { NoEligibleWork = true, Message = "No eligible work is available for the current worker." };
+
+        Assert.Equal(response.Message, HookService.ResolveRoutingBlockReason(decision, response));
+    }
+
+    [Fact]
     public async Task Closed_unmerged_active_claim_releases_and_blocker_remains_visible()
     {
         var now = DateTimeOffset.UtcNow.AddMinutes(-5);

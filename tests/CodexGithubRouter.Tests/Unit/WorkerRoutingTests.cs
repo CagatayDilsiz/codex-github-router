@@ -236,6 +236,7 @@ public sealed class WorkerRoutingTests
             {
                 Number = 50,
                 State = "open",
+                Labels = new List<GithubLabel> { new() { Name = "codex:cr" } },
                 ClosingIssuesReferences = new List<ClosingIssueReference>
                 {
                     new() { Number = 1 },
@@ -246,6 +247,33 @@ public sealed class WorkerRoutingTests
 
         Assert.Equal(WorkflowItemType.UnknownPullRequestState, response.Tasks.Single().Type);
         Assert.Contains("conflicting workers", response.Tasks.Single().Status.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Passive_pull_request_with_conflicting_closing_workers_remains_passive()
+    {
+        var configuration = WorkerConfiguration();
+        var issue = ReadyIssue(1, "codex:worker:luna");
+        issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 50 });
+        var otherIssue = ReadyIssue(2, "codex:worker:terra");
+
+        var response = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            configuration,
+            new[] { issue },
+            _ => Task.FromResult(new PullRequest
+            {
+                Number = 50,
+                State = "open",
+                Labels = new List<GithubLabel> { new() { Name = "codex:rr" } },
+                ClosingIssuesReferences = new List<ClosingIssueReference>
+                {
+                    new() { Number = 1 },
+                    new() { Number = 2 }
+                }
+            }),
+            number => Task.FromResult(number == 2 ? otherIssue : issue));
+
+        Assert.Equal(WorkflowItemType.AwaitingReview, response.Tasks.Single().Type);
     }
 
     private static RouterConfiguration WorkerConfiguration() => new()

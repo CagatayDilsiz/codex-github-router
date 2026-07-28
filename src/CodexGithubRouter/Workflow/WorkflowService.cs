@@ -98,13 +98,16 @@ public static class WorkflowService
                 };
             }
 
-            var workerConflict = await FindPullRequestWorkerConflictAsync(configuration, new[] { currentPullRequests[0] }, new[] { issue }, getIssue);
+            var currentPullRequest = currentPullRequests[0];
+            var workerConflict = claim.WorkType == WorkClaimType.ChangeRequest || HasPullRequestState(currentPullRequest, configuration, PullRequestState.ChangesRequested)
+                ? await FindPullRequestWorkerConflictAsync(configuration, new[] { currentPullRequest }, new[] { issue }, getIssue)
+                : null;
             if (workerConflict is not null)
             {
                 return new WorkflowResponse { IsSuccessful = false, Message = workerConflict.Message };
             }
 
-            return EvaluateClaimedPullRequest(configuration, claim, currentPullRequests[0]);
+            return EvaluateClaimedPullRequest(configuration, claim, currentPullRequest);
         }
 
         if (!issue.ClosingPullRequestsReferences.Any(reference => reference.Number == claim.PullRequestNumber.Value))
@@ -113,7 +116,9 @@ public static class WorkflowService
         }
 
         var pullRequest = await getPullRequest(claim.PullRequestNumber.Value);
-        var pullRequestWorkerConflict = await FindPullRequestWorkerConflictAsync(configuration, new[] { pullRequest }, new[] { issue }, getIssue);
+        var pullRequestWorkerConflict = claim.WorkType == WorkClaimType.ChangeRequest || HasPullRequestState(pullRequest, configuration, PullRequestState.ChangesRequested)
+            ? await FindPullRequestWorkerConflictAsync(configuration, new[] { pullRequest }, new[] { issue }, getIssue)
+            : null;
         if (pullRequestWorkerConflict is not null)
         {
             return new WorkflowResponse { IsSuccessful = false, Message = pullRequestWorkerConflict.Message };
@@ -272,7 +277,7 @@ public static class WorkflowService
         var response = await EvaluateInProgressIssuesAsync(
             configuration,
             inProgressIssues,
-            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None),
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
             currentModel,
             pullRequestNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, pullRequestNumber, CancellationToken.None));
         return response;
@@ -626,7 +631,10 @@ public static class WorkflowService
                 continue;
             }
 
-            var workerConflict = await FindPullRequestWorkerConflictAsync(configuration, prList, issueList, getIssue);
+            var hasChangesRequested = prList.Any(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase) && HasPullRequestState(pr, configuration, PullRequestState.ChangesRequested));
+            var workerConflict = hasChangesRequested
+                ? await FindPullRequestWorkerConflictAsync(configuration, prList.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase) && HasPullRequestState(pr, configuration, PullRequestState.ChangesRequested)).ToList(), issueList, getIssue)
+                : null;
             if (workerConflict is not null)
             {
                 workflowTasks.Add(new WorkflowItem

@@ -201,7 +201,9 @@ public static class HookService
         var actionableTasks = workflowTasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
         if (actionableTasks.Count == 0)
         {
-            await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");
+            await WriteBlockAsync(noEligibleWorkResponse?.NoEligibleWork == true
+                ? noEligibleWorkResponse.Message
+                : "All workflow tasks are deferred. No action is required at this time.");
             return 0;
         }
 
@@ -212,9 +214,10 @@ public static class HookService
         }
 
         var decision = HookTaskRouter.Route(actionableTasks);
-        if (!string.IsNullOrWhiteSpace(decision.BlockReason))
+        var blockReason = ResolveRoutingBlockReason(decision, noEligibleWorkResponse);
+        if (!string.IsNullOrWhiteSpace(blockReason))
         {
-            await WriteBlockAsync(decision.BlockReason);
+            await WriteBlockAsync(blockReason);
             return 0;
         }
 
@@ -313,6 +316,16 @@ public static class HookService
             WorkflowItemType.Deferred or
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
+
+    public static string? ResolveRoutingBlockReason(HookTaskDecision decision, WorkflowResponse? noEligibleWorkResponse)
+    {
+        if (noEligibleWorkResponse?.NoEligibleWork == true && string.Equals(decision.BlockReason, "No actionable workflow tasks found.", StringComparison.Ordinal))
+        {
+            return noEligibleWorkResponse.Message;
+        }
+
+        return decision.BlockReason;
+    }
 
     private static string FormatPullRequest(int? pullRequestNumber) =>
         pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
