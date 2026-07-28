@@ -42,6 +42,8 @@ public static class WorkClaimStore
                 IssueNumber = requested.IssueNumber,
                 PullRequestNumber = requested.PullRequestNumber ?? existing?.PullRequestNumber,
                 WorkType = existing?.WorkType ?? requested.WorkType,
+                WorkerProfile = requested.WorkerProfile ?? existing?.WorkerProfile,
+                Model = requested.Model ?? existing?.Model,
                 ClaimedIssueUpdatedAt = existing is not null && existing.ClaimedIssueUpdatedAt != default
                     ? existing.ClaimedIssueUpdatedAt
                     : requested.ClaimedIssueUpdatedAt,

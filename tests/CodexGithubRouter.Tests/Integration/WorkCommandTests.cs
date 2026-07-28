@@ -18,4 +18,25 @@ public sealed class WorkCommandTests
         Assert.Contains("Invalid work-claim file", error.ToString());
         Assert.Contains("Repair the file or remove it", error.ToString());
     }
+
+    [Fact]
+    public void Status_format_includes_worker_metadata_when_present()
+    {
+        var claim = new WorkClaim
+        {
+            IssueNumber = 14,
+            PullRequestNumber = 25,
+            WorkType = WorkClaimType.ChangeRequest,
+            OwnerSessionId = "session-a",
+            WorkerProfile = "terra",
+            Model = "gpt-5-codex",
+            ClaimedAt = DateTimeOffset.UtcNow,
+            LastUpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        var status = WorkCommandHandler.FormatClaimStatus(claim);
+
+        Assert.Contains("worker terra", status, StringComparison.Ordinal);
+        Assert.Contains("model gpt-5-codex", status, StringComparison.Ordinal);
+    }
 }

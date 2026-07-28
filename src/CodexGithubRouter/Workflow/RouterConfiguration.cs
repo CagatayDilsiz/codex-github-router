@@ -106,9 +106,25 @@ public sealed class RouterConfiguration
 public sealed class RouterPolicies
 {
     public RepositoryGatePolicy RepositoryGate { get; init; } = new();
+
+    public WorkerRoutingPolicy? WorkerRouting { get; init; }
 }
 
 public sealed class RepositoryGatePolicy
 {
     public List<string> Labels { get; init; } = new() { "codex:gate" };
+}
+
+public sealed class WorkerRoutingPolicy
+{
+    public string DefaultWorker { get; init; } = string.Empty;
+
+    public Dictionary<string, WorkerProfileConfiguration> Workers { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class WorkerProfileConfiguration
+{
+    public List<string> Labels { get; init; } = new();
+
+    public List<string> Models { get; init; } = new();
 }

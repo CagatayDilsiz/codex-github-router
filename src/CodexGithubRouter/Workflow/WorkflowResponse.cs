@@ -7,4 +7,8 @@ public class WorkflowResponse
     public string Message { get; set; } = string.Empty;
 
     public bool IsSuccessful { get; set; } = true;
+
+    public bool NoEligibleWork { get; init; }
+
+    public IReadOnlyList<WorkerEligibility> IneligibleWorkerIssues { get; init; } = Array.Empty<WorkerEligibility>();
 }

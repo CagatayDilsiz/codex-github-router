@@ -7,13 +7,26 @@ namespace CodexGithubRouter.Hooks;
 
 public sealed class ActiveClaimRouteService
 {
-    private readonly Func<WorkClaim, Task<WorkflowResponse>> checkClaimedWork;
+    private readonly Func<WorkClaim, string?, Task<WorkflowResponse>> checkClaimedWork;
     private readonly Func<Task<WorkClaim?>> readClaim;
     private readonly Func<WorkClaim, Task<WorkClaimAcquisitionResult>> acquireClaim;
     private readonly Func<Task<bool>> reconcileClaim;
 
     public ActiveClaimRouteService(
         Func<WorkClaim, Task<WorkflowResponse>> checkClaimedWork,
+        Func<Task<WorkClaim?>> readClaim,
+        Func<WorkClaim, Task<WorkClaimAcquisitionResult>> acquireClaim,
+        Func<Task<bool>> reconcileClaim)
+        : this(
+            (claim, _) => checkClaimedWork(claim),
+            readClaim,
+            acquireClaim,
+            reconcileClaim)
+    {
+    }
+
+    public ActiveClaimRouteService(
+        Func<WorkClaim, string?, Task<WorkflowResponse>> checkClaimedWork,
         Func<Task<WorkClaim?>> readClaim,
         Func<WorkClaim, Task<WorkClaimAcquisitionResult>> acquireClaim,
         Func<Task<bool>> reconcileClaim)
@@ -30,13 +43,13 @@ public sealed class ActiveClaimRouteService
         RouterConfiguration configuration)
     {
         return new ActiveClaimRouteService(
-            claim => WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, claim),
+            (claim, model) => WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, claim, model),
             () => WorkClaimStore.ReadAsync(gitCommonDirectory),
             requested => WorkClaimStore.TryAcquireAsync(gitCommonDirectory, requested),
             () => WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, configuration));
     }
 
-    public async Task<HookTaskDecision?> RouteAsync(WorkClaim activeClaim, string? sessionId)
+    public async Task<HookTaskDecision?> RouteAsync(WorkClaim activeClaim, string? sessionId, string? currentModel = null)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -44,7 +57,7 @@ public sealed class ActiveClaimRouteService
         }
 
         var currentClaim = activeClaim;
-        var claimedWork = await checkClaimedWork(currentClaim);
+        var claimedWork = await checkClaimedWork(currentClaim, currentModel);
         if (!claimedWork.IsSuccessful)
         {
             return new HookTaskDecision { BlockReason = claimedWork.Message };
@@ -67,7 +80,9 @@ public sealed class ActiveClaimRouteService
                 OwnerSessionId = sessionId,
                 IssueNumber = currentClaim.IssueNumber,
                 PullRequestNumber = candidatePullRequests[0],
-                WorkType = currentClaim.WorkType
+                WorkType = currentClaim.WorkType,
+                WorkerProfile = currentClaim.WorkerProfile,
+                Model = currentModel
             });
             if (!enrichment.Acquired)
             {
@@ -75,7 +90,7 @@ public sealed class ActiveClaimRouteService
             }
 
             currentClaim = await readClaim() ?? enrichment.Claim!;
-            claimedWork = await checkClaimedWork(currentClaim);
+            claimedWork = await checkClaimedWork(currentClaim, currentModel);
             if (!claimedWork.IsSuccessful)
             {
                 return new HookTaskDecision { BlockReason = claimedWork.Message };
@@ -95,7 +110,7 @@ public sealed class ActiveClaimRouteService
                 return null;
             }
 
-            claimedWork = await checkClaimedWork(currentClaim);
+            claimedWork = await checkClaimedWork(currentClaim, currentModel);
             if (!claimedWork.IsSuccessful)
             {
                 return new HookTaskDecision { BlockReason = claimedWork.Message };
@@ -123,7 +138,8 @@ public sealed class ActiveClaimRouteService
                 OwnerSessionId = sessionId,
                 IssueNumber = decision.SelectedTask.IssueNumber,
                 PullRequestNumber = decision.SelectedTask.PullRequestNumber,
-                WorkType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest ? WorkClaimType.ChangeRequest : WorkClaimType.Implementation
+                WorkType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest ? WorkClaimType.ChangeRequest : WorkClaimType.Implementation,
+                Model = currentModel
             });
             if (!acquisition.Acquired)
             {
@@ -131,7 +147,7 @@ public sealed class ActiveClaimRouteService
             }
 
             currentClaim = await readClaim() ?? acquisition.Claim!;
-            claimedWork = await checkClaimedWork(currentClaim);
+            claimedWork = await checkClaimedWork(currentClaim, currentModel);
             if (!claimedWork.IsSuccessful)
             {
                 return new HookTaskDecision { BlockReason = claimedWork.Message };

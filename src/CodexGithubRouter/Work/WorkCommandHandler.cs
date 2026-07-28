@@ -27,7 +27,7 @@ public static class WorkCommandHandler
                 case "status":
                     var claim = await WorkClaimStore.ReadAsync(commonDirectory);
                     if (claim is null) Console.WriteLine("No active work claim.");
-                    else Console.WriteLine($"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}, owner {claim.OwnerSessionId}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.");
+                    else Console.WriteLine(FormatClaimStatus(claim));
                     var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
                     var gateStatus = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
                     if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
@@ -59,5 +59,18 @@ public static class WorkCommandHandler
     {
         Console.Error.WriteLine("Usage: cgr work <status|reconcile|release --issue <number>> [working-directory]");
         return 1;
+    }
+
+    public static string FormatClaimStatus(WorkClaim claim)
+    {
+        ArgumentNullException.ThrowIfNull(claim);
+        var workerMetadata = new[]
+        {
+            string.IsNullOrWhiteSpace(claim.WorkerProfile) ? null : $"worker {claim.WorkerProfile}",
+            string.IsNullOrWhiteSpace(claim.Model) ? null : $"model {claim.Model}"
+        };
+        var metadata = string.Join(", ", workerMetadata.Where(value => value is not null));
+        var metadataSuffix = string.IsNullOrWhiteSpace(metadata) ? string.Empty : $", {metadata}";
+        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
     }
 }
