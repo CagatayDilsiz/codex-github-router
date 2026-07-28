@@ -55,7 +55,12 @@ public static class WorkerRoutingService
                 throw new InvalidOperationException("Worker profile names must not be empty.");
             }
 
-            if (!workerNames.Add(workerName.Trim()))
+            if (!string.Equals(workerName, workerName.Trim(), StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Worker profile name '{workerName}' must not have leading or trailing whitespace.");
+            }
+
+            if (!workerNames.Add(workerName))
             {
                 throw new InvalidOperationException($"Worker profile '{workerName}' is configured more than once.");
             }
@@ -80,6 +85,11 @@ public static class WorkerRoutingService
                 if (!string.Equals(label, label.Trim(), StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException($"Worker label '{label}' must not have leading or trailing whitespace.");
+                }
+
+                if (!label.StartsWith(WorkerLabelPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException($"Worker label '{label}' must use the '{WorkerLabelPrefix}' namespace.");
                 }
 
                 if (!labels.TryAdd(label, workerName))
@@ -124,38 +134,12 @@ public static class WorkerRoutingService
             return WorkerEligibility.Disabled;
         }
 
-        var configuredLabels = GetConfiguredLabels(policy);
-        var issueWorkerLabels = issue.Labels
-            .Select(label => label.Name?.Trim())
-            .Where(label => !string.IsNullOrWhiteSpace(label))
-            .Select(label => label!)
-            .Where(label => configuredLabels.ContainsKey(label) || label.StartsWith(WorkerLabelPrefix, StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        var unknownLabels = issueWorkerLabels
-            .Where(label => !configuredLabels.ContainsKey(label))
-            .ToList();
-
-        string? issueWorker = null;
-        if (issueWorkerLabels.Count == 0)
-        {
-            issueWorker = policy.DefaultWorker.Trim();
-        }
-        else if (issueWorkerLabels.Count == 1 && unknownLabels.Count == 0)
-        {
-            issueWorker = configuredLabels[issueWorkerLabels[0]];
-        }
-
+        var resolution = ResolveIssueWorker(configuration, issue);
+        var issueWorker = resolution.WorkerProfile;
         var currentWorker = FindWorkerForModel(policy, currentModel);
-        if (issueWorkerLabels.Count > 1)
+        if (!resolution.IsEligible)
         {
-            return Ineligible(issueWorker, currentWorker, currentModel, $"Issue #{issue.Number} has conflicting worker labels: {string.Join(", ", issueWorkerLabels)}.");
-        }
-
-        if (unknownLabels.Count > 0)
-        {
-            return Ineligible(issueWorker, currentWorker, currentModel, $"Issue #{issue.Number} has unknown worker label(s): {string.Join(", ", unknownLabels)}.");
+            return Ineligible(issueWorker, currentWorker, currentModel, resolution.Message);
         }
 
         if (string.IsNullOrWhiteSpace(currentModel))
@@ -180,6 +164,146 @@ public static class WorkerRoutingService
             WorkerProfile = issueWorker,
             CurrentWorkerProfile = currentWorker,
             Model = currentModel
+        };
+    }
+
+    public static WorkerLabelResolution ResolveIssueWorker(RouterConfiguration configuration, Issue issue)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(issue);
+
+        var policy = configuration.Policies?.WorkerRouting;
+        if (policy is null)
+        {
+            return WorkerLabelResolution.Disabled;
+        }
+
+        var configuredLabels = GetConfiguredLabels(policy);
+        var workerLabels = issue.Labels
+            .Select(label => label.Name?.Trim())
+            .Where(label => !string.IsNullOrWhiteSpace(label))
+            .Select(label => label!)
+            .Where(label => label.StartsWith(WorkerLabelPrefix, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var unknownLabels = workerLabels
+            .Where(label => !configuredLabels.ContainsKey(label))
+            .ToList();
+
+        if (workerLabels.Count > 1)
+        {
+            return InvalidWorkerResolution($"Issue #{issue.Number} has conflicting worker labels: {string.Join(", ", workerLabels)}.");
+        }
+
+        if (unknownLabels.Count > 0)
+        {
+            return InvalidWorkerResolution($"Issue #{issue.Number} has unknown worker label(s): {string.Join(", ", unknownLabels)}.");
+        }
+
+        var worker = workerLabels.Count == 0
+            ? policy.DefaultWorker.Trim()
+            : configuredLabels[workerLabels[0]];
+
+        return new WorkerLabelResolution
+        {
+            IsEnabled = true,
+            IsEligible = true,
+            WorkerProfile = worker
+        };
+    }
+
+    public static async Task<WorkerCandidateDiscoveryResult> DiscoverCandidatesAsync(
+        RouterConfiguration configuration,
+        int scanLimit,
+        string? currentModel,
+        Func<int, Task<IReadOnlyList<Issue>>> fetchIssues)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(fetchIssues);
+        if (scanLimit <= 0) throw new ArgumentOutOfRangeException(nameof(scanLimit));
+
+        var requestedLimit = scanLimit;
+        var issues = new Dictionary<int, Issue>();
+        var previousWindowCount = -1;
+
+        while (true)
+        {
+            var window = await fetchIssues(requestedLimit);
+            foreach (var issue in window)
+            {
+                issues[issue.Number] = issue;
+            }
+
+            if (!IsEnabled(configuration))
+            {
+                break;
+            }
+
+            var current = issues.Values.ToList();
+            var eligibleCount = FilterIssues(configuration, current, currentModel).EligibleIssues.Count;
+            if (eligibleCount >= scanLimit || window.Count < requestedLimit || window.Count <= previousWindowCount)
+            {
+                break;
+            }
+
+            previousWindowCount = window.Count;
+            requestedLimit = checked(requestedLimit * 2);
+        }
+
+        var discovered = issues.Values.ToList();
+        var filter = FilterIssues(configuration, discovered, currentModel);
+        return new WorkerCandidateDiscoveryResult(discovered, filter.IneligibleIssues);
+    }
+
+    public static WorkflowResponse FilterCodingTasks(
+        RouterConfiguration configuration,
+        IReadOnlyList<Issue> issues,
+        WorkflowResponse response,
+        string? currentModel)
+    {
+        if (!IsEnabled(configuration) || response.Tasks.Count == 0)
+        {
+            return response;
+        }
+
+        var issueByNumber = issues.ToDictionary(issue => issue.Number);
+        var eligibleTasks = new List<WorkflowItem>();
+        var ineligible = new List<WorkerEligibility>();
+        foreach (var task in response.Tasks)
+        {
+            if (task.Type is not (WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue))
+            {
+                eligibleTasks.Add(task);
+                continue;
+            }
+
+            if (!issueByNumber.TryGetValue(task.IssueNumber, out var issue))
+            {
+                eligibleTasks.Add(task);
+                continue;
+            }
+
+            var eligibility = Evaluate(configuration, issue, currentModel);
+            if (eligibility.IsEligible)
+            {
+                eligibleTasks.Add(task);
+            }
+            else
+            {
+                ineligible.Add(eligibility);
+            }
+        }
+
+        var noEligibleWork = response.Tasks.Any(task => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue) &&
+            eligibleTasks.Count == 0 && ineligible.Count > 0;
+        return new WorkflowResponse
+        {
+            Tasks = eligibleTasks,
+            IsSuccessful = response.IsSuccessful,
+            NoEligibleWork = noEligibleWork,
+            IneligibleWorkerIssues = ineligible,
+            Message = noEligibleWork ? FormatNoEligibleWorkMessage(currentModel, ineligible) : response.Message
         };
     }
 
@@ -283,6 +407,13 @@ public static class WorkerRoutingService
             ? null
             : policy.Workers.FirstOrDefault(worker => worker.Value.Models.Any(acceptedModel => string.Equals(acceptedModel, model.Trim(), StringComparison.Ordinal))).Key;
 
+    private static WorkerLabelResolution InvalidWorkerResolution(string message) => new()
+    {
+        IsEnabled = true,
+        IsEligible = false,
+        Message = message
+    };
+
     private static WorkerEligibility Ineligible(string? issueWorker, string? currentWorker, string? model, string message) => new()
     {
         IsEnabled = true,
@@ -293,6 +424,20 @@ public static class WorkerRoutingService
         Message = message
     };
 }
+
+public sealed class WorkerLabelResolution
+{
+    public static WorkerLabelResolution Disabled { get; } = new() { IsEligible = true };
+
+    public bool IsEnabled { get; init; }
+    public bool IsEligible { get; init; }
+    public string? WorkerProfile { get; init; }
+    public string Message { get; init; } = string.Empty;
+}
+
+public sealed record WorkerCandidateDiscoveryResult(
+    IReadOnlyList<Issue> Issues,
+    IReadOnlyList<WorkerEligibility> IneligibleIssues);
 
 public sealed class WorkerEligibility
 {

@@ -96,7 +96,7 @@ Model-aware worker routing is opt-in. Configure it under `policies.workerRouting
 }
 ```
 
-Without this policy, existing routing is unchanged. With it enabled, an unlabeled issue uses the default worker, one worker label selects that profile, and multiple or unknown worker labels are rejected. A hook only claims work when its current model belongs to the selected worker; pull-request change requests inherit the worker selected by their linked issue. `cgr auto on` provisions configured worker labels alongside the workflow labels.
+Without this policy, existing routing is unchanged. Worker labels must use the `codex:worker:` namespace so unknown worker labels fail closed. With it enabled, an unlabeled issue uses the default worker, one worker label selects that profile, and multiple or unknown worker labels are rejected. A hook only claims work when its current model belongs to the selected worker; pull-request change requests inherit the worker selected by their linked issue. `cgr auto on` provisions configured worker labels alongside the workflow labels, and `cgr work status` reports the resolved worker and model for newer claims.
 
 Autonomous mode is repository-specific. When it is enabled, the Codex hook can route prompts according to the configured GitHub issue and pull-request workflow. `cgr auto on` validates the workflow configuration and creates only missing labels referenced by its issue and pull-request label rules; existing labels are never changed. CGR stores the applied configuration fingerprint in the repository's shared Git directory so the same setup also works from Git worktrees. After changing the workflow configuration, run `cgr auto on` again to provision any newly required labels safely.
 

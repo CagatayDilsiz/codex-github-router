@@ -77,6 +77,29 @@ public sealed class WorkerRoutingTests
     }
 
     [Fact]
+    public async Task Candidate_discovery_expands_when_the_initial_window_has_no_eligible_work()
+    {
+        var configuration = WorkerConfiguration();
+        var calls = new List<int>();
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            2,
+            "terra-model",
+            async limit =>
+            {
+                calls.Add(limit);
+                await Task.Yield();
+                return limit == 2
+                    ? new[] { ReadyIssue(1, "codex:worker:luna"), ReadyIssue(2, "codex:worker:luna") }
+                    : new[] { ReadyIssue(1, "codex:worker:luna"), ReadyIssue(2, "codex:worker:luna"), ReadyIssue(3, "codex:worker:terra") };
+            });
+
+        Assert.Equal(new[] { 2, 4 }, calls);
+        Assert.Contains(result.Issues, issue => issue.Number == 3);
+        Assert.Equal(3, WorkerRoutingService.FilterIssues(configuration, result.Issues, "terra-model").EligibleIssues.Single().Number);
+    }
+
+    [Fact]
     public void No_eligible_work_explains_model_and_pending_workers()
     {
         var configuration = WorkerConfiguration();
@@ -85,6 +108,19 @@ public sealed class WorkerRoutingTests
         Assert.True(result.NoEligibleWork);
         Assert.Contains("Current model: terra-model", result.Message, StringComparison.Ordinal);
         Assert.Contains("Pending work exists for: luna", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void No_eligible_diagnostics_can_aggregate_multiple_priority_groups()
+    {
+        var configuration = WorkerConfiguration();
+        var completed = WorkerRoutingService.Evaluate(configuration, ReadyIssue(1, "codex:worker:luna"), "terra-model");
+        var interrupted = WorkerRoutingService.Evaluate(configuration, ReadyIssue(2, "codex:worker:luna"), "terra-model");
+
+        var message = WorkerRoutingService.FormatNoEligibleWorkMessage("terra-model", new[] { completed, interrupted });
+
+        Assert.Contains("Pending work exists for: luna", message, StringComparison.Ordinal);
+        Assert.Equal(2, message.Split("Issue #", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]
@@ -153,6 +189,63 @@ public sealed class WorkerRoutingTests
 
         exception = Assert.Throws<InvalidOperationException>(() => WorkerRoutingService.Validate(duplicateModel));
         Assert.Contains("assigned to multiple worker profiles", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        var whitespaceName = WorkerConfiguration();
+        whitespaceName.Policies.WorkerRouting!.Workers[" luna "] = whitespaceName.Policies.WorkerRouting.Workers["luna"];
+        whitespaceName.Policies.WorkerRouting.Workers.Remove("luna");
+        exception = Assert.Throws<InvalidOperationException>(() => WorkerRoutingService.Validate(whitespaceName));
+        Assert.Contains("leading or trailing whitespace", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+        var customLabel = WorkerConfiguration();
+        customLabel.Policies.WorkerRouting!.Workers["luna"].Labels[0] = "team:luna";
+        exception = Assert.Throws<InvalidOperationException>(() => WorkerRoutingService.Validate(customLabel));
+        Assert.Contains("namespace", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Merged_cleanup_remains_model_independent_for_another_worker()
+    {
+        var configuration = WorkerConfiguration();
+        var issue = new Issue
+        {
+            Number = 1,
+            Labels = new List<GithubLabel> { new() { Name = "codex:done" }, new() { Name = "codex:worker:luna" } },
+            ClosingPullRequestsReferences = new List<ClosingIssueReference> { new() { Number = 50 } }
+        };
+
+        var response = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            configuration,
+            new[] { issue },
+            _ => Task.FromResult(new PullRequest { Number = 50, State = "merged" }));
+
+        Assert.Equal(WorkflowItemType.CloseIssue, response.Tasks.Single().Type);
+    }
+
+    [Fact]
+    public async Task Pull_request_with_conflicting_closing_workers_is_blocked()
+    {
+        var configuration = WorkerConfiguration();
+        var issue = ReadyIssue(1, "codex:worker:luna");
+        issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 50 });
+        var otherIssue = ReadyIssue(2, "codex:worker:terra");
+
+        var response = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            configuration,
+            new[] { issue },
+            _ => Task.FromResult(new PullRequest
+            {
+                Number = 50,
+                State = "open",
+                ClosingIssuesReferences = new List<ClosingIssueReference>
+                {
+                    new() { Number = 1 },
+                    new() { Number = 2 }
+                }
+            }),
+            number => Task.FromResult(number == 2 ? otherIssue : issue));
+
+        Assert.Equal(WorkflowItemType.UnknownPullRequestState, response.Tasks.Single().Type);
+        Assert.Contains("conflicting workers", response.Tasks.Single().Status.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private static RouterConfiguration WorkerConfiguration() => new()

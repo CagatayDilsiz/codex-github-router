@@ -170,8 +170,19 @@ public static class HookService
                 return 0;
             }
 
-            noEligibleWorkResponse = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask }
-                .FirstOrDefault(response => response.NoEligibleWork);
+            var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask };
+            noEligibleWorkResponse = ordinaryResponses.FirstOrDefault(response => response.NoEligibleWork);
+            if (ordinaryResponses.SelectMany(response => response.IneligibleWorkerIssues).Any())
+            {
+                noEligibleWorkResponse = new WorkflowResponse
+                {
+                    NoEligibleWork = true,
+                    IneligibleWorkerIssues = ordinaryResponses.SelectMany(response => response.IneligibleWorkerIssues).ToList(),
+                    Message = WorkerRoutingService.FormatNoEligibleWorkMessage(
+                        currentModel,
+                        ordinaryResponses.SelectMany(response => response.IneligibleWorkerIssues).ToList())
+                };
+            }
 
             workflowTasks = SelectWorkflowTasks(
                 Array.Empty<WorkflowItem>(),
@@ -242,8 +253,9 @@ public static class HookService
                 return 0;
             }
 
-            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? acquisition.Claim;
-            if (acquiredClaim is null)
+            var newlyAcquiredClaim = acquisition.Claim;
+            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? newlyAcquiredClaim;
+            if (newlyAcquiredClaim is null || acquiredClaim is null)
             {
                 await WriteBlockAsync("Repository work was acquired but could not be re-read safely.");
                 return 0;
@@ -252,7 +264,10 @@ public static class HookService
             var refreshedClaimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, acquiredClaim, currentModel);
             if (!refreshedClaimedWork.IsSuccessful)
             {
-                await WriteBlockAsync(refreshedClaimedWork.Message);
+                var released = await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, newlyAcquiredClaim);
+                await WriteBlockAsync(released
+                    ? refreshedClaimedWork.Message
+                    : $"{refreshedClaimedWork.Message} The newly acquired claim could not be released safely because it changed concurrently; no work context was delivered.");
                 return 0;
             }
 

@@ -20,10 +20,10 @@ public static class WorkflowService
                 HeadRefName = true,
                 ClosingIssuesReferences = true
             },
-            CancellationToken.None), currentModel);
+            CancellationToken.None), currentModel, issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
     }
 
-    public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null)
+    public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null, Func<int, Task<Issue>>? getIssue = null)
     {
         var eligibility = WorkerRoutingService.EvaluateClaim(configuration, claim, issue, currentModel);
         if (eligibility.IsEnabled && !eligibility.IsEligible)
@@ -98,6 +98,12 @@ public static class WorkflowService
                 };
             }
 
+            var workerConflict = await FindPullRequestWorkerConflictAsync(configuration, new[] { currentPullRequests[0] }, new[] { issue }, getIssue);
+            if (workerConflict is not null)
+            {
+                return new WorkflowResponse { IsSuccessful = false, Message = workerConflict.Message };
+            }
+
             return EvaluateClaimedPullRequest(configuration, claim, currentPullRequests[0]);
         }
 
@@ -107,6 +113,12 @@ public static class WorkflowService
         }
 
         var pullRequest = await getPullRequest(claim.PullRequestNumber.Value);
+        var pullRequestWorkerConflict = await FindPullRequestWorkerConflictAsync(configuration, new[] { pullRequest }, new[] { issue }, getIssue);
+        if (pullRequestWorkerConflict is not null)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = pullRequestWorkerConflict.Message };
+        }
+
         return EvaluateClaimedPullRequest(configuration, claim, pullRequest);
     }
 
@@ -248,43 +260,27 @@ public static class WorkflowService
     public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
     {
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);
-        var inProgressIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, inProgressFilters, true);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, inProgressFilters, true, scanLimit, currentModel);
+        var inProgressIssues = discovery.Issues;
 
-        var workerFilter = WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel);
-        if (workerFilter.NoEligibleWork)
-        {
-            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
-        }
-
-        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
+        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
+            ? WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel).EligibleIssues
+            : inProgressIssues;
+        var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
-        return await EvaluateInProgressIssuesAsync(
+        var response = await EvaluateInProgressIssuesAsync(
             configuration,
-            workerFilter.EligibleIssues,
+            inProgressIssues,
             pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None),
-            currentModel);
+            currentModel,
+            pullRequestNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, pullRequestNumber, CancellationToken.None));
+        return response;
     }
 
-    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null)
+    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null, Func<int, Task<Issue>>? getIssue = null)
     {
-        var workerFilter = WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel);
-        if (workerFilter.NoEligibleWork)
-        {
-            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
-        }
-
-        var eligibleIssues = workerFilter.EligibleIssues;
-        if (eligibleIssues.Count > 1)
-        {
-            return new WorkflowResponse
-            {
-                IsSuccessful = false,
-                Message = $"Multiple issues are marked as in progress: {string.Join(", ", eligibleIssues.Select(issue => $"#{issue.Number}"))}. Resolve the workflow state before starting new work."
-            };
-        }
-
-        if (eligibleIssues.Count == 0)
+        if (inProgressIssues.Count == 0)
         {
             return new WorkflowResponse
             {
@@ -293,29 +289,54 @@ public static class WorkflowService
             };
         }
 
-        var issue = eligibleIssues[0];
-        if (issue.ClosingPullRequestsReferences.Count > 0)
+        var tasks = new List<WorkflowItem>();
+        foreach (var issue in inProgressIssues)
         {
-            return await CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, getPullRequest);
+            if (issue.ClosingPullRequestsReferences.Count > 0)
+            {
+                var linkedResponse = await CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, getPullRequest, getIssue);
+                if (!linkedResponse.IsSuccessful)
+                {
+                    return linkedResponse;
+                }
+
+                tasks.AddRange(linkedResponse.Tasks);
+                continue;
+            }
+
+            tasks.Add(new WorkflowItem
+            {
+                Type = WorkflowItemType.ResumeInProgressIssue,
+                IssueNumber = issue.Number,
+                Status = new WorkflowTaskStatus
+                {
+                    Message = $"Issue #{issue.Number} is already in progress and has no linked pull request. Resume or report the existing work; do not start a new issue."
+                }
+            });
         }
 
-        return new WorkflowResponse
+        var filtered = WorkerRoutingService.FilterCodingTasks(configuration, inProgressIssues, new WorkflowResponse
         {
             IsSuccessful = true,
-            Message = $"Issue #{issue.Number} is already in progress.",
-            Tasks = new List<WorkflowItem>
+            Message = "In-progress issue evaluation completed.",
+            Tasks = tasks
+        }, currentModel);
+
+        var codingIssueNumbers = filtered.Tasks
+            .Where(task => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue)
+            .Select(task => task.IssueNumber)
+            .Distinct()
+            .ToList();
+        if (codingIssueNumbers.Count > 1)
+        {
+            return new WorkflowResponse
             {
-                new()
-                {
-                    Type = WorkflowItemType.ResumeInProgressIssue,
-                    IssueNumber = issue.Number,
-                    Status = new WorkflowTaskStatus
-                    {
-                        Message = $"Issue #{issue.Number} is already in progress and has no linked pull request. Resume or report the existing work; do not start a new issue."
-                    }
-                }
-            }
-        };
+                IsSuccessful = false,
+                Message = $"Multiple issues are marked as in progress: {string.Join(", ", codingIssueNumbers.Select(number => $"#{number}"))}. Resolve the workflow state before starting new work."
+            };
+        }
+
+        return filtered;
     }
 
     public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
@@ -331,31 +352,28 @@ public static class WorkflowService
             };
         }
 
-        var openIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, openIssueFilters, false);
-
-        var workerFilter = WorkerRoutingService.FilterIssues(configuration, openIssues, currentModel);
-        if (workerFilter.NoEligibleWork)
-        {
-            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
-        }
-
-        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, openIssueFilters, false, scanLimit, currentModel);
+        var openIssues = discovery.Issues;
+        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
+            ? WorkerRoutingService.FilterIssues(configuration, openIssues, currentModel).EligibleIssues
+            : openIssues;
+        var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
-        if (workerFilter.EligibleIssues.Count > 0)
+        if (openIssues.Count > 0)
         {
-            var workflowTasks = workerFilter.EligibleIssues.Select(issue => new WorkflowItem
+            var workflowTasks = openIssues.Select(issue => new WorkflowItem
             {
                 Type = WorkflowItemType.NewIssue,
                 IssueNumber = issue.Number
             }).ToList();
 
-            return new WorkflowResponse
+            return WorkerRoutingService.FilterCodingTasks(configuration, openIssues, new WorkflowResponse
             {
                 Tasks = workflowTasks,
                 IsSuccessful = true,
                 Message = "New issues found."
-            };
+            }, currentModel);
         }
         else
         {
@@ -540,20 +558,23 @@ public static class WorkflowService
             };
         }       
 
-        var completedIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, completedIssueFilters, true);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, completedIssueFilters, true, scanLimit, currentModel);
+        var completedIssues = discovery.Issues;
 
-        var workerFilter = WorkerRoutingService.FilterIssues(configuration, completedIssues, currentModel);
-        if (workerFilter.NoEligibleWork)
-        {
-            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
-        }
-
-        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
+        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
+            ? WorkerRoutingService.FilterIssues(configuration, completedIssues, currentModel).EligibleIssues
+            : completedIssues;
+        var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
-        if (workerFilter.EligibleIssues.Count > 0)
+        if (completedIssues.Count > 0)
         {
-            return await CheckIssueLinkedPullRequestsAsync(configuration, workingDirectory, workerFilter.EligibleIssues);
+            var response = await CheckIssueLinkedPullRequestsAsync(
+                configuration,
+                completedIssues,
+                pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
+                issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
+            return WorkerRoutingService.FilterCodingTasks(configuration, completedIssues, response, currentModel);
         }
         else
         {
@@ -571,14 +592,16 @@ public static class WorkflowService
         return await CheckIssueLinkedPullRequestsAsync(
             configuration,
             completedIssues,
-            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None));
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
+            issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
     }
 
-    public static async Task<WorkflowResponse> CheckIssueLinkedPullRequestsAsync(RouterConfiguration configuration, IEnumerable<Issue> completedIssues, Func<int, Task<PullRequest>> getPullRequest)
+    public static async Task<WorkflowResponse> CheckIssueLinkedPullRequestsAsync(RouterConfiguration configuration, IEnumerable<Issue> completedIssues, Func<int, Task<PullRequest>> getPullRequest, Func<int, Task<Issue>>? getIssue = null)
     {
+        var issueList = completedIssues.ToList();
         var workflowTasks = new List<WorkflowItem>();
-        var noIssuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count == 0).ToList();
-        var issuesWithLinkedPRs = completedIssues.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();        
+        var noIssuesWithLinkedPRs = issueList.Where(issue => issue.ClosingPullRequestsReferences.Count == 0).ToList();
+        var issuesWithLinkedPRs = issueList.Where(issue => issue.ClosingPullRequestsReferences.Count > 0).ToList();
 
         foreach (var issue in issuesWithLinkedPRs)
         {
@@ -600,6 +623,23 @@ public static class WorkflowService
             if (prList.Count == 0)
             {
                 // this should not happen? but if it does, what to do?               
+                continue;
+            }
+
+            var workerConflict = await FindPullRequestWorkerConflictAsync(configuration, prList, issueList, getIssue);
+            if (workerConflict is not null)
+            {
+                workflowTasks.Add(new WorkflowItem
+                {
+                    Type = WorkflowItemType.UnknownPullRequestState,
+                    IssueNumber = issue.Number,
+                    PullRequestNumber = workerConflict.PullRequestNumber,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = workerConflict.Message,
+                        LinkedPullRequests = prList.Select(pr => pr.Number).ToList()
+                    }
+                });
                 continue;
             }
 
@@ -813,9 +853,95 @@ public static class WorkflowService
         return targetLabels.Any(label => currentLabels.Contains(label, StringComparer.OrdinalIgnoreCase));
     }
 
+    private static Task<WorkerCandidateDiscoveryResult> DiscoverIssuesAsync(
+        RouterConfiguration configuration,
+        string workingDirectory,
+        IssueFilters filters,
+        bool addLinkedPRToSelection,
+        int scanLimit,
+        string? currentModel) =>
+        WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            scanLimit,
+            currentModel,
+            async requestedLimit => await GitHubCliService.GetIssuesAsync(
+                workingDirectory,
+                new IssueFilters
+                {
+                    Labels = filters.Labels.ToList(),
+                    SearchTerms = filters.SearchTerms.ToList(),
+                    Limit = requestedLimit,
+                    SortBy = filters.SortBy,
+                    SortDirection = filters.SortDirection
+                },
+                addLinkedPRToSelection,
+                CancellationToken.None));
+
+    private static async Task<PullRequestWorkerConflict?> FindPullRequestWorkerConflictAsync(
+        RouterConfiguration configuration,
+        IReadOnlyList<PullRequest> pullRequests,
+        IReadOnlyList<Issue> knownIssues,
+        Func<int, Task<Issue>>? getIssue)
+    {
+        if (!WorkerRoutingService.IsEnabled(configuration))
+        {
+            return null;
+        }
+
+        foreach (var pullRequest in pullRequests.Where(pr => pr.State.Equals("open", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (pullRequest.ClosingIssuesReferences.Count == 0)
+            {
+                continue;
+            }
+
+            var closingIssues = new List<Issue>();
+            foreach (var reference in pullRequest.ClosingIssuesReferences)
+            {
+                var issue = knownIssues.FirstOrDefault(candidate => candidate.Number == reference.Number);
+                if (issue is null && getIssue is not null)
+                {
+                    issue = await getIssue(reference.Number);
+                }
+
+                if (issue is not null)
+                {
+                    closingIssues.Add(issue);
+                }
+            }
+
+            var resolutions = closingIssues
+                .Select(issue => new { Issue = issue, Resolution = WorkerRoutingService.ResolveIssueWorker(configuration, issue) })
+                .ToList();
+            var invalid = resolutions.FirstOrDefault(entry => !entry.Resolution.IsEligible);
+            if (invalid is not null)
+            {
+                return new PullRequestWorkerConflict(
+                    pullRequest.Number,
+                    $"Pull request #{pullRequest.Number} closes issue #{invalid.Issue.Number}, but its worker assignment is invalid. {invalid.Resolution.Message}");
+            }
+
+            var workers = resolutions
+                .Select(entry => entry.Resolution.WorkerProfile)
+                .Where(worker => !string.IsNullOrWhiteSpace(worker))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (workers.Count > 1)
+            {
+                return new PullRequestWorkerConflict(
+                    pullRequest.Number,
+                    $"Pull request #{pullRequest.Number} closes issues assigned to conflicting workers: {string.Join(", ", workers)}. Keep all closing issues on the same worker before continuing change-request work.");
+            }
+        }
+
+        return null;
+    }
+
     private static WorkflowResponse? FindIssueConflict(IEnumerable<Issue> issues, RouterConfiguration configuration)
     {
         var conflict = issues.Select(issue => new { Issue = issue, Resolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States) }).FirstOrDefault(entry => entry.Resolution.IsAmbiguous);
         return conflict is null ? null : new WorkflowResponse { IsSuccessful = false, Message = conflict.Resolution.DescribeConflict($"issue #{conflict.Issue.Number}") };
     }
+
+    private sealed record PullRequestWorkerConflict(int PullRequestNumber, string Message);
 }
