@@ -44,7 +44,7 @@ public static class WorkClaimStore
                 WorkType = existing?.WorkType ?? requested.WorkType,
                 ClaimedIssueUpdatedAt = existing is not null && existing.ClaimedIssueUpdatedAt != default
                     ? existing.ClaimedIssueUpdatedAt
-                    : requested.ClaimedIssueUpdatedAt,
+                    : requested.ClaimedIssueUpdatedAt == default ? now : requested.ClaimedIssueUpdatedAt,
                 ClaimedAt = existing?.ClaimedAt ?? now,
                 LastUpdatedAt = now
             };
@@ -95,7 +95,16 @@ public static class WorkClaimStore
         var path = Path.Combine(gitCommonDirectory, ClaimFileName);
         if (!File.Exists(path)) return null;
         await using var stream = File.OpenRead(path);
-        return await JsonSerializer.DeserializeAsync<WorkClaim>(stream, JsonOptions, cancellationToken);
+        var claim = await JsonSerializer.DeserializeAsync<WorkClaim>(stream, JsonOptions, cancellationToken);
+        if (claim is null || claim.ClaimId == Guid.Empty || claim.Version <= 0 ||
+            string.IsNullOrWhiteSpace(claim.OwnerSessionId) || claim.IssueNumber <= 0 ||
+            !Enum.IsDefined(claim.WorkType) || claim.ClaimedIssueUpdatedAt == default ||
+            claim.ClaimedAt == default || claim.LastUpdatedAt == default)
+        {
+            throw new JsonException("The work-claim file contains an invalid claim.");
+        }
+
+        return claim;
     }
 
     private static async Task WriteUnsafeAsync(string gitCommonDirectory, WorkClaim claim, CancellationToken cancellationToken)

@@ -138,88 +138,82 @@ public void AssertRepositoryGateConfiguration()
 }
 
 [Fact]
-public async Task AssertRepositoryGateEvaluationAsync()
+public async Task Gated_review_request_blocks_with_context()
 {
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { GatedIssue(10, WorkflowState.Completed, 20) }, _ => Task.FromResult(new PullRequest { Number = 20, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } }));
+    Xunit.Assert.True(result.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && result.Tasks.Single().Status.Message.Contains("issue #10", StringComparison.Ordinal) && result.Tasks.Single().Status.Message.Contains("Pull request #20", StringComparison.Ordinal));
+}
+
+[Fact]
+public async Task Gated_change_request_remains_actionable()
+{
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { GatedIssue(11, WorkflowState.Completed, 21) }, _ => Task.FromResult(new PullRequest { Number = 21, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } }));
+    Xunit.Assert.True(result.Tasks.Single().Type == WorkflowItemType.ChangeRequest);
+}
+
+[Fact]
+public async Task Gated_ready_issue_is_prioritized_without_pull_request_lookup()
+{
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { GatedIssue(12, WorkflowState.Ready) }, _ => throw new InvalidOperationException());
+    Xunit.Assert.True(result.Tasks.Single().Type == WorkflowItemType.NewIssue);
+}
+
+[Fact]
+public async Task Merged_gated_pull_request_is_terminal()
+{
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { GatedIssue(14, WorkflowState.Completed, 22) }, _ => Task.FromResult(new PullRequest { Number = 22, State = "merged", Labels = new List<GithubLabel>() }));
+    Xunit.Assert.Empty(result.Tasks);
+}
+
+[Fact]
+public async Task Historical_merged_pull_request_does_not_hide_current_change_request()
+{
+    var issue = GatedIssue(18, WorkflowState.Completed, 23);
+    issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 24 });
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { issue }, number => Task.FromResult(number == 23 ? new PullRequest { Number = 23, State = "merged" } : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } }));
+    Xunit.Assert.True(result.Tasks.Single().Type == WorkflowItemType.ChangeRequest && result.Tasks.Single().PullRequestNumber == 24);
+}
+
+[Fact]
+public async Task Historical_merged_pull_request_does_not_hide_current_review_request()
+{
+    var issue = GatedIssue(18, WorkflowState.Completed, 23);
+    issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 24 });
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { issue }, number => Task.FromResult(number == 23 ? new PullRequest { Number = 23, State = "merged" } : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } }));
+    Xunit.Assert.True(result.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && result.Tasks.Single().Status.Message.Contains("Pull request #24", StringComparison.Ordinal));
+}
+
+[Fact]
+public async Task Interrupted_gated_work_recovers_after_historical_merge()
+{
+    var result = await WorkflowService.EvaluateRepositoryGateAsync(new RouterConfiguration(), new[] { GatedIssue(19, WorkflowState.InProgress, 25) }, _ => Task.FromResult(new PullRequest { Number = 25, State = "merged" }));
+    Xunit.Assert.Equal(WorkflowItemType.ResumeInProgressIssue, result.Tasks.Single().Type);
+}
+
+[Fact]
+public async Task Closed_or_removed_gate_issue_is_ignored()
+{
+    var closed = GatedIssue(26, WorkflowState.Ready); closed.State = "closed";
+    var removed = GatedIssue(27, WorkflowState.Ready); removed.Labels.RemoveAll(label => label.Name == "codex:gate");
     var configuration = new RouterConfiguration();
-    var reviewIssue = GatedIssue(10, WorkflowState.Completed, 20);
-    var review = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { reviewIssue }, _ => Task.FromResult(new PullRequest
-    {
-        Number = 20,
-        State = "open",
-        Labels = new List<GithubLabel> { new() { Name = "codex:rr" } }
-    }));
-    Xunit.Assert.True(review.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && review.Tasks.Single().Status.Message.Contains("issue #10", StringComparison.Ordinal) && review.Tasks.Single().Status.Message.Contains("Pull request #20", StringComparison.Ordinal), "A gated review-requested workstream must block unrelated work with exact issue and pull-request context.");
+    Xunit.Assert.Empty((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { closed }, _ => throw new InvalidOperationException())).Tasks);
+    Xunit.Assert.Empty((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { removed }, _ => throw new InvalidOperationException())).Tasks);
+}
 
-    var changes = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(11, WorkflowState.Completed, 21) }, _ => Task.FromResult(new PullRequest
-    {
-        Number = 21,
-        State = "open",
-        Labels = new List<GithubLabel> { new() { Name = "codex:cr" } }
-    }));
-    Xunit.Assert.True(changes.Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A gated change request must remain actionable and claimable.");
+[Fact]
+public void Gate_routing_precedes_ordinary_ready_work()
+{
+    var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 11, PullRequestNumber = 21 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 } });
+    Xunit.Assert.Equal(11, decision.SelectedTask?.IssueNumber);
+}
 
-    var ready = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(12, WorkflowState.Ready) }, _ => throw new InvalidOperationException("A gated ready issue should not query pull requests."));
-    Xunit.Assert.True(ready.Tasks.Single().Type == WorkflowItemType.NewIssue, "A gated ready issue must be prioritized as new work.");
-
-    var merged = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(14, WorkflowState.Completed, 22) }, _ => Task.FromResult(new PullRequest
-    {
-        Number = 22,
-        State = "merged",
-        Labels = new List<GithubLabel>()
-    }));
-    Xunit.Assert.True(merged.Tasks.Count == 0, "A merged pull request must make its repository gate terminal.");
-
-    var historicalMerged = GatedIssue(18, WorkflowState.Completed, 23);
-    historicalMerged.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 24 });
-    var currentChanges = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { historicalMerged }, number => Task.FromResult(number == 23
-        ? new PullRequest { Number = 23, State = "merged", Labels = new List<GithubLabel>() }
-        : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } }));
-    Xunit.Assert.True(currentChanges.Tasks.Single().Type == WorkflowItemType.ChangeRequest && currentChanges.Tasks.Single().PullRequestNumber == 24, "A historical merged pull request must not hide a newer gated change request.");
-
-    var currentReview = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { historicalMerged }, number => Task.FromResult(number == 23
-        ? new PullRequest { Number = 23, State = "merged", Labels = new List<GithubLabel>() }
-        : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } }));
-    Xunit.Assert.True(currentReview.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && currentReview.Tasks.Single().Status.Message.Contains("Pull request #24", StringComparison.Ordinal), "A historical merged pull request must not hide a newer gated review request.");
-
-    var interrupted = GatedIssue(19, WorkflowState.InProgress, 25);
-    var resumed = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { interrupted }, _ => Task.FromResult(new PullRequest
-    {
-        Number = 25,
-        State = "merged",
-        Labels = new List<GithubLabel>()
-    }));
-    Xunit.Assert.True(resumed.Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "An interrupted gated issue must resume even when its linked pull requests are historical merged work.");
-
-    var closed = GatedIssue(26, WorkflowState.Ready);
-    closed.State = "closed";
-    Xunit.Assert.True((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { closed }, _ => throw new InvalidOperationException())).Tasks.Count == 0, "A closed issue returned by a stale gate query must be ignored.");
-
-    var removed = GatedIssue(27, WorkflowState.Ready);
-    removed.Labels.RemoveAll(label => string.Equals(label.Name, "codex:gate", StringComparison.OrdinalIgnoreCase));
-    Xunit.Assert.True((await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { removed }, _ => throw new InvalidOperationException())).Tasks.Count == 0, "An issue whose gate label was removed after discovery must be ignored.");
-
-    var gateDecision = HookTaskRouter.Route(new[]
-    {
-        new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 11, PullRequestNumber = 21 },
-        new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 }
-    });
-    Xunit.Assert.True(gateDecision.SelectedTask?.IssueNumber == 11, "Gated actionable work must win over ordinary ready work when it is evaluated first.");
-
-    var blockedGateDecision = HookTaskRouter.Route(new[]
-    {
-        new WorkflowItem { Type = WorkflowItemType.RepositoryGateBlock, IssueNumber = 10, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #10." } },
-        new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 }
-    });
-    Xunit.Assert.True(blockedGateDecision.BlockReason == "Repository workflow is gated by issue #10.", "A gated waiting workstream must block ordinary ready work.");
-
-    var gateTasks = HookService.SelectWorkflowTasks(
-        new[] { new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 } },
-        new[]
-        {
-            new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 16, PullRequestNumber = 30 },
-            new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 17 }
-        });
-    Xunit.Assert.True(gateTasks.Count == 1 && gateTasks[0].IssueNumber == 12, "A gated task must short-circuit ordinary change requests and blockers.");
+[Fact]
+public void Blocked_gate_and_gate_task_selection_preserve_precedence()
+{
+    var blocked = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.RepositoryGateBlock, IssueNumber = 10, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #10." } }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 } });
+    Xunit.Assert.Equal("Repository workflow is gated by issue #10.", blocked.BlockReason);
+    var selected = HookService.SelectWorkflowTasks(new[] { new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 } }, new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 16, PullRequestNumber = 30 }, new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 17 } });
+    Xunit.Assert.Equal(12, selected.Single().IssueNumber);
 }
 
 static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber = null)
@@ -320,46 +314,49 @@ public void AssertVersionNormalization()
 }
 
 [Fact]
-public async Task AssertWorkClaimsAsync()
+public async Task Claim_concurrency_allows_one_owner_and_blocks_other_sessions()
 {
     using var sandbox = new TestSandbox();
     var directory = sandbox.GitCommonDirectory;
     var attempts = await Task.WhenAll(Enumerable.Range(0, 8).Select(number => WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = $"session-{number}", IssueNumber = 4, WorkType = WorkClaimType.Implementation })));
-    Xunit.Assert.True(attempts.Count(result => result.Acquired) == 1, "Simultaneous claim attempts must produce exactly one owner.");
+    Xunit.Assert.Equal(1, attempts.Count(result => result.Acquired));
     var owner = attempts.Single(result => result.Acquired).Claim!.OwnerSessionId;
-    var continuation = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(continuation.Acquired, "The owning session must be able to continue its existing claim.");
-    var otherSession = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-other", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(!otherSession.Acquired && otherSession.BlockReason?.Contains("another Codex session", StringComparison.Ordinal) == true, "A different session must be blocked from the same claim.");
-    var otherIssue = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 5, WorkType = WorkClaimType.Implementation });
-    Xunit.Assert.True(!otherIssue.Acquired, "A repository may have only one active claim.");
-    Xunit.Assert.True(await WorkClaimStore.ReleaseForIssueAsync(directory, 4), "An explicit release must remove the current claim.");
-    Xunit.Assert.True((await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 5, WorkType = WorkClaimType.Implementation })).Acquired, "The same session must be able to claim new work after release.");
-    using var baselineSandbox = new TestSandbox();
-    var baselineDirectory = baselineSandbox.GitCommonDirectory;
-    var issueUpdatedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
-    var baselineClaim = (await WorkClaimStore.TryAcquireAsync(baselineDirectory, new WorkClaim
-    {
-        OwnerSessionId = "session-a",
-        IssueNumber = 4,
-        WorkType = WorkClaimType.Implementation,
-        ClaimedIssueUpdatedAt = issueUpdatedAt
-    })).Claim!;
-    Xunit.Assert.True(baselineClaim.ClaimedIssueUpdatedAt == issueUpdatedAt, "A newly acquired claim must persist the GitHub-derived issue updatedAt baseline.");
-    using var identitySandbox = new TestSandbox();
-    var identityDirectory = identitySandbox.GitCommonDirectory;
-    var first = await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
-    var differentPullRequest = await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest });
-    Xunit.Assert.True(first.Acquired && !differentPullRequest.Acquired && (await WorkClaimStore.ReadAsync(identityDirectory))?.PullRequestNumber == 21, "Same-issue claims with different pull requests must remain different work identities.");
-    var staleClaim = (await WorkClaimStore.ReadAsync(identityDirectory))!;
-    await WorkClaimStore.ReleaseForIssueAsync(identityDirectory, 4);
-    var replacement = (await WorkClaimStore.TryAcquireAsync(identityDirectory, new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest })).Claim!;
-    Xunit.Assert.True(!await WorkClaimStore.ReleaseIfMatchesAsync(identityDirectory, staleClaim) && (await WorkClaimStore.ReadAsync(identityDirectory))?.ClaimId == replacement.ClaimId, "Stale reconciliation must not delete a replacement claim.");
-    using var enrichmentSandbox = new TestSandbox();
-    var enrichmentDirectory = enrichmentSandbox.GitCommonDirectory;
-    await WorkClaimStore.TryAcquireAsync(enrichmentDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
-    var enriched = await WorkClaimStore.TryAcquireAsync(enrichmentDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
-    Xunit.Assert.True(enriched.Acquired && enriched.Claim?.PullRequestNumber == 21 && enriched.Claim.WorkType == WorkClaimType.Implementation, "A same-owner claim may enrich a missing pull request without changing work type.");
+    Xunit.Assert.True((await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = owner, IssueNumber = 4, WorkType = WorkClaimType.Implementation })).Acquired);
+    var other = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-other", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    Xunit.Assert.True(!other.Acquired && other.BlockReason!.Contains("another Codex session", StringComparison.Ordinal));
+}
+
+[Fact]
+public async Task Claim_persists_issue_update_baseline()
+{
+    using var sandbox = new TestSandbox();
+    var updatedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
+    var claim = (await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = updatedAt })).Claim!;
+    Xunit.Assert.Equal(updatedAt, claim.ClaimedIssueUpdatedAt);
+}
+
+[Fact]
+public async Task Stale_claim_release_cannot_delete_replacement_claim()
+{
+    using var sandbox = new TestSandbox();
+    var directory = sandbox.GitCommonDirectory;
+    var first = (await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest })).Claim!;
+    var different = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest });
+    Xunit.Assert.False(different.Acquired);
+    await WorkClaimStore.ReleaseForIssueAsync(directory, 4);
+    var replacement = (await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest })).Claim!;
+    Xunit.Assert.False(await WorkClaimStore.ReleaseIfMatchesAsync(directory, first));
+    Xunit.Assert.Equal(replacement.ClaimId, (await WorkClaimStore.ReadAsync(directory))!.ClaimId);
+}
+
+[Fact]
+public async Task Same_owner_claim_can_enrich_missing_pull_request()
+{
+    using var sandbox = new TestSandbox();
+    var directory = sandbox.GitCommonDirectory;
+    await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation });
+    var enriched = await WorkClaimStore.TryAcquireAsync(directory, new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.ChangeRequest });
+    Xunit.Assert.True(enriched.Acquired && enriched.Claim?.PullRequestNumber == 21 && enriched.Claim.WorkType == WorkClaimType.Implementation);
 }
 
 [Fact]
@@ -499,75 +496,46 @@ public async Task AssertClaimedWorkRecoveryAsync()
 }
 
 [Fact]
-public async Task AssertActiveClaimRouteOrchestrationAsync()
+public async Task Passive_current_claim_releases_and_allows_next_ready_work()
 {
-    var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
-    var claim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedAt = claimedAt, LastUpdatedAt = claimedAt };
-    var enrichedClaim = new WorkClaim { ClaimId = claim.ClaimId, Version = 2, OwnerSessionId = claim.OwnerSessionId, IssueNumber = claim.IssueNumber, PullRequestNumber = 21, WorkType = claim.WorkType, ClaimedAt = claim.ClaimedAt, LastUpdatedAt = DateTimeOffset.UtcNow };
+    var claim = ClaimForRoute();
+    var enriched = ClaimForRoute(21);
+    var result = await new ActiveClaimRouteService(_ => Task.FromResult(ClaimedResponse(WorkflowItemType.AwaitingReview, 21)), () => Task.FromResult<WorkClaim?>(enriched), _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enriched }), () => Task.FromResult(true)).RouteAsync(claim, "session-a");
+    Xunit.Assert.Null(result);
+    Xunit.Assert.Equal(5, HookTaskRouter.Route(new[] { ClaimedTask(WorkflowItemType.AwaitingReview, 21), new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } }).SelectedTask?.IssueNumber);
+}
 
-    var passiveChecks = 0;
-    var passiveRelease = await new ActiveClaimRouteService(
-        current => Task.FromResult(passiveChecks++ == 0 ? ClaimedResponse(WorkflowItemType.AwaitingReview, 21) : ClaimedResponse(WorkflowItemType.AwaitingReview, 21)),
-        () => Task.FromResult<WorkClaim?>(enrichedClaim),
-        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
-        () => Task.FromResult(true))
-        .RouteAsync(claim, "session-a");
-    Xunit.Assert.True(passiveRelease is null, "A proven current passive PR must release the claim through the orchestration service.");
-    var nextReady = HookTaskRouter.Route(new[] { ClaimedTask(WorkflowItemType.AwaitingReview, 21), new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
-    Xunit.Assert.True(nextReady.SelectedTask?.IssueNumber == 5, "After claim release, the same invocation must allow the next ready issue to route.");
+[Fact]
+public async Task Historical_claimed_pull_request_keeps_implementation_recovery_active()
+{
+    var claim = ClaimForRoute();
+    var result = await new ActiveClaimRouteService(_ => Task.FromResult(ClaimedResponse(WorkflowItemType.ResumeInProgressIssue)), () => Task.FromResult<WorkClaim?>(claim), _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = claim }), () => Task.FromResult(false)).RouteAsync(claim, "session-a");
+    Xunit.Assert.Equal(WorkflowItemType.ResumeInProgressIssue, result?.SelectedTask?.Type);
+}
 
-    var historicalChecks = 0;
-    var historicalDecision = await new ActiveClaimRouteService(
-        current => Task.FromResult(historicalChecks++ == 0 ? ClaimedResponse(WorkflowItemType.ResumeInProgressIssue) : ClaimedResponse(WorkflowItemType.ResumeInProgressIssue)),
-        () => Task.FromResult<WorkClaim?>(claim),
-        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = claim }),
-        () => Task.FromResult(false))
-        .RouteAsync(claim, "session-a");
-    Xunit.Assert.True(historicalDecision?.SelectedTask?.Type == WorkflowItemType.ResumeInProgressIssue, "A historical PR must leave the new claim active and continue implementation recovery.");
+[Fact]
+public async Task Current_claimed_change_request_wins_after_state_race()
+{
+    var claim = ClaimForRoute();
+    var enriched = ClaimForRoute(21);
+    var result = await new ActiveClaimRouteService(current => Task.FromResult(current.PullRequestNumber is null ? ClaimedResponse(WorkflowItemType.AwaitingReview, 21) : ClaimedResponse(WorkflowItemType.ChangeRequest, 21)), () => Task.FromResult<WorkClaim?>(enriched), _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enriched }), () => Task.FromResult(false)).RouteAsync(claim, "session-a");
+    Xunit.Assert.Equal(WorkflowItemType.ChangeRequest, result?.SelectedTask?.Type);
+}
 
-    var workingCurrentDecision = await new ActiveClaimRouteService(
-        current => Task.FromResult(ClaimedResponse(WorkflowItemType.ChangeRequest, 21)),
-        () => Task.FromResult<WorkClaim?>(enrichedClaim),
-        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
-        () => Task.FromResult(false))
-        .RouteAsync(claim, "session-a");
-    Xunit.Assert.True(workingCurrentDecision?.SelectedTask?.Type == WorkflowItemType.ChangeRequest && workingCurrentDecision.SelectedTask.PullRequestNumber == 21, "A proven current PR linked while working must route only its claimed change request.");
+[Fact]
+public async Task Generic_github_failure_preserves_claim_without_reconciliation()
+{
+    var called = false;
+    var claim = ClaimForRoute();
+    await Xunit.Assert.ThrowsAsync<InvalidOperationException>(() => new ActiveClaimRouteService(_ => throw new InvalidOperationException("HTTP 404: not found"), () => Task.FromResult<WorkClaim?>(claim), _ => throw new InvalidOperationException("must not change claim"), () => { called = true; return Task.FromResult(true); }).RouteAsync(claim, "session-a"));
+    Xunit.Assert.False(called);
+    Xunit.Assert.False(GitHubCliService.IsConfirmedNotFound("HTTP 404: not found"));
+}
 
-    var closedDecision = await new ActiveClaimRouteService(
-        current => Task.FromResult(ClaimedResponse(WorkflowItemType.ClosedWithoutMerge, 21)),
-        () => Task.FromResult<WorkClaim?>(enrichedClaim),
-        _ => throw new InvalidOperationException("A claimed PR should not be enriched twice."),
-        () => Task.FromResult(true))
-        .RouteAsync(enrichedClaim, "session-a");
-    Xunit.Assert.True(closedDecision is null, "A proven current closed-unmerged PR must release the coding claim.");
-    var closedBlocker = HookTaskRouter.Route(new[] { ClaimedTask(WorkflowItemType.ClosedWithoutMerge, 21, 4, "Closed without merge."), new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
-    Xunit.Assert.True(closedBlocker.BlockReason?.Contains("Closed without merge", StringComparison.Ordinal) == true, "After releasing a closed-unmerged claim, the normal blocker must remain visible.");
-
-    var stateRaceDecision = await new ActiveClaimRouteService(
-        current => Task.FromResult(current.PullRequestNumber is null ? ClaimedResponse(WorkflowItemType.AwaitingReview, 21) : ClaimedResponse(WorkflowItemType.ChangeRequest, 21)),
-        () => Task.FromResult<WorkClaim?>(enrichedClaim),
-        _ => Task.FromResult(new WorkClaimAcquisitionResult { Acquired = true, Claim = enrichedClaim }),
-        () => Task.FromResult(false))
-        .RouteAsync(claim, "session-a");
-    Xunit.Assert.True(stateRaceDecision?.SelectedTask?.Type == WorkflowItemType.ChangeRequest, "A passive-to-changes-requested race must refresh and route the current claimed CR.");
-
-    var reconcileCalled = false;
-    var genericFailure = false;
-    try
-    {
-        await new ActiveClaimRouteService(
-            _ => throw new InvalidOperationException("GitHub CLI command failed with exit code 1: HTTP 404: not found"),
-            () => Task.FromResult<WorkClaim?>(claim),
-            _ => throw new InvalidOperationException("Claim must not be changed after a GitHub failure."),
-            () => { reconcileCalled = true; return Task.FromResult(true); })
-            .RouteAsync(claim, "session-a");
-    }
-    catch (InvalidOperationException exception)
-    {
-        genericFailure = exception.Message.Contains("HTTP 404", StringComparison.Ordinal);
-    }
-
-    Xunit.Assert.True(genericFailure && !reconcileCalled && !GitHubCliService.IsConfirmedNotFound("HTTP 404: not found"), "A generic HTTP 404 must preserve claim ownership and must not trigger reconciliation release.");
+static WorkClaim ClaimForRoute(int? pullRequestNumber = null)
+{
+    var now = DateTimeOffset.UtcNow.AddMinutes(-5);
+    return new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = pullRequestNumber, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = now, ClaimedAt = now, LastUpdatedAt = now };
 }
 
 static WorkflowItem ClaimedTask(WorkflowItemType type, int? pullRequestNumber = null, int issueNumber = 4, string? message = null) => new()

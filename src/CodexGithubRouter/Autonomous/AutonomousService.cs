@@ -36,6 +36,25 @@ public static class AutonomousService
         return File.Exists(autonomousFilePath);
     }
 
+    public static async Task<bool> IsAutonomousAsync(string workingDirectory, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            return File.Exists(await GetAutonomousFilePathAsync(workingDirectory, boundary, cancellationToken));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    public static async Task<bool> GetAutonomousStatusAsync(string workingDirectory, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
+        => File.Exists(await GetAutonomousFilePathAsync(workingDirectory, boundary, cancellationToken));
+
     private static async Task<string> GetAutonomousFilePathAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
 
@@ -135,6 +154,15 @@ public static class AutonomousService
         {
             File.Delete(stateFilePath);
         }
+    }
+
+    public static async Task DisableAutonomousAsync(string workingDirectory, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
+    {
+        var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, boundary, cancellationToken);
+        if (File.Exists(autonomousFilePath)) File.Delete(autonomousFilePath);
+
+        var stateFilePath = Path.Combine(Path.GetDirectoryName(autonomousFilePath)!, AutonomousStateFileName);
+        if (File.Exists(stateFilePath)) File.Delete(stateFilePath);
     }
 
     private static async Task<AutonomousState?> ReadStateAsync(string stateFilePath, CancellationToken cancellationToken)
