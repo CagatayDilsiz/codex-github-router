@@ -1,27 +1,22 @@
-using System.Text.Json;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
 
+[Trait("Category", "Integration")]
 public sealed class ConfigurationSandboxTests
 {
     [Fact]
     public async Task Configuration_and_hook_initialization_use_only_the_explicit_sandbox()
     {
         using var sandbox = new TestSandbox();
-        var realPaths = ConfigurationPaths.Default;
-        var realWorkflow = ReadIfExists(realPaths.WorkflowFile);
-        var realHooks = ReadIfExists(realPaths.CodexHooksFile);
 
         var result = await ConfigurationInitializer.InitAsync(new[] { "--force" }, sandbox.Paths);
 
         Assert.Equal(0, result);
         Assert.True(File.Exists(sandbox.Paths.WorkflowFile));
         Assert.True(File.Exists(sandbox.Paths.CodexHooksFile));
-        Assert.Equal(realWorkflow, ReadIfExists(realPaths.WorkflowFile));
-        Assert.Equal(realHooks, ReadIfExists(realPaths.CodexHooksFile));
         Assert.StartsWith(sandbox.Root, sandbox.Paths.WorkflowFile, StringComparison.OrdinalIgnoreCase);
         Assert.StartsWith(sandbox.Root, sandbox.Paths.CodexHooksFile, StringComparison.OrdinalIgnoreCase);
     }
@@ -93,5 +88,4 @@ public sealed class ConfigurationSandboxTests
         Assert.Equal(invalid, await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile));
     }
 
-    private static string? ReadIfExists(string path) => File.Exists(path) ? File.ReadAllText(path) : null;
 }

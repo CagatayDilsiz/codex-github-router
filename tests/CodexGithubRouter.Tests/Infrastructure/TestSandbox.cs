@@ -22,9 +22,17 @@ public sealed class TestSandbox : IDisposable
 
     public void Dispose()
     {
-        if (Directory.Exists(Root))
+        if (!Directory.Exists(Root))
+        {
+            return;
+        }
+
+        try
         {
             Directory.Delete(Root, recursive: true);
+        }
+        catch when (!Directory.Exists(Root))
+        {
         }
     }
 }

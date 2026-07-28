@@ -10,6 +10,7 @@ public static class AutonomousService
 {
     private const string AutonomousFileName = "codex-github-router.auto";
     private const string AutonomousStateFileName = "codex-github-router.auto.json";
+    private static IAutonomousBoundary DefaultBoundary => new GitHubAutonomousBoundary();
 
     public static async Task<bool> IsAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
@@ -54,14 +55,17 @@ public static class AutonomousService
     }
 
     public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
-        => await EnableAutonomousAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
+        => await EnableAutonomousAsync(workingDirectory, ConfigurationPaths.Default, DefaultBoundary, cancellationToken);
 
     public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+        => await EnableAutonomousAsync(workingDirectory, paths, DefaultBoundary, cancellationToken);
+
+    public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, ConfigurationPathSet paths, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
     {
-        var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, cancellationToken);
+        var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, boundary, cancellationToken);
         var configuration = await WorkflowConfigurationService.LoadOrCreateAsync(paths, cancellationToken);
         var requiredLabels = WorkflowLabelConfiguration.GetRequiredLabels(configuration);
-        var existingLabels = await GitHubCliService.GetRepositoryLabelNamesAsync(workingDirectory, cancellationToken);
+        var existingLabels = await boundary.GetRepositoryLabelNamesAsync(workingDirectory, cancellationToken);
 
         var createdCount = 0;
         foreach (var label in requiredLabels)
@@ -71,7 +75,7 @@ public static class AutonomousService
                 continue;
             }
 
-            await GitHubCliService.CreateLabelAsync(workingDirectory, label, cancellationToken);
+            await boundary.CreateLabelAsync(workingDirectory, label, cancellationToken);
             existingLabels.Add(label);
             createdCount++;
         }
@@ -99,6 +103,22 @@ public static class AutonomousService
             CreatedLabelCount = createdCount,
             ConfigurationChanged = previousState is not null && !string.Equals(previousState.ConfigurationFingerprint, fingerprint, StringComparison.Ordinal)
         };
+    }
+
+    private static async Task<string> GetAutonomousFilePathAsync(string workingDirectory, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            throw new ArgumentException("Invalid working directory.", nameof(workingDirectory));
+        }
+
+        var gitCommonDirectory = await boundary.GetGitCommonDirectoryAsync(workingDirectory, cancellationToken);
+        if (gitCommonDirectory is null)
+        {
+            throw new InvalidOperationException("Not a valid Git repository.");
+        }
+
+        return Path.Combine(gitCommonDirectory, AutonomousFileName);
     }
 
     public static async Task DisableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
