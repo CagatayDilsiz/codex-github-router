@@ -74,6 +74,30 @@ cgr work release --issue <number>
 
 `reconcile` removes only claims that GitHub shows as passive or terminal. `release` is an explicit user recovery action and only removes the claim for the supplied issue.
 
+Model-aware worker routing is opt-in. Configure it under `policies.workerRouting` with a required default worker, worker labels, and exact model slugs:
+
+```json
+{
+  "policies": {
+    "workerRouting": {
+      "defaultWorker": "luna",
+      "workers": {
+        "luna": {
+          "labels": ["codex:worker:luna"],
+          "models": ["gpt-5-codex"]
+        },
+        "terra": {
+          "labels": ["codex:worker:terra"],
+          "models": ["gpt-5-mini"]
+        }
+      }
+    }
+  }
+}
+```
+
+Without this policy, existing routing is unchanged. With it enabled, an unlabeled issue uses the default worker, one worker label selects that profile, and multiple or unknown worker labels are rejected. A hook only claims work when its current model belongs to the selected worker; pull-request change requests inherit the worker selected by their linked issue. `cgr auto on` provisions configured worker labels alongside the workflow labels.
+
 Autonomous mode is repository-specific. When it is enabled, the Codex hook can route prompts according to the configured GitHub issue and pull-request workflow. `cgr auto on` validates the workflow configuration and creates only missing labels referenced by its issue and pull-request label rules; existing labels are never changed. CGR stores the applied configuration fingerprint in the repository's shared Git directory so the same setup also works from Git worktrees. After changing the workflow configuration, run `cgr auto on` again to provision any newly required labels safely.
 
 When a single issue is already in the configured `working` state, it takes precedence over ready issues. New work branches use `codex/issue-<number>-<short-description>`; CGR only recovers branches with that exact issue prefix, then checks pull requests for the recovered branch before allowing work to continue. CGR never starts a second issue, branch, or pull request. Multiple working issues are treated as an ambiguous workflow state and block the hook until resolved. A working issue whose linked open pull requests are all `deferred` is non-blocking, so ready work may proceed.

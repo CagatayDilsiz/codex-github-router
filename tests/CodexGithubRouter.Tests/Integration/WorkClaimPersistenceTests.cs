@@ -56,6 +56,26 @@ public sealed class WorkClaimPersistenceTests
     }
 
     [Fact]
+    public async Task Worker_metadata_round_trips_through_the_filesystem()
+    {
+        using var sandbox = new TestSandbox();
+        var acquired = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim
+        {
+            OwnerSessionId = "session-a",
+            IssueNumber = 21,
+            WorkType = WorkClaimType.Implementation,
+            WorkerProfile = "terra",
+            Model = "gpt-5-codex"
+        });
+
+        var read = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+
+        Assert.True(acquired.Acquired);
+        Assert.Equal("terra", read!.WorkerProfile);
+        Assert.Equal("gpt-5-codex", read.Model);
+    }
+
+    [Fact]
     public async Task Legacy_claim_without_issue_baseline_loads_but_cannot_prove_current_pull_request()
     {
         using var sandbox = new TestSandbox();

@@ -5,7 +5,7 @@ namespace CodexGithubRouter.Workflow;
 
 public static class WorkflowService
 {
-    public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim)
+    public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim, string? currentModel = null)
     {
         var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
         return await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
@@ -20,11 +20,17 @@ public static class WorkflowService
                 HeadRefName = true,
                 ClosingIssuesReferences = true
             },
-            CancellationToken.None));
+            CancellationToken.None), currentModel);
     }
 
-    public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest)
+    public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null)
     {
+        var eligibility = WorkerRoutingService.EvaluateClaim(configuration, claim, issue, currentModel);
+        if (eligibility.IsEnabled && !eligibility.IsEligible)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = eligibility.Message };
+        }
+
         var issueResolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
         if (issueResolution.IsAmbiguous)
         {
@@ -239,32 +245,46 @@ public static class WorkflowService
         };
     }
 
-    public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
+    public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
     {
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);
         var inProgressIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, inProgressFilters, true);
 
-        var conflict = FindIssueConflict(inProgressIssues, configuration);
+        var workerFilter = WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel);
+        if (workerFilter.NoEligibleWork)
+        {
+            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
+        }
+
+        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
         if (conflict is not null) return conflict;
 
         return await EvaluateInProgressIssuesAsync(
             configuration,
-            inProgressIssues,
-            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None));
+            workerFilter.EligibleIssues,
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true }, CancellationToken.None),
+            currentModel);
     }
 
-    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest)
+    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null)
     {
-        if (inProgressIssues.Count > 1)
+        var workerFilter = WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel);
+        if (workerFilter.NoEligibleWork)
+        {
+            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
+        }
+
+        var eligibleIssues = workerFilter.EligibleIssues;
+        if (eligibleIssues.Count > 1)
         {
             return new WorkflowResponse
             {
                 IsSuccessful = false,
-                Message = $"Multiple issues are marked as in progress: {string.Join(", ", inProgressIssues.Select(issue => $"#{issue.Number}"))}. Resolve the workflow state before starting new work."
+                Message = $"Multiple issues are marked as in progress: {string.Join(", ", eligibleIssues.Select(issue => $"#{issue.Number}"))}. Resolve the workflow state before starting new work."
             };
         }
 
-        if (inProgressIssues.Count == 0)
+        if (eligibleIssues.Count == 0)
         {
             return new WorkflowResponse
             {
@@ -273,7 +293,7 @@ public static class WorkflowService
             };
         }
 
-        var issue = inProgressIssues[0];
+        var issue = eligibleIssues[0];
         if (issue.ClosingPullRequestsReferences.Count > 0)
         {
             return await CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, getPullRequest);
@@ -298,7 +318,7 @@ public static class WorkflowService
         };
     }
 
-    public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
+    public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
     {        
         var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, scanLimit);
 
@@ -313,12 +333,18 @@ public static class WorkflowService
 
         var openIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, openIssueFilters, false);
 
-        var conflict = FindIssueConflict(openIssues, configuration);
+        var workerFilter = WorkerRoutingService.FilterIssues(configuration, openIssues, currentModel);
+        if (workerFilter.NoEligibleWork)
+        {
+            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
+        }
+
+        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
         if (conflict is not null) return conflict;
 
-        if (openIssues.Count > 0)
+        if (workerFilter.EligibleIssues.Count > 0)
         {
-            var workflowTasks = openIssues.Select(issue => new WorkflowItem
+            var workflowTasks = workerFilter.EligibleIssues.Select(issue => new WorkflowItem
             {
                 Type = WorkflowItemType.NewIssue,
                 IssueNumber = issue.Number
@@ -500,7 +526,7 @@ public static class WorkflowService
         Status = new WorkflowTaskStatus { Message = message }
     };
 
-    public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
+    public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
     {
         
         var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, scanLimit);
@@ -516,12 +542,18 @@ public static class WorkflowService
 
         var completedIssues = await GitHubCliService.GetIssuesAsync(workingDirectory, completedIssueFilters, true);
 
-        var conflict = FindIssueConflict(completedIssues, configuration);
+        var workerFilter = WorkerRoutingService.FilterIssues(configuration, completedIssues, currentModel);
+        if (workerFilter.NoEligibleWork)
+        {
+            return new WorkflowResponse { IsSuccessful = true, NoEligibleWork = true, Message = workerFilter.Message };
+        }
+
+        var conflict = FindIssueConflict(workerFilter.EligibleIssues, configuration);
         if (conflict is not null) return conflict;
 
-        if (completedIssues.Count > 0)
+        if (workerFilter.EligibleIssues.Count > 0)
         {
-            return await CheckIssueLinkedPullRequestsAsync(configuration, workingDirectory, completedIssues);
+            return await CheckIssueLinkedPullRequestsAsync(configuration, workingDirectory, workerFilter.EligibleIssues);
         }
         else
         {

@@ -91,6 +91,7 @@ public static class WorkflowConfigurationService
             throw new InvalidOperationException("Issue selection limit must be greater than zero.");
         }
 
+        WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
     }
 }

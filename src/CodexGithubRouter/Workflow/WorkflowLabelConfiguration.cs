@@ -13,6 +13,7 @@ public static class WorkflowLabelConfiguration
             .Concat(GetLabelMappings(configuration.PullRequestStates))
             .Select(mapping => mapping.Label)
             .Concat(RepositoryGateService.GetLabels(configuration))
+            .Concat(WorkerRoutingService.GetLabels(configuration))
             .Select(label => label.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
@@ -28,6 +29,7 @@ public static class WorkflowLabelConfiguration
             .Concat(GetLabelMappings(configuration.PullRequestStates)
                 .Select(mapping => $"pull-request:{mapping.State}:{mapping.Label.Trim().ToLowerInvariant()}"))
             .Concat(RepositoryGateService.GetLabels(configuration).Select(label => $"policy:repository-gate:{label.ToLowerInvariant()}"))
+            .Concat(WorkerRoutingService.GetLabels(configuration).Select(label => $"policy:worker:{label.ToLowerInvariant()}"))
             .OrderBy(value => value, StringComparer.Ordinal));
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
@@ -78,6 +80,14 @@ public static class WorkflowLabelConfiguration
                 throw new InvalidOperationException($"Repository gate label '{gateLabel}' must not also be a workflow state label.");
             }
 
+        }
+
+        foreach (var workerLabel in WorkerRoutingService.GetLabels(configuration))
+        {
+            if (workflowLabels.Contains(workerLabel) || gateLabels.Contains(workerLabel, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Worker routing label '{workerLabel}' must not also be a workflow or repository gate label.");
+            }
         }
     }
 
