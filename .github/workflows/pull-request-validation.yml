@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: validate
     env:
-      CI_PACKAGE_VERSION: 0.0.2-ci.${{ github.run_id }}.${{ github.run_attempt }}
+      CI_PACKAGE_VERSION: 0.0.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -88,4 +88,5 @@ jobs:
           dotnet tool install --tool-path "$RUNNER_TEMP/cgr-tool" --configfile "$RUNNER_TEMP/nuget.config" codex-github-router --version "$CI_PACKAGE_VERSION"
 
       - name: Start packaged CLI
-        run: "$RUNNER_TEMP/cgr-tool/cgr" --help
+        run: |
+          "$RUNNER_TEMP/cgr-tool/cgr" --help
