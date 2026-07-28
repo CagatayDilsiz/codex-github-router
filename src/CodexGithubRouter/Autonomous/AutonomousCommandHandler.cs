@@ -1,3 +1,5 @@
+using CodexGithubRouter.Configurations;
+
 namespace CodexGithubRouter.Autonomous;
 
 public static class AutonomousCommandHandler
@@ -30,7 +32,30 @@ public static class AutonomousCommandHandler
 
                 case "status":
                     var enabled = await AutonomousService.GetAutonomousStatusAsync(workingDirectory);
-                    Console.WriteLine($"Autonomous mode is {(enabled ? "enabled" : "disabled")} for {workingDirectory}");
+                    var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+                    var activation = configuration.Policies.AutonomousActivation;
+                    var mode = activation?.Mode?.Trim() ?? "always";
+                    Console.WriteLine($"Autonomous mode: {(enabled ? "enabled" : "disabled")}");
+                    Console.WriteLine($"Activation mode: {mode.ToLowerInvariant()}");
+                    if (string.Equals(mode, "prompt", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (enabled)
+                        {
+                            Console.WriteLine("Activation prompts:");
+                            foreach (var prompt in activation?.Prompts ?? new List<string>())
+                            {
+                                Console.WriteLine($"  - {prompt}");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Activation prompts: {activation?.Prompts?.Count ?? 0} configured");
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine("Activation prompts: ignored");
+                    }
                     return 0;
 
                 default:

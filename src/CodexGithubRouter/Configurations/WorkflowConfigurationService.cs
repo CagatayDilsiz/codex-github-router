@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Configurations;
@@ -91,6 +92,7 @@ public static class WorkflowConfigurationService
             throw new InvalidOperationException("Issue selection limit must be greater than zero.");
         }
 
+        AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
     }

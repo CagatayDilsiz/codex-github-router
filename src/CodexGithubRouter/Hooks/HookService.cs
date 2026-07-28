@@ -55,6 +55,11 @@ public static class HookService
             }
 
             var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+            if (!AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt))
+            {
+                return 0;
+            }
+
             var gitCommonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(payload.Cwd)
                 ?? throw new InvalidOperationException("Not a valid Git repository.");
 

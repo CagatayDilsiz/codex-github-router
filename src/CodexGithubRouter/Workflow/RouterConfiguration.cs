@@ -108,6 +108,15 @@ public sealed class RouterPolicies
     public RepositoryGatePolicy RepositoryGate { get; init; } = new();
 
     public WorkerRoutingPolicy? WorkerRouting { get; init; }
+
+    public AutonomousActivationPolicy? AutonomousActivation { get; init; }
+}
+
+public sealed class AutonomousActivationPolicy
+{
+    public string Mode { get; init; } = "always";
+
+    public List<string>? Prompts { get; init; } = new();
 }
 
 public sealed class RepositoryGatePolicy
