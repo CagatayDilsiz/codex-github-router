@@ -39,4 +39,54 @@ public sealed class WorkflowRoutingTests
         var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 2 } });
         Assert.Equal("Closed without merge.", decision.BlockReason);
     }
+
+    [Fact]
+    public void Claim_owner_without_matching_task_cannot_fall_through_to_unrelated_work()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
+        var decision = HookTaskRouter.RouteClaimedWork(claim, "owner", new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 1, PullRequestNumber = 10 } });
+        Assert.Contains("No unrelated work will be routed", decision.BlockReason);
+        Assert.Null(decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Change_request_precedes_link_resume_and_new_context()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20 }, new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 3 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+        Assert.Contains("pull request #20", decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Current_pull_request_recovery_has_exact_context()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.RecoverCurrentPullRequest, IssueNumber = 6, PullRequestNumber = 21 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+        Assert.Contains("pull request #21", decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Completed_recovery_has_runnable_context()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.RecoverCompletedIssue, IssueNumber = 6 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+        Assert.Contains("Recover the completed implementation for issue #6", decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Pull_request_linking_precedes_resume_and_new_work()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 3 }, new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 4 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+        Assert.Contains("following issues: 3", decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Resume_precedes_new_issue_context()
+    {
+        var decision = HookTaskRouter.Route(new[] { new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 4 }, new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 } });
+        Assert.Contains("Issue #4 is already marked as working", decision.AdditionalContext);
+    }
+
+    [Fact]
+    public void Empty_route_uses_safe_fallback()
+    {
+        Assert.Equal("No actionable workflow tasks found.", HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason);
+    }
 }

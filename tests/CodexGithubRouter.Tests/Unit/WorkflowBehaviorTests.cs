@@ -237,27 +237,6 @@ static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber 
 }
 
 [Fact]
-public void Hook_route_precedence_prefers_blockers_then_actionable_work()
-{
-    var blocker = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
-    var changeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20 };
-    var linkPullRequest = new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 3 };
-    var resume = new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 4 };
-    var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5 };
-
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { blocker, changeRequest, linkPullRequest, resume, newIssue }).BlockReason == "Closed without merge.", "Blockers must take precedence over every hook context.");
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { changeRequest, linkPullRequest, resume, newIssue }).AdditionalContext?.Contains("pull request #20", StringComparison.Ordinal) == true, "Change requests must take precedence after blockers.");
-    var currentPullRequestRecovery = new WorkflowItem { Type = WorkflowItemType.RecoverCurrentPullRequest, IssueNumber = 6, PullRequestNumber = 21 };
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { currentPullRequestRecovery, newIssue }).AdditionalContext?.Contains("pull request #21", StringComparison.Ordinal) == true, "Current unlabeled PR recovery must return exact pull-request context.");
-    var completedRecovery = new WorkflowItem { Type = WorkflowItemType.RecoverCompletedIssue, IssueNumber = 6 };
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { completedRecovery, newIssue }).AdditionalContext?.Contains("Recover the completed implementation for issue #6", StringComparison.Ordinal) == true, "Completed recovery must return runnable additional context instead of a blocker.");
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { linkPullRequest, resume, newIssue }).AdditionalContext?.Contains("following issues: 3", StringComparison.Ordinal) == true, "PR-linking work must take precedence over resume and new work.");
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { resume, newIssue }).AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Resume work must take precedence over new work.");
-    Xunit.Assert.True(HookTaskRouter.Route(new[] { newIssue }).AdditionalContext?.Contains("issue #5", StringComparison.Ordinal) == true, "A ready issue should produce new-issue context when no higher-priority work exists.");
-    Xunit.Assert.True(HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason == "No actionable workflow tasks found.", "Empty work must use the safe fallback.");
-}
-
-[Fact]
 public void AssertWorkflowLabelConflictResolution()
 {
     var configuration = new RouterConfiguration();

@@ -6,16 +6,19 @@ namespace CodexGithubRouter.Work;
 
 public static class WorkCommandHandler
 {
-    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null);
+    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null, null);
 
-    public static async Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver)
+    public static Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver) => HandleAsync(args, commonDirectoryResolver, null);
+
+    public static async Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver, TextWriter? errorWriter)
     {
+        errorWriter ??= Console.Error;
         if (args.Length == 0) return Usage();
         var command = args[0].ToLowerInvariant();
         var workingDirectory = args.LastOrDefault(value => !value.StartsWith("--", StringComparison.Ordinal) && !string.Equals(value, command, StringComparison.OrdinalIgnoreCase) && !int.TryParse(value, out _)) ?? Environment.CurrentDirectory;
         Func<string, Task<string?>> resolveCommonDirectory = commonDirectoryResolver ?? (workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory));
         var commonDirectory = await resolveCommonDirectory(workingDirectory);
-        if (commonDirectory is null) { Console.Error.WriteLine("Not a valid Git repository."); return 1; }
+        if (commonDirectory is null) { await errorWriter.WriteLineAsync("Not a valid Git repository."); return 1; }
 
         try
         {
@@ -46,8 +49,8 @@ public static class WorkCommandHandler
         catch (WorkClaimFileException exception)
         {
             var claimPath = Path.Combine(commonDirectory, "codex-github-router.work.json");
-            Console.Error.WriteLine($"Invalid work-claim file: {claimPath}. {exception.Message}");
-            Console.Error.WriteLine("Repair the file or remove it after confirming no active session owns the work, then retry the command.");
+            await errorWriter.WriteLineAsync($"Invalid work-claim file: {claimPath}. {exception.Message}");
+            await errorWriter.WriteLineAsync("Repair the file or remove it after confirming no active session owns the work, then retry the command.");
             return 1;
         }
     }
