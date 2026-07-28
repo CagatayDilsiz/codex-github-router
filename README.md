@@ -80,6 +80,22 @@ When a single issue is already in the configured `working` state, it takes prece
 
 Within each workflow domain, label rules are ORed: any configured label for a state matches that state, and multiple matching labels for that same state are valid. Labels matching different states on the same issue or pull request are ambiguous. CGR blocks the hook with a diagnostic listing those labels rather than depending on label order. A transition to a valid target state removes workflow labels for every other state in that same domain while preserving unrelated labels.
 
+### Repository workflow gates
+
+Critical issue and pull-request workstreams can block unrelated work with the orthogonal repository gate policy. The default configuration uses `codex:gate` and stores it separately from workflow state labels:
+
+```json
+{
+  "policies": {
+    "repositoryGate": {
+      "labels": ["codex:gate"]
+    }
+  }
+}
+```
+
+Configured gate labels are ORed. A gate is evaluated after any active work claim is reconciled and before ordinary routing. Gated ready, interrupted working, and change-request work is prioritized and claimed; gated review, merge, blocked, needs-info, deferred, or unresolved work blocks unrelated prompts. Merged pull requests and abandoned or closed issues are terminal and do not keep a gate active. State transitions preserve gate labels. `cgr work status` reports repository gates separately from the active claim.
+
 ### Manual validation for working-issue recovery
 
 The automated tests cover workflow decisions and generated hook context. Validate these repository-dependent recovery paths manually in a disposable repository before enabling autonomous mode: one local-only `codex/issue-<number>-*` branch, one remote-only branch, one branch present locally and remotely, zero matching branches, multiple matching branches, one open head-branch pull request, one closed-unmerged head-branch pull request, and multiple head-branch pull requests.

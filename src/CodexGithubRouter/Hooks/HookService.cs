@@ -16,6 +16,9 @@ public static class HookService
         PropertyNameCaseInsensitive = true
     };
 
+    public static IReadOnlyList<WorkflowItem> SelectWorkflowTasks(IReadOnlyList<WorkflowItem> repositoryGateTasks, IReadOnlyList<WorkflowItem> ordinaryTasks) =>
+        repositoryGateTasks.Count > 0 ? repositoryGateTasks : ordinaryTasks;
+
     public static async Task<int> RunAsync()
     {
         try
@@ -120,41 +123,58 @@ public static class HookService
         string? sessionId,
         bool allowNoClaimReroute = true)
     {
-        var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory);
-        if (!completedIssueTasks.IsSuccessful)
+        var repositoryGateTasks = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
+        if (!repositoryGateTasks.IsSuccessful)
         {
-            await WriteBlockAsync(completedIssueTasks.Message);
+            await WriteBlockAsync(repositoryGateTasks.Message);
             return 0;
         }
 
-        var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, workingDirectory);
-        if (!inProgressIssueTasks.IsSuccessful)
+        IReadOnlyList<WorkflowItem> workflowTasks;
+        if (repositoryGateTasks.Tasks.Count > 0)
         {
-            await WriteBlockAsync(inProgressIssueTasks.Message);
-            return 0;
+            // A repository gate is an explicit short-circuit. Ordinary discovery
+            // must not be allowed to override or fail before gated work is routed.
+            workflowTasks = SelectWorkflowTasks(repositoryGateTasks.Tasks, Array.Empty<WorkflowItem>());
+        }
+        else
+        {
+            var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory);
+            if (!completedIssueTasks.IsSuccessful)
+            {
+                await WriteBlockAsync(completedIssueTasks.Message);
+                return 0;
+            }
+
+            var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, workingDirectory);
+            if (!inProgressIssueTasks.IsSuccessful)
+            {
+                await WriteBlockAsync(inProgressIssueTasks.Message);
+                return 0;
+            }
+
+            var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, workingDirectory);
+            if (!newIssueTask.IsSuccessful)
+            {
+                await WriteBlockAsync(newIssueTask.Message);
+                return 0;
+            }
+
+            workflowTasks = SelectWorkflowTasks(
+                Array.Empty<WorkflowItem>(),
+                completedIssueTasks.Tasks
+                    .Concat(inProgressIssueTasks.Tasks)
+                    .Concat(newIssueTask.Tasks)
+                    .ToList());
         }
 
-        var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, workingDirectory);
-        if (!newIssueTask.IsSuccessful)
-        {
-            await WriteBlockAsync(newIssueTask.Message);
-            return 0;
-        }
-
-        var combinedTasks = new WorkflowResponse
-        {
-            IsSuccessful = true,
-            Message = "Combined workflow tasks.",
-            Tasks = completedIssueTasks.Tasks.Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
-        };
-
-        if (combinedTasks.Tasks.Count == 0)
+        if (workflowTasks.Count == 0)
         {
             await WriteBlockAsync("No actionable workflow tasks found.");
             return 0;
         }
 
-        var actionableTasks = combinedTasks.Tasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
+        var actionableTasks = workflowTasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
         if (actionableTasks.Count == 0)
         {
             await WriteBlockAsync("All workflow tasks are deferred. No action is required at this time.");

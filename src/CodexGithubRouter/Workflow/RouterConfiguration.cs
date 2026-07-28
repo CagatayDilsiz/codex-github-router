@@ -42,6 +42,8 @@ public sealed class RouterConfiguration
         }
     };
 
+    public RouterPolicies Policies { get; init; } = new();
+
     public IssueSelectionConfiguration DefaultIssueSelection { get; init; } = new IssueSelectionConfiguration();    
 
     private static Dictionary<WorkflowState, List<IssueMatchRule>> GetDefaultStates()
@@ -99,4 +101,14 @@ public sealed class RouterConfiguration
         };
     }
 
+}
+
+public sealed class RouterPolicies
+{
+    public RepositoryGatePolicy RepositoryGate { get; init; } = new();
+}
+
+public sealed class RepositoryGatePolicy
+{
+    public List<string> Labels { get; init; } = new() { "codex:gate" };
 }

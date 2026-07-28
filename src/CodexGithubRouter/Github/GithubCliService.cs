@@ -175,6 +175,56 @@ public static class GitHubCliService
         }        
     }
 
+    public static async Task<List<Issue>> GetAllOpenIssuesByLabelsAsync(string workingDirectory, IReadOnlyCollection<string> labels, CancellationToken cancellationToken = default)
+    {
+        if (labels.Count == 0)
+        {
+            return new List<Issue>();
+        }
+
+        var repository = await ProcessRunner.RunAsync(workingDirectory, "gh", new[] { "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner" }, cancellationToken);
+        if (repository.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {repository.ExitCode}: {repository.Error}");
+        }
+
+        var issueNumbers = new HashSet<int>();
+        foreach (var label in labels.Where(label => !string.IsNullOrWhiteSpace(label)).Select(label => label.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var process = await ProcessRunner.RunAsync(
+                workingDirectory,
+                "gh",
+                new[]
+                {
+                    "api", "--paginate", "-X", "GET", $"repos/{repository.Output.Trim()}/issues",
+                    "-f", "state=open", "-f", $"labels={label}", "-f", "per_page=100",
+                    "--jq", ".[] | select(.pull_request == null) | .number"
+                },
+                cancellationToken);
+
+            if (process.ExitCode != 0)
+            {
+                throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+            }
+
+            foreach (var line in process.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (int.TryParse(line.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var issueNumber))
+                {
+                    issueNumbers.Add(issueNumber);
+                }
+            }
+        }
+
+        var issues = new List<Issue>();
+        foreach (var issueNumber in issueNumbers.OrderBy(number => number))
+        {
+            issues.Add(await GetIssueByNumberAsync(workingDirectory, issueNumber, cancellationToken));
+        }
+
+        return issues;
+    }
+
     public static async Task<Issue> GetIssueByNumberAsync(string workingDirectory, int issueNumber, CancellationToken cancellationToken = default)
     {
         var arguments = new List<string>

@@ -21,7 +21,8 @@ public static class HookTaskRouter
         {
             WorkflowItemType.ClosedWithoutMerge,
             WorkflowItemType.UnknownPullRequestState,
-            WorkflowItemType.Unknown
+            WorkflowItemType.Unknown,
+            WorkflowItemType.RepositoryGateBlock
         };
 
         var blocker = actionableTasks.FirstOrDefault(task => blockingTypes.Contains(task.Type));

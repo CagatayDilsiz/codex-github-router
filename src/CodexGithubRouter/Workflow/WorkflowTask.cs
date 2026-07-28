@@ -23,7 +23,8 @@ public enum WorkflowItemType
     UnknownPullRequestState,
     CloseIssue,
     RecoverCompletedIssue,
-    RecoverCurrentPullRequest
+    RecoverCurrentPullRequest,
+    RepositoryGateBlock
 }
 
 public class WorkflowTaskStatus
