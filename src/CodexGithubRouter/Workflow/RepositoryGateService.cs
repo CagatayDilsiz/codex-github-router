@@ -4,7 +4,7 @@ namespace CodexGithubRouter.Workflow;
 
 public static class RepositoryGateService
 {
-    public static async Task<List<Issue>> GetOpenGatedIssuesAsync(string workingDirectory, RouterConfiguration configuration, int scanLimit = 30)
+    public static async Task<List<Issue>> GetOpenGatedIssuesAsync(string workingDirectory, RouterConfiguration configuration)
     {
         var labels = GetLabels(configuration);
         if (labels.Count == 0)
@@ -12,11 +12,7 @@ public static class RepositoryGateService
             return new List<Issue>();
         }
 
-        return await GitHubCliService.GetIssuesAsync(workingDirectory, new IssueFilters
-        {
-            Labels = labels.ToList(),
-            Limit = scanLimit
-        }, addLinkedPRToSelection: true);
+        return await GitHubCliService.GetAllOpenIssuesByLabelsAsync(workingDirectory, labels);
     }
 
     public static IReadOnlyList<string> GetLabels(RouterConfiguration configuration) =>

@@ -167,6 +167,18 @@ static async Task AssertRepositoryGateEvaluationAsync()
     }));
     Assert(merged.Tasks.Count == 0, "A merged pull request must make its repository gate terminal.");
 
+    var historicalMerged = GatedIssue(18, WorkflowState.Completed, 23);
+    historicalMerged.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 24 });
+    var currentChanges = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { historicalMerged }, number => Task.FromResult(number == 23
+        ? new PullRequest { Number = 23, State = "merged", Labels = new List<GithubLabel>() }
+        : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } } }));
+    Assert(currentChanges.Tasks.Single().Type == WorkflowItemType.ChangeRequest && currentChanges.Tasks.Single().PullRequestNumber == 24, "A historical merged pull request must not hide a newer gated change request.");
+
+    var currentReview = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { historicalMerged }, number => Task.FromResult(number == 23
+        ? new PullRequest { Number = 23, State = "merged", Labels = new List<GithubLabel>() }
+        : new PullRequest { Number = 24, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } } }));
+    Assert(currentReview.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && currentReview.Tasks.Single().Status.Message.Contains("Pull request #24", StringComparison.Ordinal), "A historical merged pull request must not hide a newer gated review request.");
+
     var gateDecision = HookTaskRouter.Route(new[]
     {
         new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 11, PullRequestNumber = 21 },
@@ -180,6 +192,15 @@ static async Task AssertRepositoryGateEvaluationAsync()
         new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 }
     });
     Assert(blockedGateDecision.BlockReason == "Repository workflow is gated by issue #10.", "A gated waiting workstream must block ordinary ready work.");
+
+    var gateTasks = HookService.SelectWorkflowTasks(
+        new[] { new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 } },
+        new[]
+        {
+            new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 16, PullRequestNumber = 30 },
+            new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 17 }
+        });
+    Assert(gateTasks.Count == 1 && gateTasks[0].IssueNumber == 12, "A gated task must short-circuit ordinary change requests and blockers.");
 }
 
 static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber = null)
