@@ -2,35 +2,9 @@ namespace CodexGithubRouter.Configurations;
 
 public static class ConfigurationPaths
 {
-    public static string ConfigurationDirectory
-    {
-        get
-        {
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".codex-github-router");
-        }
-    }
-
-    public static string CodexDirectory
-    {
-        get
-        {
-             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),".codex");
-        }
-    }
-
-    public static string WorkflowFile
-    {
-        get
-        {
-            return Path.Combine(ConfigurationDirectory, "workflow.json");
-        }
-    }
-
-    public static string CodexHooksFile
-    {
-        get
-        {
-            return Path.Combine(CodexDirectory, "hooks.json");
-        }
-    }
+    public static ConfigurationPathSet Default => new(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+    public static string ConfigurationDirectory => Default.ConfigurationDirectory;
+    public static string CodexDirectory => Default.CodexDirectory;
+    public static string WorkflowFile => Default.WorkflowFile;
+    public static string CodexHooksFile => Default.CodexHooksFile;
 }

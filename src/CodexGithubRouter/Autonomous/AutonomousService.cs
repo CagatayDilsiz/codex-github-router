@@ -54,9 +54,12 @@ public static class AutonomousService
     }
 
     public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, CancellationToken cancellationToken = default)
+        => await EnableAutonomousAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
         var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, cancellationToken);
-        var configuration = await WorkflowConfigurationService.LoadOrCreateAsync(cancellationToken);
+        var configuration = await WorkflowConfigurationService.LoadOrCreateAsync(paths, cancellationToken);
         var requiredLabels = WorkflowLabelConfiguration.GetRequiredLabels(configuration);
         var existingLabels = await GitHubCliService.GetRepositoryLabelNamesAsync(workingDirectory, cancellationToken);
 

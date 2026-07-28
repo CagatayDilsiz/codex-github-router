@@ -4,31 +4,13 @@ using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Prompts;
 using CodexGithubRouter.Work;
 using CodexGithubRouter.Workflow;
+using Xunit;
 
-await AssertSingleWorkingIssueWithoutPullRequestAsync();
-await AssertMultipleWorkingIssuesBlockAsync();
-await AssertWorkingIssueWithOpenPullRequestAsync();
-AssertResumePromptIsSafe();
-AssertHookOutputResumesWorkingIssueBeforeReadyIssue();
-AssertHookRoutePrecedence();
-AssertWorkflowLabelConflictResolution();
-await AssertPullRequestLabelConflictHandlingAsync();
-AssertIssueAliasSearchUsesOrSemantics();
-AssertVersionNormalization();
-await AssertWorkClaimsAsync();
-AssertPassiveReviewDoesNotBlockNewWork();
-AssertWorkClaimReconciliation();
-AssertClaimRoutingAuthority();
-await AssertPullRequestTransitionLifecycleAsync();
-await AssertClaimedWorkRecoveryAsync();
-await AssertActiveClaimRouteOrchestrationAsync();
-AssertClarificationPromptIsLanguageIndependent();
-AssertRepositoryGateConfiguration();
-await AssertRepositoryGateEvaluationAsync();
+namespace CodexGithubRouter.Tests;
 
-Console.WriteLine("All working-issue workflow tests passed.");
-
-static async Task AssertSingleWorkingIssueWithoutPullRequestAsync()
+internal static class LegacyScenarios
+{
+public static async Task AssertSingleWorkingIssueWithoutPullRequestAsync()
 {
     var result = await WorkflowService.EvaluateInProgressIssuesAsync(new RouterConfiguration(), new[] { WorkingIssue(4) }, _ => throw new InvalidOperationException("No pull request should be requested."));
 
@@ -36,7 +18,7 @@ static async Task AssertSingleWorkingIssueWithoutPullRequestAsync()
     Assert(result.Tasks.Single().Type == WorkflowItemType.ResumeInProgressIssue, "A single working issue should resume instead of starting a ready issue.");
 }
 
-static async Task AssertMultipleWorkingIssuesBlockAsync()
+public static async Task AssertMultipleWorkingIssuesBlockAsync()
 {
     var result = await WorkflowService.EvaluateInProgressIssuesAsync(new RouterConfiguration(), new[] { WorkingIssue(4), WorkingIssue(5) }, _ => throw new InvalidOperationException("No pull request should be requested."));
 
@@ -44,7 +26,7 @@ static async Task AssertMultipleWorkingIssuesBlockAsync()
     Assert(result.Message.Contains("#4", StringComparison.Ordinal) && result.Message.Contains("#5", StringComparison.Ordinal), "The ambiguity diagnostic should identify every working issue.");
 }
 
-static async Task AssertWorkingIssueWithOpenPullRequestAsync()
+public static async Task AssertWorkingIssueWithOpenPullRequestAsync()
 {
     var issue = WorkingIssue(4);
     issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 8 });
@@ -69,7 +51,7 @@ static Issue WorkingIssue(int number) => new()
     Labels = new List<GithubLabel> { new() { Name = "codex:working" } }
 };
 
-static void AssertResumePromptIsSafe()
+public static void AssertResumePromptIsSafe()
 {
     var prompt = ContextPromptService.GetInProgressIssuePrompt(4);
 
@@ -88,7 +70,7 @@ static void AssertResumePromptIsSafe()
     Assert(currentPullRequestRecoveryPrompt.Contains("pull request #21", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr pr transition 21 ready-for-review", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr issue transition 4 completed", StringComparison.Ordinal), "An unlabeled current PR must receive exact lifecycle recovery instructions.");
 }
 
-static void AssertClarificationPromptIsLanguageIndependent()
+public static void AssertClarificationPromptIsLanguageIndependent()
 {
     var prompt = ContextPromptService.GetNewIssuePrompt(12);
     const string canonicalNotice = "> 🤖 This clarification request was generated automatically by a Codex session through CGR. After providing the requested information, transition this issue back to `ready`.";
@@ -102,7 +84,7 @@ static void AssertClarificationPromptIsLanguageIndependent()
     Assert(prompt.Contains("cgr issue transition 12 needs-info", StringComparison.Ordinal), "The existing needs-info transition must remain in the clarification instructions.");
 }
 
-static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
+public static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
 {
     var decision = HookTaskRouter.Route(new List<WorkflowItem>
     {
@@ -114,7 +96,7 @@ static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
     Assert(decision.AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Hook routing should emit resume context before ready-issue context.");
 }
 
-static void AssertRepositoryGateConfiguration()
+public static void AssertRepositoryGateConfiguration()
 {
     var configuration = new RouterConfiguration();
     Assert(RepositoryGateService.GetLabels(configuration).SequenceEqual(new[] { "codex:gate" }), "The default repository gate must use codex:gate.");
@@ -147,7 +129,7 @@ static void AssertRepositoryGateConfiguration()
     }
 }
 
-static async Task AssertRepositoryGateEvaluationAsync()
+public static async Task AssertRepositoryGateEvaluationAsync()
 {
     var configuration = new RouterConfiguration();
     var reviewIssue = GatedIssue(10, WorkflowState.Completed, 20);
@@ -251,7 +233,7 @@ static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber 
     return issue;
 }
 
-static void AssertHookRoutePrecedence()
+public static void AssertHookRoutePrecedence()
 {
     var blocker = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
     var changeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20 };
@@ -271,7 +253,7 @@ static void AssertHookRoutePrecedence()
     Assert(HookTaskRouter.Route(Array.Empty<WorkflowItem>()).BlockReason == "No actionable workflow tasks found.", "Empty work must use the safe fallback.");
 }
 
-static void AssertWorkflowLabelConflictResolution()
+public static void AssertWorkflowLabelConflictResolution()
 {
     var configuration = new RouterConfiguration();
     configuration.States[WorkflowState.Ready][0].Values.Add("codex:queued");
@@ -292,7 +274,7 @@ static void AssertWorkflowLabelConflictResolution()
     Assert(!pullRequestResolution.IsAmbiguous && !oneState.IsAmbiguous, "Issue and pull-request label domains must be resolved independently.");
 }
 
-static async Task AssertPullRequestLabelConflictHandlingAsync()
+public static async Task AssertPullRequestLabelConflictHandlingAsync()
 {
     var issue = new Issue { Number = 4 };
     issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = 8 });
@@ -305,7 +287,7 @@ static async Task AssertPullRequestLabelConflictHandlingAsync()
     Assert(mergedStale.Tasks.Single().Type == WorkflowItemType.CloseIssue, "A merged pull request must close its issue despite stale conflicting labels.");
 }
 
-static void AssertIssueAliasSearchUsesOrSemantics()
+public static void AssertIssueAliasSearchUsesOrSemantics()
 {
     var query = GitHubCliService.BuildSearchQuery(new IssueFilters
     {
@@ -316,14 +298,14 @@ static void AssertIssueAliasSearchUsesOrSemantics()
     Assert(query == "label:\"codex:ready\",\"codex:queued\" is:open", "Configured state-label aliases must be sent as one GitHub search OR group, not separate AND label filters.");
 }
 
-static void AssertVersionNormalization()
+public static void AssertVersionNormalization()
 {
     Assert(VersionFormatter.Normalize("0.0.1-alpha+23523532463463463") == "0.0.1-alpha", "Build metadata must be removed while preserving prerelease versions.");
     Assert(VersionFormatter.Normalize("1.2.3") == "1.2.3", "Stable versions must remain unchanged.");
     Assert(VersionFormatter.Normalize(null) == "Unknown", "Missing version metadata must use the safe fallback.");
 }
 
-static async Task AssertWorkClaimsAsync()
+public static async Task AssertWorkClaimsAsync()
 {
     var directory = Path.Combine(Path.GetTempPath(), $"cgr-work-claim-{Guid.NewGuid():N}");
     Directory.CreateDirectory(directory);
@@ -372,7 +354,7 @@ static async Task AssertWorkClaimsAsync()
     Directory.Delete(enrichmentDirectory, true);
 }
 
-static void AssertPassiveReviewDoesNotBlockNewWork()
+public static void AssertPassiveReviewDoesNotBlockNewWork()
 {
     var decision = HookTaskRouter.Route(new[]
     {
@@ -383,7 +365,7 @@ static void AssertPassiveReviewDoesNotBlockNewWork()
     Assert(decision.BlockReason is null && decision.SelectedTask?.IssueNumber == 3, "Passive review and merge states must not block unrelated ready work.");
 }
 
-static void AssertWorkClaimReconciliation()
+public static void AssertWorkClaimReconciliation()
 {
     var configuration = new RouterConfiguration();
     var claim = new WorkClaim { OwnerSessionId = "session-a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest };
@@ -422,7 +404,7 @@ static void AssertWorkClaimReconciliation()
     Assert(WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(claim, 22, PullRequestState.ReviewRequested) && !WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(claim, 21, PullRequestState.ReviewRequested), "A pull-request transition must release only the matching claimed pull request.");
 }
 
-static void AssertClaimRoutingAuthority()
+public static void AssertClaimRoutingAuthority()
 {
     var claim = new WorkClaim { OwnerSessionId = "session-b", IssueNumber = 2, WorkType = WorkClaimType.Implementation };
     var unrelatedChangeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 1, PullRequestNumber = 10 };
@@ -438,7 +420,7 @@ static void AssertClaimRoutingAuthority()
     Assert(ambiguousDecision.BlockReason?.Contains("multiple candidate pull requests", StringComparison.Ordinal) == true, "A PR-less claim must not implicitly choose between distinct pull-request identities.");
 }
 
-static async Task AssertPullRequestTransitionLifecycleAsync()
+public static async Task AssertPullRequestTransitionLifecycleAsync()
 {
     var directory = Path.Combine(Path.GetTempPath(), $"cgr-work-transition-{Guid.NewGuid():N}");
     Directory.CreateDirectory(directory);
@@ -457,7 +439,7 @@ static async Task AssertPullRequestTransitionLifecycleAsync()
     Directory.Delete(directory, true);
 }
 
-static async Task AssertClaimedWorkRecoveryAsync()
+public static async Task AssertClaimedWorkRecoveryAsync()
 {
     var configuration = new RouterConfiguration();
     var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
@@ -505,7 +487,7 @@ static async Task AssertClaimedWorkRecoveryAsync()
     Directory.Delete(directory, true);
 }
 
-static async Task AssertActiveClaimRouteOrchestrationAsync()
+public static async Task AssertActiveClaimRouteOrchestrationAsync()
 {
     var claimedAt = DateTimeOffset.UtcNow.AddMinutes(-5);
     var claim = new WorkClaim { ClaimId = Guid.NewGuid(), Version = 1, OwnerSessionId = "session-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedAt = claimedAt, LastUpdatedAt = claimedAt };
@@ -601,8 +583,6 @@ static PullRequest PullRequestForClaim(WorkClaim claim, string branch, string st
 
 static void Assert(bool condition, string message)
 {
-    if (!condition)
-    {
-        throw new InvalidOperationException(message);
-    }
+    Xunit.Assert.True(condition, message);
+}
 }

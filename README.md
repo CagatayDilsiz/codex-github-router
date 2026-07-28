@@ -117,6 +117,15 @@ Run the CLI directly from source:
 dotnet run --project src/CodexGithubRouter -- --help
 ```
 
+Run the test suite with standard .NET test discovery and filtering:
+
+```bash
+dotnet test
+dotnet test --filter FullyQualifiedName~ConfigurationSandboxTests
+```
+
+The default suite is deterministic and does not require GitHub, a network connection, or a live user configuration. Filesystem integration tests use unique temporary sandboxes; normal CLI execution continues to use the user-level `.codex` and `.codex-github-router` directories.
+
 Create a local tool package:
 
 ```bash

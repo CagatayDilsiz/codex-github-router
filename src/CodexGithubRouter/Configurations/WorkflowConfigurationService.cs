@@ -6,8 +6,11 @@ namespace CodexGithubRouter.Configurations;
 public static class WorkflowConfigurationService
 {
     public static async Task<RouterConfiguration> LoadOrCreateAsync(CancellationToken cancellationToken = default)
+        => await LoadOrCreateAsync(ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<RouterConfiguration> LoadOrCreateAsync(ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
-        var path = ConfigurationPaths.WorkflowFile;
+        var path = paths.WorkflowFile;
 
         if (!File.Exists(path))
         {
