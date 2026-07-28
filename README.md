@@ -107,8 +107,8 @@ Clone and build the project:
 ```bash
 git clone https://github.com/CagatayDilsiz/codex-github-router.git
 cd codex-github-router
-dotnet restore
-dotnet build
+dotnet restore CodexGithubRouter.slnx
+dotnet build CodexGithubRouter.slnx -c Release --no-restore
 ```
 
 Run the CLI directly from source:
@@ -117,13 +117,13 @@ Run the CLI directly from source:
 dotnet run --project src/CodexGithubRouter -- --help
 ```
 
-Run the test suite with standard .NET test discovery and filtering:
+Run the test suite with standard .NET test discovery and filtering. The commands below build the Release output as part of test execution; CI uses `--no-build` only after its preceding Release build step:
 
 ```bash
-dotnet test
-dotnet test --filter FullyQualifiedName~ConfigurationSandboxTests
-dotnet test --filter "Category=Unit"
-dotnet test --filter "Category=Integration"
+dotnet test CodexGithubRouter.slnx -c Release
+dotnet test CodexGithubRouter.slnx -c Release --filter FullyQualifiedName~ConfigurationSandboxTests
+dotnet test CodexGithubRouter.slnx -c Release --filter "Category=Unit"
+dotnet test CodexGithubRouter.slnx -c Release --filter "Category=Integration"
 ```
 
 The default suite runs both deterministic Unit tests and sandboxed Integration tests. It does not require GitHub, a network connection, or a live user configuration. Filesystem integration tests use unique temporary sandboxes; normal CLI execution continues to use the user-level `.codex` and `.codex-github-router` directories.
@@ -140,7 +140,7 @@ Install the locally packed tool:
 dotnet tool install --global \
   --add-source ./src/CodexGithubRouter/nupkg \
   codex-github-router \
-  --version 0.0.1-alpha
+  --version 0.0.2-alpha
 ```
 
 ## License
