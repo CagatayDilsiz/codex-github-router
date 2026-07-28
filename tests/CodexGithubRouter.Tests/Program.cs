@@ -22,6 +22,7 @@ AssertClaimRoutingAuthority();
 await AssertPullRequestTransitionLifecycleAsync();
 await AssertClaimedWorkRecoveryAsync();
 await AssertActiveClaimRouteOrchestrationAsync();
+AssertClarificationPromptIsLanguageIndependent();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -83,6 +84,20 @@ static void AssertResumePromptIsSafe()
     Assert(completedRecoveryPrompt.Contains("create exactly one pull request", StringComparison.Ordinal) && completedRecoveryPrompt.Contains("Fixes #4", StringComparison.Ordinal), "Completed recovery must provide executable single-PR linking instructions.");
     var currentPullRequestRecoveryPrompt = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(4, 21);
     Assert(currentPullRequestRecoveryPrompt.Contains("pull request #21", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr pr transition 21 ready-for-review", StringComparison.Ordinal) && currentPullRequestRecoveryPrompt.Contains("cgr issue transition 4 completed", StringComparison.Ordinal), "An unlabeled current PR must receive exact lifecycle recovery instructions.");
+}
+
+static void AssertClarificationPromptIsLanguageIndependent()
+{
+    var prompt = ContextPromptService.GetNewIssuePrompt(12);
+    const string canonicalNotice = "> 🤖 This clarification request was generated automatically by a Codex session through CGR. After providing the requested information, transition this issue back to `ready`.";
+    var noticeInstruction = prompt.IndexOf(canonicalNotice, StringComparison.Ordinal);
+    var questionInstruction = prompt.IndexOf("actual clarification question must follow the notice", StringComparison.Ordinal);
+
+    Assert(noticeInstruction >= 0 && questionInstruction > noticeInstruction, "Clarification comments must start with a blockquote notice before the question.");
+    Assert(prompt.Contains("visible Markdown blockquote notice", StringComparison.Ordinal), "The notice must be a visible Markdown blockquote.");
+    Assert(prompt.Contains("translate it naturally when the issue or clarification conversation is not in English", StringComparison.Ordinal), "Non-English clarification notices must be translated naturally.");
+    Assert(prompt.Contains("Keep `Codex`, `CGR`, and `ready` unchanged", StringComparison.Ordinal), "The canonical identifiers must remain unchanged when translating the notice.");
+    Assert(prompt.Contains("cgr issue transition 12 needs-info", StringComparison.Ordinal), "The existing needs-info transition must remain in the clarification instructions.");
 }
 
 static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()

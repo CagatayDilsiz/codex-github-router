@@ -9,7 +9,11 @@ public static class ContextPromptService
 
             First, please use `gh issue view {number} --comments` to view the issue details and any available comments. An empty comments result is normal and does not need to be reported.
 
-            1. If the issue is not clear, please ask for clarification in the comments of the issue. Do not make any assumptions about the issue, run `cgr issue transition {number} needs-info` after leaving comment. Wait for the issue author to provide clarification before proceeding.             
+            1. If the issue is not clear, please ask for clarification in the comments of the issue. The clarification comment must start with a visible Markdown blockquote notice. Use the following as the canonical English example and translate it naturally when the issue or clarification conversation is not in English. Keep `Codex`, `CGR`, and `ready` unchanged:
+
+            > 🤖 This clarification request was generated automatically by a Codex session through CGR. After providing the requested information, transition this issue back to `ready`.
+
+            The actual clarification question must follow the notice. Do not make any assumptions about the issue, run `cgr issue transition {number} needs-info` after leaving comment. Wait for the issue author to provide clarification before proceeding.
 
             2. Before starting to work on the issue, check if there are unstaged or uncommitted changes in the working directory. If there are, do not proceed with the issue until the changes are either committed or stashed. This is to ensure that the working directory is clean and does not interfere with the work on the issue. run `cgr issue transition {number} blocked` to block the issue and do not start working on it until the changes are resolved by the user.
 
