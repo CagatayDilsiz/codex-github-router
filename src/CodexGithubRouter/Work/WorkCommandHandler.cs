@@ -1,5 +1,6 @@
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
+using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Work;
 
@@ -19,6 +20,10 @@ public static class WorkCommandHandler
                 var claim = await WorkClaimStore.ReadAsync(commonDirectory);
                 if (claim is null) Console.WriteLine("No active work claim.");
                 else Console.WriteLine($"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}, owner {claim.OwnerSessionId}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.");
+                var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+                var gateStatus = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
+                if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
+                else foreach (var task in gateStatus.Tasks.GroupBy(task => task.IssueNumber).Select(group => group.First()).OrderBy(task => task.IssueNumber)) Console.WriteLine($"Repository workflow gate: issue #{task.IssueNumber}. {task.Status.Message}");
                 return 0;
             case "reconcile":
                 var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await WorkflowConfigurationService.LoadOrCreateAsync());

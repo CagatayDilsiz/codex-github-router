@@ -23,6 +23,8 @@ await AssertPullRequestTransitionLifecycleAsync();
 await AssertClaimedWorkRecoveryAsync();
 await AssertActiveClaimRouteOrchestrationAsync();
 AssertClarificationPromptIsLanguageIndependent();
+AssertRepositoryGateConfiguration();
+await AssertRepositoryGateEvaluationAsync();
 
 Console.WriteLine("All working-issue workflow tests passed.");
 
@@ -110,6 +112,93 @@ static void AssertHookOutputResumesWorkingIssueBeforeReadyIssue()
 
     Assert(decision.BlockReason is null, "A single working issue should not be blocked by routing.");
     Assert(decision.AdditionalContext?.Contains("Issue #4 is already marked as working", StringComparison.Ordinal) == true, "Hook routing should emit resume context before ready-issue context.");
+}
+
+static void AssertRepositoryGateConfiguration()
+{
+    var configuration = new RouterConfiguration();
+    Assert(RepositoryGateService.GetLabels(configuration).SequenceEqual(new[] { "codex:gate" }), "The default repository gate must use codex:gate.");
+    Assert(WorkflowLabelConfiguration.GetRequiredLabels(configuration).Contains("codex:gate", StringComparer.OrdinalIgnoreCase), "The repository gate label must be provisioned with the managed labels.");
+
+    var issue = new Issue
+    {
+        Number = 13,
+        Labels = new List<GithubLabel>
+        {
+            new() { Name = "codex:ready" },
+            new() { Name = "codex:gate" }
+        }
+    };
+    var transition = IssueTransitionPlanner.Plan(issue, WorkflowState.Completed, configuration);
+    Assert(!transition.LabelsToRemove.Contains("codex:gate", StringComparer.OrdinalIgnoreCase), "Issue transitions must preserve the repository gate label.");
+
+    configuration.Policies.RepositoryGate.Labels.Add("codex:critical");
+    Assert(RepositoryGateService.IsGated(new Issue { Labels = new List<GithubLabel> { new() { Name = "codex:critical" } } }, configuration), "Configured repository gate aliases must use OR semantics.");
+}
+
+static async Task AssertRepositoryGateEvaluationAsync()
+{
+    var configuration = new RouterConfiguration();
+    var reviewIssue = GatedIssue(10, WorkflowState.Completed, 20);
+    var review = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { reviewIssue }, _ => Task.FromResult(new PullRequest
+    {
+        Number = 20,
+        State = "open",
+        Labels = new List<GithubLabel> { new() { Name = "codex:rr" } }
+    }));
+    Assert(review.Tasks.Single().Type == WorkflowItemType.RepositoryGateBlock && review.Tasks.Single().Status.Message.Contains("issue #10", StringComparison.Ordinal) && review.Tasks.Single().Status.Message.Contains("Pull request #20", StringComparison.Ordinal), "A gated review-requested workstream must block unrelated work with exact issue and pull-request context.");
+
+    var changes = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(11, WorkflowState.Completed, 21) }, _ => Task.FromResult(new PullRequest
+    {
+        Number = 21,
+        State = "open",
+        Labels = new List<GithubLabel> { new() { Name = "codex:cr" } }
+    }));
+    Assert(changes.Tasks.Single().Type == WorkflowItemType.ChangeRequest, "A gated change request must remain actionable and claimable.");
+
+    var ready = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(12, WorkflowState.Ready) }, _ => throw new InvalidOperationException("A gated ready issue should not query pull requests."));
+    Assert(ready.Tasks.Single().Type == WorkflowItemType.NewIssue, "A gated ready issue must be prioritized as new work.");
+
+    var merged = await WorkflowService.EvaluateRepositoryGateAsync(configuration, new[] { GatedIssue(14, WorkflowState.Completed, 22) }, _ => Task.FromResult(new PullRequest
+    {
+        Number = 22,
+        State = "merged",
+        Labels = new List<GithubLabel>()
+    }));
+    Assert(merged.Tasks.Count == 0, "A merged pull request must make its repository gate terminal.");
+
+    var gateDecision = HookTaskRouter.Route(new[]
+    {
+        new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 11, PullRequestNumber = 21 },
+        new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 }
+    });
+    Assert(gateDecision.SelectedTask?.IssueNumber == 11, "Gated actionable work must win over ordinary ready work when it is evaluated first.");
+
+    var blockedGateDecision = HookTaskRouter.Route(new[]
+    {
+        new WorkflowItem { Type = WorkflowItemType.RepositoryGateBlock, IssueNumber = 10, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #10." } },
+        new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 15 }
+    });
+    Assert(blockedGateDecision.BlockReason == "Repository workflow is gated by issue #10.", "A gated waiting workstream must block ordinary ready work.");
+}
+
+static Issue GatedIssue(int number, WorkflowState state, int? pullRequestNumber = null)
+{
+    var stateLabel = new RouterConfiguration().States[state].Single().Values.Single();
+    var issue = new Issue
+    {
+        Number = number,
+        Labels = new List<GithubLabel>
+        {
+            new() { Name = stateLabel },
+            new() { Name = "codex:gate" }
+        }
+    };
+    if (pullRequestNumber.HasValue)
+    {
+        issue.ClosingPullRequestsReferences.Add(new ClosingIssueReference { Number = pullRequestNumber.Value });
+    }
+    return issue;
 }
 
 static void AssertHookRoutePrecedence()

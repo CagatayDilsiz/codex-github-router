@@ -11,7 +11,9 @@ public static class WorkflowLabelConfiguration
 
         return GetLabelMappings(configuration.States)
             .Concat(GetLabelMappings(configuration.PullRequestStates))
-            .Select(mapping => mapping.Label.Trim())
+            .Select(mapping => mapping.Label)
+            .Concat(RepositoryGateService.GetLabels(configuration))
+            .Select(label => label.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -25,6 +27,7 @@ public static class WorkflowLabelConfiguration
             .Select(mapping => $"issue:{mapping.State}:{mapping.Label.Trim().ToLowerInvariant()}")
             .Concat(GetLabelMappings(configuration.PullRequestStates)
                 .Select(mapping => $"pull-request:{mapping.State}:{mapping.Label.Trim().ToLowerInvariant()}"))
+            .Concat(RepositoryGateService.GetLabels(configuration).Select(label => $"policy:repository-gate:{label.ToLowerInvariant()}"))
             .OrderBy(value => value, StringComparer.Ordinal));
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
@@ -41,6 +44,26 @@ public static class WorkflowLabelConfiguration
         ValidateNormalizedLabelNames(pullRequestLabels);
         ValidateDomain("issue", issueLabels);
         ValidateDomain("pull request", pullRequestLabels);
+
+        var workflowLabels = issueLabels.Concat(pullRequestLabels).Select(mapping => mapping.Label).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var gateLabels = RepositoryGateService.GetLabels(configuration);
+        if (gateLabels.Count == 0)
+        {
+            throw new InvalidOperationException("At least one repository gate label must be configured.");
+        }
+
+        foreach (var gateLabel in gateLabels)
+        {
+            if (workflowLabels.Contains(gateLabel))
+            {
+                throw new InvalidOperationException($"Repository gate label '{gateLabel}' must not also be a workflow state label.");
+            }
+
+            if (!string.Equals(gateLabel, gateLabel.Trim(), StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"Repository gate label '{gateLabel}' must not have leading or trailing whitespace.");
+            }
+        }
     }
 
     private static IEnumerable<(string State, string Label)> GetLabelMappings<TState>(Dictionary<TState, List<IssueMatchRule>> states)

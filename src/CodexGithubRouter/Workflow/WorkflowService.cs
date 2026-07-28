@@ -342,6 +342,140 @@ public static class WorkflowService
         }
     }
 
+    public static async Task<WorkflowResponse> CheckRepositoryGateAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
+    {
+        var gatedIssues = await RepositoryGateService.GetOpenGatedIssuesAsync(workingDirectory, configuration, scanLimit);
+        return await EvaluateRepositoryGateAsync(
+            configuration,
+            gatedIssues,
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
+                workingDirectory,
+                pullRequestNumber,
+                new PullRequestSelection { Number = true, State = true, Labels = true },
+                CancellationToken.None));
+    }
+
+    public static async Task<WorkflowResponse> EvaluateRepositoryGateAsync(
+        RouterConfiguration configuration,
+        IReadOnlyList<Issue> gatedIssues,
+        Func<int, Task<PullRequest>> getPullRequest)
+    {
+        var tasks = new List<WorkflowItem>();
+
+        foreach (var issue in gatedIssues.OrderBy(issue => issue.Number))
+        {
+            var issueResolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
+            if (issueResolution.IsAmbiguous)
+            {
+                tasks.Add(CreateGateBlock(issue, $"{issueResolution.DescribeConflict($"gated issue #{issue.Number}")} Remove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."));
+                continue;
+            }
+
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.Abandoned))
+            {
+                continue;
+            }
+
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.Ready))
+            {
+                tasks.Add(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = issue.Number, Status = new WorkflowTaskStatus { Message = $"Repository workflow is gated by issue #{issue.Number}." } });
+                continue;
+            }
+
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.InProgress))
+            {
+                tasks.AddRange(await EvaluateGatedIssueWorkAsync(configuration, issue, getPullRequest, allowCompletedWithoutPullRequest: false));
+                continue;
+            }
+
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.Completed))
+            {
+                tasks.AddRange(await EvaluateGatedIssueWorkAsync(configuration, issue, getPullRequest, allowCompletedWithoutPullRequest: true));
+                continue;
+            }
+
+            if (issueResolution.MatchedLabels.ContainsKey(WorkflowState.Blocked) || issueResolution.MatchedLabels.ContainsKey(WorkflowState.NeedsInfo))
+            {
+                tasks.Add(CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}, which is blocked or needs information. Remove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."));
+                continue;
+            }
+
+            tasks.Add(CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}, which has no actionable workflow state. Remove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."));
+        }
+
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = tasks,
+            Message = tasks.Count == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed."
+        };
+    }
+
+    private static async Task<List<WorkflowItem>> EvaluateGatedIssueWorkAsync(
+        RouterConfiguration configuration,
+        Issue issue,
+        Func<int, Task<PullRequest>> getPullRequest,
+        bool allowCompletedWithoutPullRequest)
+    {
+        if (issue.ClosingPullRequestsReferences.Count == 0)
+        {
+            if (allowCompletedWithoutPullRequest)
+            {
+                return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}, which has no linked pull request to resolve. Remove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
+            }
+
+            return new List<WorkflowItem> { new() { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = issue.Number, Status = new WorkflowTaskStatus { Message = $"Repository workflow is gated by issue #{issue.Number}." } } };
+        }
+
+        var linked = await CheckIssueLinkedPullRequestsAsync(configuration, new[] { issue }, getPullRequest);
+        if (linked.Tasks.Count > 0 && linked.Tasks.All(task => task.Type == WorkflowItemType.CloseIssue))
+        {
+            return new List<WorkflowItem>();
+        }
+
+        var gatedTasks = new List<WorkflowItem>();
+        foreach (var task in linked.Tasks)
+        {
+            if (task.Type == WorkflowItemType.CloseIssue)
+            {
+                continue;
+            }
+
+            if (task.Type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred or WorkflowItemType.ClosedWithoutMerge or WorkflowItemType.UnknownPullRequestState or WorkflowItemType.LinkPullRequestsToIssues)
+            {
+                var pullRequestText = task.PullRequestNumber.HasValue ? $"Pull request #{task.PullRequestNumber.Value} is {DescribeGateTask(task.Type)}." : "The gated workstream is waiting for resolution.";
+                gatedTasks.Add(CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\n{pullRequestText}\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."));
+                continue;
+            }
+
+            gatedTasks.Add(task);
+        }
+
+        if (gatedTasks.Count == 0)
+        {
+            gatedTasks.Add(CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}, which is waiting for its workstream to resolve. Remove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."));
+        }
+
+        return gatedTasks;
+    }
+
+    private static WorkflowItem CreateGateBlock(Issue issue, string message) => new()
+    {
+        Type = WorkflowItemType.RepositoryGateBlock,
+        IssueNumber = issue.Number,
+        Status = new WorkflowTaskStatus { Message = message }
+    };
+
+    private static string DescribeGateTask(WorkflowItemType type) => type switch
+    {
+        WorkflowItemType.AwaitingReview => "awaiting review",
+        WorkflowItemType.AwaitingMerge => "awaiting merge",
+        WorkflowItemType.Deferred => "deferred",
+        WorkflowItemType.ClosedWithoutMerge => "closed without merge",
+        WorkflowItemType.UnknownPullRequestState => "in an unknown state",
+        _ => "waiting for resolution"
+    };
+
     public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30)
     {
         

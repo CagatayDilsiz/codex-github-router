@@ -120,6 +120,13 @@ public static class HookService
         string? sessionId,
         bool allowNoClaimReroute = true)
     {
+        var repositoryGateTasks = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
+        if (!repositoryGateTasks.IsSuccessful)
+        {
+            await WriteBlockAsync(repositoryGateTasks.Message);
+            return 0;
+        }
+
         var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory);
         if (!completedIssueTasks.IsSuccessful)
         {
@@ -145,7 +152,7 @@ public static class HookService
         {
             IsSuccessful = true,
             Message = "Combined workflow tasks.",
-            Tasks = completedIssueTasks.Tasks.Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
+            Tasks = repositoryGateTasks.Tasks.Concat(completedIssueTasks.Tasks).Concat(inProgressIssueTasks.Tasks).Concat(newIssueTask.Tasks).ToList()
         };
 
         if (combinedTasks.Tasks.Count == 0)
