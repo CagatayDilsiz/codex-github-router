@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Workflow;
 using Xunit;
 
@@ -77,6 +78,98 @@ public sealed class AutonomousActivationTests
     }
 
     [Fact]
+    public async Task Prompt_policy_rejects_normalized_duplicates_and_period_only_prompts()
+    {
+        using var directory = new TemporaryDirectory();
+        var duplicatePath = Path.Combine(directory.Path, "duplicate.json");
+        await File.WriteAllTextAsync(duplicatePath, JsonSerializer.Serialize(new RouterConfiguration
+        {
+            Policies = new RouterPolicies
+            {
+                AutonomousActivation = new AutonomousActivationPolicy
+                {
+                    Mode = "prompt",
+                    Prompts = new List<string> { "Work on the next task", " work   on the next task. " }
+                }
+            }
+        }, WorkflowJson.Options));
+
+        var periodPath = Path.Combine(directory.Path, "period.json");
+        await File.WriteAllTextAsync(periodPath, JsonSerializer.Serialize(new RouterConfiguration
+        {
+            Policies = new RouterPolicies
+            {
+                AutonomousActivation = new AutonomousActivationPolicy
+                {
+                    Mode = "prompt",
+                    Prompts = new List<string> { "." }
+                }
+            }
+        }, WorkflowJson.Options));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkflowConfigurationService.LoadAsync(duplicatePath));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => WorkflowConfigurationService.LoadAsync(periodPath));
+    }
+
+    [Fact]
+    public void Matching_supports_multiple_prompts_and_ordinary_turkish_case_variation()
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "first phrase", "sıradaki görev" }
+        };
+
+        Assert.True(AutonomousActivationService.IsActivated(policy, "Sıradaki görev"));
+    }
+
+    [Theory]
+    [InlineData("work on the next task?")]
+    [InlineData("work on the next task!")]
+    [InlineData("please \"work on the next task\"")]
+    public void Punctuation_and_quoted_phrases_inside_longer_text_do_not_match(string submitted)
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "work on the next task" }
+        };
+
+        Assert.False(AutonomousActivationService.IsActivated(policy, submitted));
+    }
+
+    [Fact]
+    public async Task Missing_configuration_uses_default_without_creating_a_file()
+    {
+        using var directory = new TemporaryDirectory();
+
+        var configuration = await WorkflowConfigurationService.LoadOrDefaultAsync(directory.Paths);
+
+        Assert.Null(configuration.Policies.AutonomousActivation);
+        Assert.False(File.Exists(directory.Paths.WorkflowFile));
+        Assert.Contains("Autonomous mode: enabled", AutonomousCommandHandler.FormatStatus(true, configuration.Policies.AutonomousActivation));
+        Assert.Contains("Activation mode: always", AutonomousCommandHandler.FormatStatus(false, configuration.Policies.AutonomousActivation));
+    }
+
+    [Fact]
+    public void Status_formats_enabled_and_disabled_prompt_policies()
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "first phrase", "second phrase" }
+        };
+
+        var enabled = AutonomousCommandHandler.FormatStatus(true, policy);
+        var disabled = AutonomousCommandHandler.FormatStatus(false, policy);
+
+        Assert.Contains("Activation prompts:", enabled);
+        Assert.Contains("  - first phrase", enabled);
+        Assert.Contains("  - second phrase", enabled);
+        Assert.Contains("Activation prompts: 2 configured", disabled);
+    }
+
+    [Fact]
     public void Always_mode_ignores_prompt_values()
     {
         var policy = new AutonomousActivationPolicy
@@ -123,6 +216,8 @@ public sealed class AutonomousActivationTests
         }
 
         public string Path { get; }
+
+        public ConfigurationPathSet Paths => new(Path);
 
         public void Dispose() => Directory.Delete(Path, recursive: true);
     }

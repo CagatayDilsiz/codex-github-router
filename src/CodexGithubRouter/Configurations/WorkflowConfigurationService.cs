@@ -21,6 +21,14 @@ public static class WorkflowConfigurationService
         return await LoadAsync(path, cancellationToken);
     }
 
+    public static Task<RouterConfiguration> LoadOrDefaultAsync(CancellationToken cancellationToken = default)
+        => LoadOrDefaultAsync(ConfigurationPaths.Default, cancellationToken);
+
+    public static Task<RouterConfiguration> LoadOrDefaultAsync(ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+        => File.Exists(paths.WorkflowFile)
+            ? LoadAsync(paths.WorkflowFile, cancellationToken)
+            : Task.FromResult(new RouterConfiguration());
+
     public static async Task<RouterConfiguration> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
         try

@@ -19,7 +19,9 @@ public static class HookService
     public static IReadOnlyList<WorkflowItem> SelectWorkflowTasks(IReadOnlyList<WorkflowItem> repositoryGateTasks, IReadOnlyList<WorkflowItem> ordinaryTasks) =>
         repositoryGateTasks.Count > 0 ? repositoryGateTasks : ordinaryTasks;
 
-    public static async Task<int> RunAsync()
+    public static Task<int> RunAsync() => RunAsync(new HookExecutionDependencies());
+
+    public static async Task<int> RunAsync(HookExecutionDependencies dependencies)
     {
         try
         {
@@ -48,19 +50,19 @@ public static class HookService
                 return 0;
             }
 
-            if (!await AutonomousService.IsAutonomousAsync(payload.Cwd))
+            if (!await dependencies.IsAutonomousAsync(payload.Cwd))
             {
                 // If autonomous mode is disabled, do not intervene in the manual prompt.
                 return 0;
             }
 
-            var configuration = await WorkflowConfigurationService.LoadOrCreateAsync();
+            var configuration = await dependencies.LoadConfigurationAsync();
             if (!AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt))
             {
                 return 0;
             }
 
-            var gitCommonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(payload.Cwd)
+            var gitCommonDirectory = await dependencies.ResolveGitCommonDirectoryAsync(payload.Cwd)
                 ?? throw new InvalidOperationException("Not a valid Git repository.");
 
             await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
