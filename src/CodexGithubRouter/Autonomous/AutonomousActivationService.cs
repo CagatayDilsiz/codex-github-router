@@ -1,4 +1,6 @@
 using System.Text;
+using System.Xml;
+using System.Xml.Linq;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Autonomous;
@@ -52,7 +54,13 @@ public static class AutonomousActivationService
             return true;
         }
 
-        var normalizedSubmittedPrompt = Normalize(submittedPrompt);
+        var activationCandidate = ExtractActivationCandidate(submittedPrompt);
+        if (activationCandidate is null)
+        {
+            return false;
+        }
+
+        var normalizedSubmittedPrompt = Normalize(activationCandidate);
         return normalizedSubmittedPrompt.Length > 0 &&
             (policy.Prompts ?? new List<string>())
                 .Select(Normalize)
@@ -97,6 +105,68 @@ public static class AutonomousActivationService
         }
 
         return result;
+    }
+
+    private static string? ExtractActivationCandidate(string? submittedPrompt)
+    {
+        if (string.IsNullOrWhiteSpace(submittedPrompt))
+        {
+            return submittedPrompt;
+        }
+
+        var trimmed = submittedPrompt.TrimStart();
+        if (!LooksLikeHeartbeatEnvelope(trimmed))
+        {
+            return submittedPrompt;
+        }
+
+        try
+        {
+            var settings = new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null
+            };
+
+            using var reader = XmlReader.Create(new StringReader(submittedPrompt), settings);
+            var document = XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+            var root = document.Root;
+            if (root is null || root.Name != "heartbeat")
+            {
+                return null;
+            }
+
+            var instructionElements = root.Descendants("instructions").ToList();
+            if (instructionElements.Count != 1 ||
+                instructionElements[0].Parent != root ||
+                instructionElements[0].Nodes().Any(node => node is not XText))
+            {
+                return null;
+            }
+
+            return instructionElements[0].Value;
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static bool LooksLikeHeartbeatEnvelope(string value)
+    {
+        const string heartbeat = "<heartbeat";
+        if (!value.StartsWith(heartbeat, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return value.Length == heartbeat.Length ||
+            char.IsWhiteSpace(value[heartbeat.Length]) ||
+            value[heartbeat.Length] is '>' or '/';
     }
 
     private static string NormalizeMode(string? mode) => mode?.Trim() ?? string.Empty;
