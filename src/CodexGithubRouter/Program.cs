@@ -3,6 +3,7 @@ using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
+using CodexGithubRouter.Release;
 using CodexGithubRouter.Work;
 
 Console.InputEncoding = Encoding.UTF8;
@@ -24,6 +25,7 @@ return args[0].ToLowerInvariant() switch
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "work" => await WorkCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
+    "release-version" => PrintReleaseVersion(args.Skip(1).ToArray()),
     "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     _ => UnknownCommand(args[0])
 };
@@ -66,6 +68,47 @@ static int PrintHelp()
         """);
 
     return 0;
+}
+
+static int PrintReleaseVersion(string[] commandArgs)
+{
+    var versionPartIndex = Array.IndexOf(commandArgs, "--version-part");
+    var suffixIndex = Array.IndexOf(commandArgs, "--suffix");
+    if (versionPartIndex < 0 || versionPartIndex + 1 >= commandArgs.Length)
+    {
+        Console.Error.WriteLine("Usage: cgr release-version --version-part <major|minor|build> [--suffix <suffix>]");
+        return 2;
+    }
+
+    try
+    {
+        var tags = RunGitTagList();
+        var suffix = suffixIndex >= 0 && suffixIndex + 1 < commandArgs.Length ? commandArgs[suffixIndex + 1] : null;
+        var release = ReleaseVersionResolver.Resolve(tags, commandArgs[versionPartIndex + 1], suffix);
+        Console.WriteLine($"version={release.Version}");
+        Console.WriteLine($"tag={release.Tag}");
+        Console.WriteLine($"prerelease={release.IsPrerelease.ToString().ToLowerInvariant()}");
+        return 0;
+    }
+    catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+    {
+        Console.Error.WriteLine(exception.Message);
+        return 1;
+    }
+}
+
+static IEnumerable<string> RunGitTagList()
+{
+    var startInfo = new System.Diagnostics.ProcessStartInfo("git", "tag --list")
+    {
+        RedirectStandardOutput = true,
+        UseShellExecute = false
+    };
+    using var process = System.Diagnostics.Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git to read release tags.");
+    var output = process.StandardOutput.ReadToEnd();
+    process.WaitForExit();
+    if (process.ExitCode != 0) throw new InvalidOperationException("Could not read release tags from git.");
+    return output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 }
 
 static int UnknownCommand(string command)

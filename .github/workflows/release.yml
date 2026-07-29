@@ -1,0 +1,105 @@
+name: Release NuGet package
+
+on:
+  workflow_dispatch:
+    inputs:
+      versionPart:
+        description: SemVer component to increment (build means patch)
+        required: true
+        type: choice
+        options: [major, minor, build]
+      suffix:
+        description: Optional SemVer prerelease suffix without a leading hyphen
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: codex-github-router-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Validate and publish release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    env:
+      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+
+    steps:
+      - name: Check out selected main commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Confirm current main head
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/main | cut -f1)" || {
+            echo "Release must run from the current main head." >&2
+            exit 1
+          }
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.x
+
+      - name: Restore
+        run: dotnet restore CodexGithubRouter.slnx
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: dotnet run --project src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --no-restore -- release-version --version-part "${{ inputs.versionPart }}" --suffix "${{ inputs.suffix }}" >> "$GITHUB_OUTPUT"
+
+      - name: Release build
+        run: dotnet build CodexGithubRouter.slnx -c Release --no-restore --nologo -p:Version="${{ steps.version.outputs.version }}"
+
+      - name: Test
+        run: dotnet test CodexGithubRouter.slnx -c Release --no-build --nologo -p:Version="${{ steps.version.outputs.version }}"
+
+      - name: Pack once
+        run: dotnet pack src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --no-build --nologo -p:Version="${{ steps.version.outputs.version }}" -o "$RUNNER_TEMP/cgr-nupkg"
+
+      - name: Verify packaged CLI
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/nuget.config" <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration><packageSources><clear /><add key="release-package" value="$RUNNER_TEMP/cgr-nupkg" /></packageSources></configuration>
+          EOF
+          dotnet tool install --tool-path "$RUNNER_TEMP/cgr-tool" --configfile "$RUNNER_TEMP/nuget.config" codex-github-router --version "${{ steps.version.outputs.version }}"
+          test "$("$RUNNER_TEMP/cgr-tool/cgr" --version)" = "v${{ steps.version.outputs.version }}"
+          "$RUNNER_TEMP/cgr-tool/cgr" --help
+
+      - name: Create checksum
+        shell: bash
+        run: cd "$RUNNER_TEMP/cgr-nupkg" && sha256sum *.nupkg > codex-github-router-${{ steps.version.outputs.version }}.nupkg.sha256
+
+      - name: Preserve validated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-github-router-${{ steps.version.outputs.version }}
+          path: ${{ runner.temp }}/cgr-nupkg/*
+          if-no-files-found: error
+
+      - name: Publish to NuGet.org
+        shell: bash
+        run: |
+          test -n "$NUGET_API_KEY" || { echo "NUGET_API_KEY repository secret is required." >&2; exit 1; }
+          dotnet nuget push "$RUNNER_TEMP/cgr-nupkg"/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+
+      - name: Create GitHub Release from validated package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          prerelease_arg=()
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then prerelease_arg=(--prerelease); fi
+          gh release create "${{ steps.version.outputs.tag }}" "$RUNNER_TEMP/cgr-nupkg"/* \
+            --target "$GITHUB_SHA" --title "${{ steps.version.outputs.version }}" --generate-notes "${prerelease_arg[@]}"

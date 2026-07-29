@@ -208,7 +208,22 @@ Install the locally packed tool:
 dotnet tool install --global \
   --add-source ./src/CodexGithubRouter/nupkg \
   codex-github-router \
-  --version 0.0.2-alpha
+  --version 0.0.1-dev
+```
+
+## Releases
+
+Releases are published manually from the current `main` head through the **Release NuGet package** GitHub Actions workflow. The repository must have a SemVer baseline tag before its first workflow release (for example, `v0.0.2-alpha`); the workflow deliberately fails rather than guessing a starting version.
+
+Choose `major`, `minor`, or `build` (`build` means the SemVer patch component). Major resets minor and patch, minor resets patch, and build increments only patch. The optional `suffix` is trimmed and must be valid SemVer prerelease identifiers without a leading `-`. For example, with `v0.0.2-alpha` as the latest tag, selecting `minor` and `alpha` publishes `0.1.0-alpha`; leaving the suffix empty would publish a stable version.
+
+Set the protected repository secret `NUGET_API_KEY` before running the workflow. It restores, builds, tests, packs once, installs the exact package into an isolated tool path, checks `cgr --version` and `cgr --help`, then publishes that same `.nupkg` to NuGet.org and attaches it (with a SHA-256 checksum) to the matching generated-notes GitHub Release. A failed or partial run must be investigated rather than rerun as a duplicate publish.
+
+The checked-in project version is the non-release development value `0.0.1-dev`; the release workflow supplies `-p:Version=<resolved-version>` so package metadata and the CLI version align without release commits. NuGet is the primary installation channel; GitHub Releases retain the matching package, checksum, and notes. Install or update an explicit prerelease with:
+
+```bash
+dotnet tool install --global codex-github-router --version 0.1.0-alpha
+dotnet tool update --global codex-github-router --version 0.1.0-alpha
 ```
 
 ## License
