@@ -56,7 +56,7 @@ public static class HookService
                 return 0;
             }
 
-            var configuration = await dependencies.LoadConfigurationAsync();
+            var configuration = await dependencies.LoadConfigurationAsync(payload.Cwd);
             if (!AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt))
             {
                 return 0;

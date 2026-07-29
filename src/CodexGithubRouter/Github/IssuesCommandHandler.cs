@@ -64,7 +64,7 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
-            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
+            var routerConfig = await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 
 
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
@@ -166,16 +166,10 @@ public static class IssuesCommandHandler
 
             var issueFilters = new IssueFilters();
 
+            var routerConfig = await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
+
             if (useConfiguredIssues)
             {
-                var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();
-
-                if (routerConfig is null)
-                {
-                    Console.Error.WriteLine("No router configuration found.");
-                    return 1;
-                }
-
                 issueFilters = IssueFilterResolver.ByState(routerConfig, state);
             }
 

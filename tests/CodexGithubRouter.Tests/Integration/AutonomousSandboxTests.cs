@@ -67,6 +67,45 @@ public sealed class AutonomousSandboxTests
         Assert.Contains("codex:critical", fake.CreatedLabels);
     }
 
+    [Fact]
+    public async Task Enable_uses_repository_override_for_labels_and_fingerprint()
+    {
+        using var sandbox = new TestSandbox();
+        var fake = new FakeAutonomousBoundary(sandbox.GitCommonDirectory);
+        var overridePath = Path.Combine(sandbox.RepositoryDirectory, ".codex-github-router", "workflow.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(overridePath)!);
+        await File.WriteAllTextAsync(overridePath, """
+            {
+              "states": {
+                "ready": [
+                  { "type": "label", "values": ["project:ready"] }
+                ]
+              }
+            }
+            """);
+
+        var first = await AutonomousService.EnableAutonomousAsync(sandbox.RepositoryDirectory, sandbox.Paths, fake);
+
+        Assert.False(first.ConfigurationChanged);
+        Assert.Contains("project:ready", fake.CreatedLabels);
+        Assert.DoesNotContain("codex:ready", fake.CreatedLabels);
+
+        await File.WriteAllTextAsync(overridePath, """
+            {
+              "states": {
+                "ready": [
+                  { "type": "label", "values": ["project:ready-v2"] }
+                ]
+              }
+            }
+            """);
+
+        var second = await AutonomousService.EnableAutonomousAsync(sandbox.RepositoryDirectory, sandbox.Paths, fake);
+
+        Assert.True(second.ConfigurationChanged);
+        Assert.Contains("project:ready-v2", fake.CreatedLabels);
+    }
+
     private sealed class FakeAutonomousBoundary : IAutonomousBoundary
     {
         private readonly string commonDirectory;
@@ -78,6 +117,9 @@ public sealed class AutonomousSandboxTests
 
         public Task<string?> GetGitCommonDirectoryAsync(string workingDirectory, CancellationToken cancellationToken = default) =>
             Task.FromResult<string?>(commonDirectory);
+
+        public Task<string?> GetRepositoryRootAsync(string workingDirectory, CancellationToken cancellationToken = default) =>
+            Task.FromResult<string?>(workingDirectory);
 
         public Task<HashSet<string>> GetRepositoryLabelNamesAsync(string workingDirectory, CancellationToken cancellationToken = default)
         {

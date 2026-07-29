@@ -82,7 +82,7 @@ public static class PullRequestCommandHandler
                 return 1;
             }
 
-            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
+            var routerConfig = await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 
             var pullRequestSelection = new PullRequestSelection()
             {
@@ -192,7 +192,7 @@ public static class PullRequestCommandHandler
                 State = filteredState
             };
 
-           
+            await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 
             var pullRequests = await GitHubCliService.GetPullRequestsAsync(workingDirectory, prFilter, new PullRequestSelection(), CancellationToken.None);
 

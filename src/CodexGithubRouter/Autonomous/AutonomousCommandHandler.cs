@@ -33,7 +33,7 @@ public static class AutonomousCommandHandler
 
                 case "status":
                     var enabled = await AutonomousService.GetAutonomousStatusAsync(workingDirectory);
-                    var configuration = await WorkflowConfigurationService.LoadOrDefaultAsync();
+                    var configuration = await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
                     Console.WriteLine(FormatStatus(enabled, configuration.Policies.AutonomousActivation));
                     return 0;
 

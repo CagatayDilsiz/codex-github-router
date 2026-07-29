@@ -58,7 +58,7 @@ public sealed class HookActivationTests
             var result = await HookService.RunAsync(new HookExecutionDependencies
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
-                LoadConfigurationAsync = () => Task.FromResult(configuration),
+                LoadConfigurationAsync = _ => Task.FromResult(configuration),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
