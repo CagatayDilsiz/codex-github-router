@@ -46,27 +46,20 @@ public static class WorkflowConfigurationService
 
     public static async Task<RouterConfiguration> LoadEffectiveFromRepositoryRootAsync(string repositoryRoot, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
-        var globalConfiguration = await LoadOrCreateAsync(paths, cancellationToken);
-        var globalJson = ParseGlobalJson(paths);
-        return await ApplyRepositoryOverrideAsync(repositoryRoot, globalConfiguration, globalJson, cancellationToken);
-    }
-
-    public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, CancellationToken cancellationToken = default)
-        => LoadEffectiveOrDefaultAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
-
-    public static async Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
-    {
         var globalConfiguration = File.Exists(paths.WorkflowFile)
             ? await LoadAsync(paths.WorkflowFile, cancellationToken)
             : new RouterConfiguration();
         var globalJson = File.Exists(paths.WorkflowFile)
             ? ParseGlobalJson(paths)
             : JsonSerializer.SerializeToNode(globalConfiguration, WorkflowJson.Options)!;
-        var repositoryRoot = await GitRepositoryService.GetRepositoryRootAsync(workingDirectory, cancellationToken)
-            ?? throw new InvalidOperationException("Not a valid Git repository.");
-
         return await ApplyRepositoryOverrideAsync(repositoryRoot, globalConfiguration, globalJson, cancellationToken);
     }
+
+    public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, CancellationToken cancellationToken = default)
+        => LoadEffectiveAsync(workingDirectory, cancellationToken);
+
+    public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+        => LoadEffectiveAsync(workingDirectory, paths, cancellationToken);
 
     private static async Task<RouterConfiguration> ApplyRepositoryOverrideAsync(
         string repositoryRoot,

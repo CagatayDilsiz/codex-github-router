@@ -6,13 +6,20 @@ namespace CodexGithubRouter.Work;
 
 public static class WorkCommandHandler
 {
-    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null, null);
+    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null, null, null, null);
 
-    public static Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver) => HandleAsync(args, commonDirectoryResolver, null);
+    public static Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver) => HandleAsync(args, commonDirectoryResolver, null, null, null);
 
-    public static async Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver, TextWriter? errorWriter)
+    public static async Task<int> HandleAsync(
+        string[] args,
+        Func<string, Task<string?>>? commonDirectoryResolver,
+        TextWriter? errorWriter,
+        Func<string, Task<RouterConfiguration>>? configurationLoader = null,
+        Func<RouterConfiguration, string, Task<WorkflowResponse>>? repositoryGateChecker = null)
     {
         errorWriter ??= Console.Error;
+        configurationLoader ??= workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
+        repositoryGateChecker ??= (configuration, workingDirectory) => WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (args.Length == 0) return Usage();
         var command = args[0].ToLowerInvariant();
         var workingDirectory = args.LastOrDefault(value => !value.StartsWith("--", StringComparison.Ordinal) && !string.Equals(value, command, StringComparison.OrdinalIgnoreCase) && !int.TryParse(value, out _)) ?? Environment.CurrentDirectory;
@@ -28,13 +35,13 @@ public static class WorkCommandHandler
                     var claim = await WorkClaimStore.ReadAsync(commonDirectory);
                     if (claim is null) Console.WriteLine("No active work claim.");
                     else Console.WriteLine(FormatClaimStatus(claim));
-                    var configuration = await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
-                    var gateStatus = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
+                    var configuration = await configurationLoader(workingDirectory);
+                    var gateStatus = await repositoryGateChecker(configuration, workingDirectory);
                     if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
                     else foreach (var task in gateStatus.Tasks.GroupBy(task => task.IssueNumber).Select(group => group.First()).OrderBy(task => task.IssueNumber)) Console.WriteLine($"Repository workflow gate: issue #{task.IssueNumber}. {task.Status.Message}");
                     return 0;
                 case "reconcile":
-                    var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory));
+                    var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
                     Console.WriteLine(released ? "Released a passive or terminal work claim." : "Active work claim remains unchanged.");
                     return 0;
                 case "release":

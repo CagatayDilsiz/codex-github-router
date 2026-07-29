@@ -120,6 +120,8 @@ Prompt matching applies Unicode NFC normalization, trims and collapses Unicode w
 
 Repositories can override only the workflow fields that differ from the global configuration by adding `.codex-github-router/workflow.json` at the repository root. CGR loads the complete global configuration first, recursively merges repository objects, replaces supplied scalar and array values, then validates the effective result. Omitted values inherit the global configuration; arrays are never concatenated; explicit `null` values are rejected; and the repository file is never created or modified automatically.
 
+Effective configuration consumers are read-only: when the global workflow file is missing, CGR uses the built-in defaults in memory and does not create it. The explicit `cgr init` command is the only path that creates the global workflow file.
+
 For example, this repository override changes the ready label and activation prompts while inheriting every other global setting, including the activation mode:
 
 ```json

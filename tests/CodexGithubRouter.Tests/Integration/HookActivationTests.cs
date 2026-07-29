@@ -92,14 +92,6 @@ public sealed class HookActivationTests
         using var sandbox = new TestSandbox();
         var init = await ProcessRunner.RunAsync(sandbox.RepositoryDirectory, "git", new[] { "init", "-q" });
         Assert.Equal(0, init.ExitCode);
-        Directory.CreateDirectory(sandbox.Paths.ConfigurationDirectory);
-        await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, JsonSerializer.Serialize(new RouterConfiguration
-        {
-            Policies = new RouterPolicies
-            {
-                AutonomousActivation = new AutonomousActivationPolicy { Mode = "always" }
-            }
-        }, WorkflowJson.Options));
 
         var overridePath = Path.Combine(sandbox.RepositoryDirectory, ".codex-github-router", "workflow.json");
         Directory.CreateDirectory(Path.GetDirectoryName(overridePath)!);
@@ -138,6 +130,7 @@ public sealed class HookActivationTests
             Assert.Equal(0, resolverCalls);
             Assert.DoesNotContain("\"decision\"", output.ToString());
             Assert.DoesNotContain("\"hookSpecificOutput\"", output.ToString());
+            Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
         }
         finally
         {

@@ -1,4 +1,5 @@
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.Configurations;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
@@ -19,6 +20,7 @@ public sealed class AutonomousSandboxTests
         Assert.Contains("codex:gate", fake.CreatedLabels);
         Assert.Contains("codex:ready", fake.CreatedLabels);
         Assert.True(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.auto")));
+        Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
         Assert.Equal(1, fake.GetLabelsCalls);
     }
 
@@ -57,6 +59,7 @@ public sealed class AutonomousSandboxTests
         using var sandbox = new TestSandbox();
         var fake = new FakeAutonomousBoundary(sandbox.GitCommonDirectory);
 
+        await WorkflowConfigurationService.WriteDefaultAsync(sandbox.Paths.WorkflowFile);
         await AutonomousService.EnableAutonomousAsync(sandbox.RepositoryDirectory, sandbox.Paths, fake);
         var workflow = await File.ReadAllTextAsync(sandbox.Paths.WorkflowFile);
         await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, workflow.Replace("codex:gate", "codex:critical", StringComparison.Ordinal));

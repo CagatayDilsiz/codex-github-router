@@ -18,6 +18,7 @@ public sealed class RepositoryConfigurationOverlayTests
         var effective = await WorkflowConfigurationService.LoadEffectiveAsync(nestedWorkingDirectory, sandbox.Paths);
 
         Assert.Contains("codex:ready", effective.States[WorkflowState.Ready].Single().Values);
+        Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
         Assert.False(File.Exists(GetRepositoryWorkflowPath(sandbox.RepositoryDirectory)));
     }
 

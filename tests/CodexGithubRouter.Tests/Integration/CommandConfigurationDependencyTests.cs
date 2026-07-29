@@ -1,4 +1,7 @@
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Workflow;
+using CodexGithubRouter.Work;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
@@ -47,6 +50,22 @@ public sealed class CommandConfigurationDependencyTests
 
         Assert.Equal(0, result);
         Assert.Equal(0, configurationCalls);
+        Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
+    }
+
+    [Fact]
+    public async Task Work_status_does_not_create_missing_global_configuration()
+    {
+        using var sandbox = new TestSandbox();
+
+        var result = await WorkCommandHandler.HandleAsync(
+            new[] { "status", sandbox.RepositoryDirectory },
+            _ => Task.FromResult<string?>(sandbox.GitCommonDirectory),
+            TextWriter.Null,
+            _ => WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(sandbox.RepositoryDirectory, sandbox.Paths),
+            (_, _) => Task.FromResult(new WorkflowResponse()));
+
+        Assert.Equal(0, result);
         Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
     }
 }
