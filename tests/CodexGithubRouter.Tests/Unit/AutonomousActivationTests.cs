@@ -73,6 +73,8 @@ public sealed class AutonomousActivationTests
     [InlineData("<heartbeat><instructions>different task</instructions></heartbeat>")]
     [InlineData("<heartbeat><instructions>work on the next task</instructions><instructions>another task</instructions></heartbeat>")]
     [InlineData("<heartbeat><instructions><nested>work on the next task</nested></instructions></heartbeat>")]
+    [InlineData("<heartbeat><instructions>work on the next task</instructions><metadata><instructions>different task</instructions></metadata></heartbeat>")]
+    [InlineData("<heartbeat><instructions>work on the next task<!-- comment --></instructions></heartbeat>")]
     [InlineData("<heartbeat><instructions>work on the next task")]
     public void Invalid_or_mismatched_heartbeat_does_not_activate(string heartbeat)
     {

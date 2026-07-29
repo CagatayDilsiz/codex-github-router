@@ -136,8 +136,10 @@ public static class AutonomousActivationService
                 return null;
             }
 
-            var instructionElements = root.Elements("instructions").ToList();
-            if (instructionElements.Count != 1 || instructionElements[0].Elements().Any())
+            var instructionElements = root.Descendants("instructions").ToList();
+            if (instructionElements.Count != 1 ||
+                instructionElements[0].Parent != root ||
+                instructionElements[0].Nodes().Any(node => node is not XText))
             {
                 return null;
             }
