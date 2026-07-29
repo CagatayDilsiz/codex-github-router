@@ -6,7 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>cgr</AssemblyName>
-    <Version>0.0.2-alpha</Version>    
+    <VersionPrefix>0.0.1</VersionPrefix>
+    <VersionSuffix>dev</VersionSuffix>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>cgr</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
