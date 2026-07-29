@@ -87,6 +87,67 @@ public sealed class HookActivationTests
     }
 
     [Fact]
+    public async Task Matching_heartbeat_prompt_enters_the_real_hook_activation_boundary()
+    {
+        using var sandbox = new TestSandbox();
+        var configuration = new RouterConfiguration
+        {
+            Policies = new RouterPolicies
+            {
+                AutonomousActivation = new AutonomousActivationPolicy
+                {
+                    Mode = "prompt",
+                    Prompts = new List<string> { "work on the next task" }
+                }
+            }
+        };
+
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        var output = new StringWriter();
+        var resolverCalls = 0;
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = """
+                    <heartbeat>
+                      <automation_id>scheduled-task</automation_id>
+                      <current_time_iso>2026-07-29T15:52:40.808Z</current_time_iso>
+                      <instructions>work on the next task</instructions>
+                    </heartbeat>
+                    """
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(output);
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(true),
+                LoadConfigurationAsync = _ => Task.FromResult(configuration),
+                ResolveGitCommonDirectoryAsync = _ =>
+                {
+                    resolverCalls++;
+                    throw new InvalidOperationException("Activation boundary reached.");
+                }
+            });
+
+            Assert.Equal(0, result);
+            Assert.Equal(1, resolverCalls);
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+    }
+
+    [Fact]
     public async Task Repository_override_changes_real_hook_activation_before_routing_boundaries()
     {
         using var sandbox = new TestSandbox();

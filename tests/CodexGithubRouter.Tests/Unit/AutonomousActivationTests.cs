@@ -48,6 +48,64 @@ public sealed class AutonomousActivationTests
     }
 
     [Fact]
+    public void Prompt_matching_extracts_exact_instruction_from_heartbeat_envelope()
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "can we work on the next task" }
+        };
+
+        const string heartbeat = """
+            <heartbeat>
+              <automation_id>followapp-luna-g-rev</automation_id>
+              <current_time_iso>2026-07-29T15:52:40.808Z</current_time_iso>
+              <instructions>
+            CAN WE WORK ON THE NEXT TASK.
+              </instructions>
+            </heartbeat>
+            """;
+
+        Assert.True(AutonomousActivationService.IsActivated(policy, heartbeat));
+    }
+
+    [Theory]
+    [InlineData("<heartbeat><instructions>different task</instructions></heartbeat>")]
+    [InlineData("<heartbeat><instructions>work on the next task</instructions><instructions>another task</instructions></heartbeat>")]
+    [InlineData("<heartbeat><instructions><nested>work on the next task</nested></instructions></heartbeat>")]
+    [InlineData("<heartbeat><instructions>work on the next task")]
+    public void Invalid_or_mismatched_heartbeat_does_not_activate(string heartbeat)
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "work on the next task" }
+        };
+
+        Assert.False(AutonomousActivationService.IsActivated(policy, heartbeat));
+    }
+
+    [Fact]
+    public void Non_heartbeat_xml_is_not_treated_as_a_scheduled_task_envelope()
+    {
+        var policy = new AutonomousActivationPolicy
+        {
+            Mode = "prompt",
+            Prompts = new List<string> { "work on the next task" }
+        };
+
+        Assert.False(AutonomousActivationService.IsActivated(policy, "<message>work on the next task</message>"));
+    }
+
+    [Fact]
+    public void Always_mode_does_not_parse_malformed_heartbeat()
+    {
+        var policy = new AutonomousActivationPolicy { Mode = "always" };
+
+        Assert.True(AutonomousActivationService.IsActivated(policy, "<heartbeat><instructions>"));
+    }
+
+    [Fact]
     public async Task Prompt_policy_requires_non_empty_prompts_and_known_mode()
     {
         using var directory = new TemporaryDirectory();
