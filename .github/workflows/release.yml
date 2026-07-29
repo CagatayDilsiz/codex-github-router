@@ -101,6 +101,10 @@ jobs:
     name: Publish validated package to NuGet
     runs-on: ubuntu-latest
     needs: validate_package
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Download validated package
@@ -109,13 +113,15 @@ jobs:
           name: codex-github-router-${{ needs.validate_package.outputs.version }}
           path: ${{ runner.temp }}/cgr-nupkg
 
+      - name: NuGet login (OIDC to temporary API key)
+        id: nuget_login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Publish to NuGet.org
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         shell: bash
-        run: |
-          test -n "$NUGET_API_KEY" || { echo "NUGET_API_KEY repository secret is required." >&2; exit 1; }
-          dotnet nuget push "$RUNNER_TEMP/cgr-nupkg"/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+        run: dotnet nuget push "$RUNNER_TEMP/cgr-nupkg"/*.nupkg --api-key "${{ steps.nuget_login.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json
 
   publish_github_release:
     name: Create GitHub Release from validated package

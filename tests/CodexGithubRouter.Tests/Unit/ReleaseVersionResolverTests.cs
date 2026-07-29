@@ -17,6 +17,7 @@ public sealed class ReleaseVersionResolverTests
         Assert.Equal(expected, release.Version);
         Assert.Equal("v" + expected, release.Tag);
         Assert.Equal(expected.Contains('-'), release.IsPrerelease);
+        Assert.False(release.UsedBootstrapBaseline);
     }
 
     [Fact]
@@ -35,8 +36,12 @@ public sealed class ReleaseVersionResolverTests
         Assert.Throws<ArgumentException>(() => ReleaseVersionResolver.Resolve(new[] { "v0.0.2" }, "build", suffix));
 
     [Fact]
-    public void Requires_baseline_tag() =>
-        Assert.Throws<InvalidOperationException>(() => ReleaseVersionResolver.Resolve(new[] { "release-1.2.3", "v1.2" }, "build", null));
+    public void Uses_temporary_bootstrap_baseline_when_no_valid_tag_exists()
+    {
+        var release = ReleaseVersionResolver.Resolve(new[] { "release-1.2.3", "v1.2" }, "minor", "alpha");
+        Assert.Equal("0.1.0-alpha", release.Version);
+        Assert.True(release.UsedBootstrapBaseline);
+    }
 
     [Fact]
     public void Rejects_duplicate_target_tag() =>

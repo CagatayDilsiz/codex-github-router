@@ -13,9 +13,14 @@ try
 {
     var suffix = suffixIndex >= 0 && suffixIndex + 1 < args.Length ? args[suffixIndex + 1] : null;
     var release = ReleaseVersionResolver.Resolve(ReadGitTags(), args[versionPartIndex + 1], suffix);
+    if (release.UsedBootstrapBaseline)
+    {
+        Console.Error.WriteLine("Warning: no valid SemVer release tag was found; using the temporary 0.0.0 bootstrap baseline.");
+    }
     Console.WriteLine($"version={release.Version}");
     Console.WriteLine($"tag={release.Tag}");
     Console.WriteLine($"prerelease={release.IsPrerelease.ToString().ToLowerInvariant()}");
+    Console.WriteLine($"bootstrap_baseline={release.UsedBootstrapBaseline.ToString().ToLowerInvariant()}");
     return 0;
 }
 catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)

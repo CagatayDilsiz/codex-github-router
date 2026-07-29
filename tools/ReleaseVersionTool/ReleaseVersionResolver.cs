@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace ReleaseVersionTool;
 
-public sealed record ResolvedReleaseVersion(string Version, string Tag, bool IsPrerelease);
+public sealed record ResolvedReleaseVersion(string Version, string Tag, bool IsPrerelease, bool UsedBootstrapBaseline);
 
 public static partial class ReleaseVersionResolver
 {
@@ -12,7 +12,8 @@ public static partial class ReleaseVersionResolver
         if (!TryNormalizeVersionPart(versionPart, out var normalizedPart)) throw new ArgumentException("versionPart must be one of: major, minor, build.", nameof(versionPart));
         var normalizedSuffix = NormalizeSuffix(suffix);
         var latest = tagList.Select(tag => TryParseTag(tag, out var version) ? version : null).Where(version => version is not null).Cast<SemanticVersion>().OrderByDescending(version => version).FirstOrDefault();
-        if (latest is null) throw new InvalidOperationException("No valid SemVer release tag was found. Create a baseline tag such as v0.0.2-alpha before running a release.");
+        var usedBootstrapBaseline = latest is null;
+        latest ??= new SemanticVersion(0, 0, 0, null);
 
         var (major, minor, patch) = normalizedPart switch
         {
@@ -22,7 +23,7 @@ public static partial class ReleaseVersionResolver
         };
         var versionText = $"{major}.{minor}.{patch}" + (normalizedSuffix is null ? string.Empty : $"-{normalizedSuffix}");
         EnsureTargetDoesNotExist(tagList, "v" + versionText);
-        return new ResolvedReleaseVersion(versionText, "v" + versionText, normalizedSuffix is not null);
+        return new ResolvedReleaseVersion(versionText, "v" + versionText, normalizedSuffix is not null, usedBootstrapBaseline);
     }
 
     public static string? NormalizeSuffix(string? suffix)
