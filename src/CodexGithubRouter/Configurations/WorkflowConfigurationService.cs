@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Configurations;
@@ -19,6 +20,14 @@ public static class WorkflowConfigurationService
 
         return await LoadAsync(path, cancellationToken);
     }
+
+    public static Task<RouterConfiguration> LoadOrDefaultAsync(CancellationToken cancellationToken = default)
+        => LoadOrDefaultAsync(ConfigurationPaths.Default, cancellationToken);
+
+    public static Task<RouterConfiguration> LoadOrDefaultAsync(ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+        => File.Exists(paths.WorkflowFile)
+            ? LoadAsync(paths.WorkflowFile, cancellationToken)
+            : Task.FromResult(new RouterConfiguration());
 
     public static async Task<RouterConfiguration> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
@@ -91,6 +100,7 @@ public static class WorkflowConfigurationService
             throw new InvalidOperationException("Issue selection limit must be greater than zero.");
         }
 
+        AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
     }

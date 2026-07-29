@@ -100,6 +100,24 @@ Without this policy, existing routing is unchanged. Worker labels must use the `
 
 Autonomous mode is repository-specific. When it is enabled, the Codex hook can route prompts according to the configured GitHub issue and pull-request workflow. `cgr auto on` validates the workflow configuration and creates only missing labels referenced by its issue and pull-request label rules; existing labels are never changed. CGR stores the applied configuration fingerprint in the repository's shared Git directory so the same setup also works from Git worktrees. After changing the workflow configuration, run `cgr auto on` again to provision any newly required labels safely.
 
+Autonomous activation defaults to `always`. To require an exact user-prompt gate, configure `policies.autonomousActivation` with `mode: "prompt"` and at least one prompt:
+
+```json
+{
+  "policies": {
+    "autonomousActivation": {
+      "mode": "prompt",
+      "prompts": [
+        "sıradaki görevi yapabiliriz",
+        "work on the next task"
+      ]
+    }
+  }
+}
+```
+
+Prompt matching applies Unicode NFC normalization, trims and collapses Unicode whitespace, ignores one trailing ASCII period, and then compares the full strings with ordinal case-insensitive equality. Empty prompts silently bypass the hook; non-matching prompts do not inspect claims or query GitHub. `always` ignores any configured prompt values. Invalid modes and empty prompt-gated lists fail centralized workflow validation. `cgr auto status` displays the active activation mode and configured prompts or count.
+
 When a single issue is already in the configured `working` state, it takes precedence over ready issues. New work branches use `codex/issue-<number>-<short-description>`; CGR only recovers branches with that exact issue prefix, then checks pull requests for the recovered branch before allowing work to continue. CGR never starts a second issue, branch, or pull request. Multiple working issues are treated as an ambiguous workflow state and block the hook until resolved. A working issue whose linked open pull requests are all `deferred` is non-blocking, so ready work may proceed.
 
 Within each workflow domain, label rules are ORed: any configured label for a state matches that state, and multiple matching labels for that same state are valid. Labels matching different states on the same issue or pull request are ambiguous. CGR blocks the hook with a diagnostic listing those labels rather than depending on label order. A transition to a valid target state removes workflow labels for every other state in that same domain while preserving unrelated labels.
