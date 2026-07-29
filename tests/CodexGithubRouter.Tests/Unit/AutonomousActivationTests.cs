@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Workflow;
 using Xunit;
@@ -167,6 +168,29 @@ public sealed class AutonomousActivationTests
         Assert.Contains("  - first phrase", enabled);
         Assert.Contains("  - second phrase", enabled);
         Assert.Contains("Activation prompts: 2 configured", disabled);
+    }
+
+    [Fact]
+    public async Task Auto_status_uses_read_only_default_without_creating_global_workflow_file()
+    {
+        using var directory = new TemporaryDirectory();
+        var repositoryDirectory = Path.Combine(directory.Path, "repository");
+        Directory.CreateDirectory(repositoryDirectory);
+        var init = await ProcessRunner.RunAsync(repositoryDirectory, "git", new[] { "init", "-q" });
+        Assert.Equal(0, init.ExitCode);
+
+        var output = new StringWriter();
+        var result = await AutonomousCommandHandler.HandleAsync(new[] { "status", repositoryDirectory }, new AutonomousCommandDependencies
+        {
+            GetStatusAsync = _ => Task.FromResult(false),
+            LoadConfigurationAsync = workingDirectory => WorkflowConfigurationService.LoadEffectiveOrDefaultAsync(workingDirectory, directory.Paths),
+            Output = output
+        });
+
+        Assert.Equal(0, result);
+        Assert.Contains("Autonomous mode: disabled", output.ToString());
+        Assert.Contains("Activation mode: always", output.ToString());
+        Assert.False(File.Exists(directory.Paths.WorkflowFile));
     }
 
     [Fact]

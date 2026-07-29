@@ -7,7 +7,9 @@ namespace CodexGithubRouter.GitHub;
 
 public static class PullRequestCommandHandler
 {
-     public static async Task<int> HandleAsync(string[] args)
+     public static Task<int> HandleAsync(string[] args) => HandleAsync(args, new PullRequestCommandDependencies());
+
+     public static async Task<int> HandleAsync(string[] args, PullRequestCommandDependencies dependencies)
     {
         if (args.Length == 0)
         {
@@ -18,9 +20,9 @@ public static class PullRequestCommandHandler
         switch (args[0].ToLowerInvariant())
         {
             case "list":
-                return await ListPullRequestsAsync(args.Skip(1).ToArray());
+                return await ListPullRequestsAsync(args.Skip(1).ToArray(), dependencies);
             case "transition":
-                return await TransitionPullRequestAsync(args.Skip(1).ToArray());
+                return await TransitionPullRequestAsync(args.Skip(1).ToArray(), dependencies);
             default:
                 PrintUsage();
                 return 1;
@@ -45,7 +47,7 @@ public static class PullRequestCommandHandler
             """);
     }
 
-    private static async Task<int> TransitionPullRequestAsync(string[] strings)
+    private static async Task<int> TransitionPullRequestAsync(string[] strings, PullRequestCommandDependencies dependencies)
     {
         var arguments = strings.ToList();
 
@@ -74,7 +76,7 @@ public static class PullRequestCommandHandler
 
         try
         {
-            var gitCommonDir = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
 
             if (gitCommonDir is null)
             {
@@ -82,7 +84,7 @@ public static class PullRequestCommandHandler
                 return 1;
             }
 
-            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
+            var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
 
             var pullRequestSelection = new PullRequestSelection()
             {
@@ -93,7 +95,7 @@ public static class PullRequestCommandHandler
                 ClosingIssuesReferences = true,
             }; // You can customize the selection as needed
 
-            var pullRequestToTransition = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, pullRequestSelection, CancellationToken.None);
+            var pullRequestToTransition = await dependencies.GetPullRequestAsync(workingDirectory, pullRequestNumber, pullRequestSelection);
           
             var pullRequestTransition = PullRequestTransitionPlanner.Plan(pullRequestToTransition, targetState, routerConfig);
             var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
@@ -147,7 +149,7 @@ public static class PullRequestCommandHandler
         }
     }
 
-    private static async Task<int> ListPullRequestsAsync(string[] arguments)
+    private static async Task<int> ListPullRequestsAsync(string[] arguments, PullRequestCommandDependencies dependencies)
     {
         var stateArgIndex = arguments.IndexOf("--state");
         var states = new List<string> { "open", "closed", "all", "merged" };
@@ -179,7 +181,7 @@ public static class PullRequestCommandHandler
 
         try
         {
-            var gitCommonDir = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
 
             if (gitCommonDir is null)
             {
@@ -192,9 +194,7 @@ public static class PullRequestCommandHandler
                 State = filteredState
             };
 
-           
-
-            var pullRequests = await GitHubCliService.GetPullRequestsAsync(workingDirectory, prFilter, new PullRequestSelection(), CancellationToken.None);
+            var pullRequests = await dependencies.GetPullRequestsAsync(workingDirectory, prFilter);
 
             if (pullRequests.Count == 0)
             {
@@ -215,4 +215,17 @@ public static class PullRequestCommandHandler
 
         return 0;
     }
+}
+
+public sealed class PullRequestCommandDependencies
+{
+    public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+
+    public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
+
+    public Func<string, int, PullRequestSelection, Task<PullRequest>> GetPullRequestAsync { get; init; } = (workingDirectory, pullRequestNumber, selection) =>
+        GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, selection, CancellationToken.None);
+
+    public Func<string, PullRequestFilters, Task<List<PullRequest>>> GetPullRequestsAsync { get; init; } = (workingDirectory, filters) =>
+        GitHubCliService.GetPullRequestsAsync(workingDirectory, filters, new PullRequestSelection(), CancellationToken.None);
 }

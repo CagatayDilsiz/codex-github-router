@@ -3,6 +3,26 @@ namespace CodexGithubRouter.Git;
 
 public static class GitRepositoryService
 {
+    public static async Task<string?> GetRepositoryRootAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(workingDirectory, "git", new[] { "rev-parse", "--show-toplevel" }, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            await Console.Error.WriteLineAsync($"Git command failed with exit code {process.ExitCode}: {process.Error}");
+            return null;
+        }
+
+        var output = process.Output.Trim();
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            await Console.Error.WriteLineAsync("Git command returned empty output for repository root.");
+            return null;
+        }
+
+        return Path.GetFullPath(output);
+    }
+
     public static async Task<string?> GetCommonDirectoryAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
         var arguments = new string[] { "rev-parse", "--git-common-dir" };

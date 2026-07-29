@@ -5,7 +5,9 @@ namespace CodexGithubRouter.Autonomous;
 
 public static class AutonomousCommandHandler
 {
-    public static async Task<int> HandleAsync(string[] args)
+    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, new AutonomousCommandDependencies());
+
+    public static async Task<int> HandleAsync(string[] args, AutonomousCommandDependencies dependencies)
     {
         if (args.Length == 0)
         {
@@ -21,20 +23,20 @@ public static class AutonomousCommandHandler
             switch (command)
             {
                 case "on":
-                    var enableResult = await AutonomousService.EnableAutonomousAsync(workingDirectory);
+                    var enableResult = await dependencies.EnableAsync(workingDirectory);
                     var configurationChangeMessage = enableResult.ConfigurationChanged ? " Workflow configuration changed and missing labels were provisioned." : string.Empty;
-                    Console.WriteLine($"Autonomous mode enabled for {workingDirectory}. Created {enableResult.CreatedLabelCount} missing workflow label(s).{configurationChangeMessage}");
+                    dependencies.Output.WriteLine($"Autonomous mode enabled for {workingDirectory}. Created {enableResult.CreatedLabelCount} missing workflow label(s).{configurationChangeMessage}");
                     return 0;
 
                 case "off":
-                    await AutonomousService.DisableAutonomousAsync(workingDirectory);
-                    Console.WriteLine($"Autonomous mode disabled for {workingDirectory}");
+                    await dependencies.DisableAsync(workingDirectory);
+                    dependencies.Output.WriteLine($"Autonomous mode disabled for {workingDirectory}");
                     return 0;
 
                 case "status":
-                    var enabled = await AutonomousService.GetAutonomousStatusAsync(workingDirectory);
-                    var configuration = await WorkflowConfigurationService.LoadOrDefaultAsync();
-                    Console.WriteLine(FormatStatus(enabled, configuration.Policies.AutonomousActivation));
+                    var enabled = await dependencies.GetStatusAsync(workingDirectory);
+                    var configuration = await dependencies.LoadConfigurationAsync(workingDirectory);
+                    dependencies.Output.WriteLine(FormatStatus(enabled, configuration.Policies.AutonomousActivation));
                     return 0;
 
                 default:
@@ -80,4 +82,17 @@ public static class AutonomousCommandHandler
 
         return string.Join(Environment.NewLine, lines);
     }
+}
+
+public sealed class AutonomousCommandDependencies
+{
+    public Func<string, Task<AutonomousEnableResult>> EnableAsync { get; init; } = workingDirectory => AutonomousService.EnableAutonomousAsync(workingDirectory);
+
+    public Func<string, Task> DisableAsync { get; init; } = workingDirectory => AutonomousService.DisableAutonomousAsync(workingDirectory);
+
+    public Func<string, Task<bool>> GetStatusAsync { get; init; } = workingDirectory => AutonomousService.GetAutonomousStatusAsync(workingDirectory);
+
+    public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveOrDefaultAsync(workingDirectory);
+
+    public TextWriter Output { get; init; } = Console.Out;
 }

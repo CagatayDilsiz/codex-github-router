@@ -1,11 +1,16 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.Git;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Configurations;
 
 public static class WorkflowConfigurationService
 {
+    private const string RepositoryConfigurationDirectoryName = ".codex-github-router";
+    private const string RepositoryWorkflowFileName = "workflow.json";
+
     public static async Task<RouterConfiguration> LoadOrCreateAsync(CancellationToken cancellationToken = default)
         => await LoadOrCreateAsync(ConfigurationPaths.Default, cancellationToken);
 
@@ -28,6 +33,83 @@ public static class WorkflowConfigurationService
         => File.Exists(paths.WorkflowFile)
             ? LoadAsync(paths.WorkflowFile, cancellationToken)
             : Task.FromResult(new RouterConfiguration());
+
+    public static Task<RouterConfiguration> LoadEffectiveAsync(string workingDirectory, CancellationToken cancellationToken = default)
+        => LoadEffectiveAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<RouterConfiguration> LoadEffectiveAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        var repositoryRoot = await GitRepositoryService.GetRepositoryRootAsync(workingDirectory, cancellationToken)
+            ?? throw new InvalidOperationException("Not a valid Git repository.");
+        return await LoadEffectiveFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
+    }
+
+    public static async Task<RouterConfiguration> LoadEffectiveFromRepositoryRootAsync(string repositoryRoot, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        var globalConfiguration = File.Exists(paths.WorkflowFile)
+            ? await LoadAsync(paths.WorkflowFile, cancellationToken)
+            : new RouterConfiguration();
+        var globalJson = File.Exists(paths.WorkflowFile)
+            ? ParseGlobalJson(paths)
+            : JsonSerializer.SerializeToNode(globalConfiguration, WorkflowJson.Options)!;
+        return await ApplyRepositoryOverrideAsync(repositoryRoot, globalConfiguration, globalJson, cancellationToken);
+    }
+
+    public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, CancellationToken cancellationToken = default)
+        => LoadEffectiveAsync(workingDirectory, cancellationToken);
+
+    public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+        => LoadEffectiveAsync(workingDirectory, paths, cancellationToken);
+
+    private static async Task<RouterConfiguration> ApplyRepositoryOverrideAsync(
+        string repositoryRoot,
+        RouterConfiguration globalConfiguration,
+        JsonNode globalJson,
+        CancellationToken cancellationToken)
+    {
+        var repositoryWorkflowPath = Path.Combine(repositoryRoot, RepositoryConfigurationDirectoryName, RepositoryWorkflowFileName);
+
+        if (!File.Exists(repositoryWorkflowPath))
+        {
+            return globalConfiguration;
+        }
+
+        JsonNode repositoryJson;
+        try
+        {
+            repositoryJson = JsonNode.Parse(await File.ReadAllTextAsync(repositoryWorkflowPath, cancellationToken))
+                ?? throw new InvalidOperationException($"Repository workflow configuration is empty or null: {repositoryWorkflowPath}");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"Repository workflow configuration is not valid JSON: {repositoryWorkflowPath}", exception);
+        }
+
+        if (repositoryJson is not JsonObject)
+        {
+            throw new InvalidOperationException($"Repository workflow configuration must be a JSON object: {repositoryWorkflowPath}");
+        }
+
+        RejectExplicitNulls(repositoryJson, repositoryWorkflowPath);
+        var mergedJson = MergeJson(globalJson, repositoryJson);
+
+        try
+        {
+            var effectiveConfiguration = JsonSerializer.Deserialize<RouterConfiguration>(mergedJson.ToJsonString(WorkflowJson.Options), WorkflowJson.Options)
+                ?? throw new InvalidOperationException("Effective workflow configuration is empty.");
+
+            Validate(effectiveConfiguration);
+            return effectiveConfiguration;
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"Effective workflow configuration is not valid after applying repository override '{repositoryWorkflowPath}'.", exception);
+        }
+        catch (InvalidOperationException exception)
+        {
+            throw new InvalidOperationException($"Effective workflow configuration is invalid after applying repository override '{repositoryWorkflowPath}': {exception.Message}", exception);
+        }
+    }
 
     public static async Task<RouterConfiguration> LoadAsync(string path, CancellationToken cancellationToken = default)
     {
@@ -68,6 +150,73 @@ public static class WorkflowConfigurationService
         catch (IOException) when (File.Exists(path))
         {
             // Another process created it first. Ignore the exception and proceed to load the existing configuration.
+        }
+    }
+
+    private static JsonNode MergeJson(JsonNode inherited, JsonNode overlay)
+    {
+        if (inherited is JsonObject inheritedObject && overlay is JsonObject overlayObject)
+        {
+            var result = inheritedObject.DeepClone().AsObject();
+            foreach (var property in overlayObject)
+            {
+                var existingProperty = result.FirstOrDefault(candidate =>
+                    string.Equals(candidate.Key, property.Key, StringComparison.OrdinalIgnoreCase));
+
+                if (existingProperty.Key is not null)
+                {
+                    result[existingProperty.Key] = MergeJson(existingProperty.Value!, property.Value!);
+                }
+                else
+                {
+                    result[property.Key] = property.Value!.DeepClone();
+                }
+            }
+
+            return result;
+        }
+
+        return overlay.DeepClone();
+    }
+
+    private static JsonNode ParseGlobalJson(ConfigurationPathSet paths)
+    {
+        try
+        {
+            return JsonNode.Parse(File.ReadAllText(paths.WorkflowFile))
+                ?? throw new InvalidOperationException("Global workflow configuration is empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw new InvalidOperationException($"Workflow configuration is not valid JSON: {paths.WorkflowFile}", exception);
+        }
+    }
+
+    private static void RejectExplicitNulls(JsonNode node, string path)
+    {
+        if (node is JsonObject jsonObject)
+        {
+            foreach (var property in jsonObject)
+            {
+                if (property.Value is null)
+                {
+                    throw new InvalidOperationException($"Explicit null values are not supported in repository workflow configuration: {path} (property '{property.Key}').");
+                }
+
+                RejectExplicitNulls(property.Value, path);
+            }
+        }
+        else if (node is JsonArray jsonArray)
+        {
+            for (var index = 0; index < jsonArray.Count; index++)
+            {
+                if (jsonArray[index] is null)
+                {
+                    throw new InvalidOperationException($"Explicit null values are not supported in repository workflow configuration: {path} (array index {index}).");
+                }
+
+                RejectExplicitNulls(jsonArray[index]!, path);
+            }
         }
     }
 

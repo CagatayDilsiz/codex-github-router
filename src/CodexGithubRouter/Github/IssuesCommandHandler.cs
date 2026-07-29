@@ -7,7 +7,9 @@ namespace CodexGithubRouter.GitHub;
 
 public static class IssuesCommandHandler
 {
-    public static async Task<int> HandleAsync(string[] args)
+    public static Task<int> HandleAsync(string[] args) => HandleAsync(args, new IssueCommandDependencies());
+
+    public static async Task<int> HandleAsync(string[] args, IssueCommandDependencies dependencies)
     {
         if (args.Length == 0)
         {
@@ -18,16 +20,16 @@ public static class IssuesCommandHandler
         switch (args[0].ToLowerInvariant())
         {
             case "list":
-                return await ListIssuesAsync(args.Skip(1).ToArray());
+                return await ListIssuesAsync(args.Skip(1).ToArray(), dependencies);
             case "transition":
-                return await TransitionIssueAsync(args.Skip(1).ToArray());
+                return await TransitionIssueAsync(args.Skip(1).ToArray(), dependencies);
             default:
                 PrintUsage();
                 return 1;
         }
     }
 
-    private static async Task<int> TransitionIssueAsync(string[] strings)
+    private static async Task<int> TransitionIssueAsync(string[] strings, IssueCommandDependencies dependencies)
     {
         var arguments = strings.ToList();
 
@@ -64,7 +66,7 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
-            var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();         
+            var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
 
 
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
@@ -113,7 +115,7 @@ public static class IssuesCommandHandler
         Console.WriteLine("  [working-directory]    Optional. The working directory of the Git repository. Defaults to the current directory if not specified.");
     }
 
-    private static async Task<int> ListIssuesAsync(string[] args)
+    private static async Task<int> ListIssuesAsync(string[] args, IssueCommandDependencies dependencies)
     {
         var arguments = args.ToList();
         bool useConfiguredIssues = false;
@@ -156,7 +158,7 @@ public static class IssuesCommandHandler
 
         try
         {
-            var gitCommonDir = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
 
             if (gitCommonDir is null)
             {
@@ -168,18 +170,11 @@ public static class IssuesCommandHandler
 
             if (useConfiguredIssues)
             {
-                var routerConfig = await WorkflowConfigurationService.LoadOrCreateAsync();
-
-                if (routerConfig is null)
-                {
-                    Console.Error.WriteLine("No router configuration found.");
-                    return 1;
-                }
-
+                var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
                 issueFilters = IssueFilterResolver.ByState(routerConfig, state);
             }
 
-            var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, issueFilters, false,CancellationToken.None);
+            var issues = await dependencies.GetIssuesAsync(workingDirectory, issueFilters);
 
             if (issues.Count == 0)
             {
@@ -217,4 +212,14 @@ public static class IssuesCommandHandler
 
         return 0;
     }
+}
+
+public sealed class IssueCommandDependencies
+{
+    public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+
+    public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
+
+    public Func<string, IssueFilters, Task<List<Issue>>> GetIssuesAsync { get; init; } = (workingDirectory, filters) =>
+        GitHubCliService.GetIssuesAsync(workingDirectory, filters, false, CancellationToken.None);
 }

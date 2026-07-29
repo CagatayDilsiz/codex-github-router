@@ -82,7 +82,9 @@ public static class AutonomousService
     public static async Task<AutonomousEnableResult> EnableAutonomousAsync(string workingDirectory, ConfigurationPathSet paths, IAutonomousBoundary boundary, CancellationToken cancellationToken = default)
     {
         var autonomousFilePath = await GetAutonomousFilePathAsync(workingDirectory, boundary, cancellationToken);
-        var configuration = await WorkflowConfigurationService.LoadOrCreateAsync(paths, cancellationToken);
+        var repositoryRoot = await boundary.GetRepositoryRootAsync(workingDirectory, cancellationToken)
+            ?? throw new InvalidOperationException("Not a valid Git repository.");
+        var configuration = await WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
         var requiredLabels = WorkflowLabelConfiguration.GetRequiredLabels(configuration);
         var existingLabels = await boundary.GetRepositoryLabelNamesAsync(workingDirectory, cancellationToken);
 
