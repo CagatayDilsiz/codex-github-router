@@ -1,4 +1,6 @@
 using System.Text.Json;
+using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Workflow;
 using CodexGithubRouter.Work;
@@ -82,5 +84,65 @@ public sealed class HookActivationTests
         Assert.Equal(claim.ClaimId, unchangedClaim!.ClaimId);
         Assert.Equal(claim.Version, unchangedClaim.Version);
         Assert.Equal(claim.OwnerSessionId, unchangedClaim.OwnerSessionId);
+    }
+
+    [Fact]
+    public async Task Repository_override_changes_real_hook_activation_before_routing_boundaries()
+    {
+        using var sandbox = new TestSandbox();
+        var init = await ProcessRunner.RunAsync(sandbox.RepositoryDirectory, "git", new[] { "init", "-q" });
+        Assert.Equal(0, init.ExitCode);
+        Directory.CreateDirectory(sandbox.Paths.ConfigurationDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, JsonSerializer.Serialize(new RouterConfiguration
+        {
+            Policies = new RouterPolicies
+            {
+                AutonomousActivation = new AutonomousActivationPolicy { Mode = "always" }
+            }
+        }, WorkflowJson.Options));
+
+        var overridePath = Path.Combine(sandbox.RepositoryDirectory, ".codex-github-router", "workflow.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(overridePath)!);
+        await File.WriteAllTextAsync(overridePath, """
+            {
+              "policies": {
+                "autonomousActivation": {
+                  "mode": "prompt",
+                  "prompts": ["activate repository routing"]
+                }
+              }
+            }
+            """);
+
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        var output = new StringWriter();
+        var resolverCalls = 0;
+        try
+        {
+            Console.SetIn(new StringReader("{\"cwd\":\"" + sandbox.RepositoryDirectory.Replace("\\", "\\\\", StringComparison.Ordinal) + "\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"current-session\",\"prompt\":\"not the activation phrase\"}"));
+            Console.SetOut(output);
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(true),
+                LoadConfigurationAsync = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory, sandbox.Paths),
+                ResolveGitCommonDirectoryAsync = _ =>
+                {
+                    resolverCalls++;
+                    throw new InvalidOperationException("Routing boundary should not be entered.");
+                }
+            });
+
+            Assert.Equal(0, result);
+            Assert.Equal(0, resolverCalls);
+            Assert.DoesNotContain("\"decision\"", output.ToString());
+            Assert.DoesNotContain("\"hookSpecificOutput\"", output.ToString());
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
     }
 }
