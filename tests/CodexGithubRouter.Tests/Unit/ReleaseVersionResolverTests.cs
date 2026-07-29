@@ -1,4 +1,4 @@
-using CodexGithubRouter.Release;
+using ReleaseVersionTool;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;

@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace CodexGithubRouter.Release;
+namespace ReleaseVersionTool;
 
 public sealed record ResolvedReleaseVersion(string Version, string Tag, bool IsPrerelease);
 
@@ -9,23 +9,10 @@ public static partial class ReleaseVersionResolver
     public static ResolvedReleaseVersion Resolve(IEnumerable<string> tags, string versionPart, string? suffix)
     {
         var tagList = tags.ToArray();
-        if (!TryNormalizeVersionPart(versionPart, out var normalizedPart))
-        {
-            throw new ArgumentException("versionPart must be one of: major, minor, build.", nameof(versionPart));
-        }
-
+        if (!TryNormalizeVersionPart(versionPart, out var normalizedPart)) throw new ArgumentException("versionPart must be one of: major, minor, build.", nameof(versionPart));
         var normalizedSuffix = NormalizeSuffix(suffix);
-        var latest = tagList
-            .Select(tag => TryParseTag(tag, out var version) ? version : null)
-            .Where(version => version is not null)
-            .Cast<SemanticVersion>()
-            .OrderByDescending(version => version)
-            .FirstOrDefault();
-
-        if (latest is null)
-        {
-            throw new InvalidOperationException("No valid SemVer release tag was found. Create a baseline tag such as v0.0.2-alpha before running a release.");
-        }
+        var latest = tagList.Select(tag => TryParseTag(tag, out var version) ? version : null).Where(version => version is not null).Cast<SemanticVersion>().OrderByDescending(version => version).FirstOrDefault();
+        if (latest is null) throw new InvalidOperationException("No valid SemVer release tag was found. Create a baseline tag such as v0.0.2-alpha before running a release.");
 
         var (major, minor, patch) = normalizedPart switch
         {
@@ -34,9 +21,7 @@ public static partial class ReleaseVersionResolver
             _ => (latest.Major, latest.Minor, latest.Patch + 1)
         };
         var versionText = $"{major}.{minor}.{patch}" + (normalizedSuffix is null ? string.Empty : $"-{normalizedSuffix}");
-
         EnsureTargetDoesNotExist(tagList, "v" + versionText);
-
         return new ResolvedReleaseVersion(versionText, "v" + versionText, normalizedSuffix is not null);
     }
 
@@ -44,19 +29,13 @@ public static partial class ReleaseVersionResolver
     {
         var normalized = suffix?.Trim();
         if (string.IsNullOrEmpty(normalized)) return null;
-        if (normalized.StartsWith("-", StringComparison.Ordinal) || !PrereleaseRegex().IsMatch(normalized))
-        {
-            throw new ArgumentException("suffix must be valid SemVer prerelease identifiers without a leading '-'.", nameof(suffix));
-        }
+        if (normalized.StartsWith("-", StringComparison.Ordinal) || !PrereleaseRegex().IsMatch(normalized)) throw new ArgumentException("suffix must be valid SemVer prerelease identifiers without a leading '-'.", nameof(suffix));
         return normalized;
     }
 
     public static void EnsureTargetDoesNotExist(IEnumerable<string> tags, string tag)
     {
-        if (tags.Contains(tag, StringComparer.Ordinal))
-        {
-            throw new InvalidOperationException($"The release tag {tag} already exists.");
-        }
+        if (tags.Contains(tag, StringComparer.Ordinal)) throw new InvalidOperationException($"The release tag {tag} already exists.");
     }
 
     private static bool TryNormalizeVersionPart(string? versionPart, out string normalizedPart)
@@ -70,11 +49,7 @@ public static partial class ReleaseVersionResolver
         version = default!;
         var match = TagRegex().Match(tag);
         if (!match.Success) return false;
-        version = new SemanticVersion(
-            int.Parse(match.Groups["major"].Value),
-            int.Parse(match.Groups["minor"].Value),
-            int.Parse(match.Groups["patch"].Value),
-            match.Groups["prerelease"].Success ? match.Groups["prerelease"].Value : null);
+        version = new SemanticVersion(int.Parse(match.Groups["major"].Value), int.Parse(match.Groups["minor"].Value), int.Parse(match.Groups["patch"].Value), match.Groups["prerelease"].Success ? match.Groups["prerelease"].Value : null);
         return true;
     }
 
@@ -89,21 +64,16 @@ public static partial class ReleaseVersionResolver
         public int CompareTo(SemanticVersion? other)
         {
             if (other is null) return 1;
-            var numeric = Major.CompareTo(other.Major);
-            if (numeric != 0) return numeric;
-            numeric = Minor.CompareTo(other.Minor);
-            if (numeric != 0) return numeric;
-            numeric = Patch.CompareTo(other.Patch);
-            if (numeric != 0) return numeric;
+            var numeric = Major.CompareTo(other.Major); if (numeric != 0) return numeric;
+            numeric = Minor.CompareTo(other.Minor); if (numeric != 0) return numeric;
+            numeric = Patch.CompareTo(other.Patch); if (numeric != 0) return numeric;
             if (Prerelease is null) return other.Prerelease is null ? 0 : 1;
             if (other.Prerelease is null) return -1;
-            var left = Prerelease.Split('.');
-            var right = other.Prerelease.Split('.');
+            var left = Prerelease.Split('.'); var right = other.Prerelease.Split('.');
             for (var index = 0; index < Math.Min(left.Length, right.Length); index++)
             {
                 if (left[index] == right[index]) continue;
-                var leftNumeric = int.TryParse(left[index], out var leftNumber);
-                var rightNumeric = int.TryParse(right[index], out var rightNumber);
+                var leftNumeric = int.TryParse(left[index], out var leftNumber); var rightNumeric = int.TryParse(right[index], out var rightNumber);
                 if (leftNumeric && rightNumeric) return leftNumber.CompareTo(rightNumber);
                 if (leftNumeric != rightNumeric) return leftNumeric ? -1 : 1;
                 return string.CompareOrdinal(left[index], right[index]);

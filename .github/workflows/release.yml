@@ -19,15 +19,18 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
-    name: Validate and publish release
+  validate_package:
+    name: Validate and package release
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    env:
-      NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      target_sha: ${{ steps.main.outputs.target_sha }}
 
     steps:
       - name: Check out selected main commit
@@ -36,13 +39,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
-      - name: Confirm current main head
+      - name: Confirm and record current main head
+        id: main
         shell: bash
         run: |
-          test "$(git rev-parse HEAD)" = "$(git ls-remote origin refs/heads/main | cut -f1)" || {
+          target_sha="$(git rev-parse HEAD)"
+          test "$target_sha" = "$(git ls-remote origin refs/heads/main | cut -f1)" || {
             echo "Release must run from the current main head." >&2
             exit 1
           }
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
@@ -54,8 +60,11 @@ jobs:
 
       - name: Resolve release version
         id: version
+        env:
+          RELEASE_VERSION_PART: ${{ inputs.versionPart }}
+          RELEASE_SUFFIX: ${{ inputs.suffix }}
         shell: bash
-        run: dotnet run --project src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --no-restore -- release-version --version-part "${{ inputs.versionPart }}" --suffix "${{ inputs.suffix }}" >> "$GITHUB_OUTPUT"
+        run: dotnet run --project tools/ReleaseVersionTool/ReleaseVersionTool.csproj -c Release --no-restore -- --version-part "$RELEASE_VERSION_PART" --suffix "$RELEASE_SUFFIX" >> "$GITHUB_OUTPUT"
 
       - name: Release build
         run: dotnet build CodexGithubRouter.slnx -c Release --no-restore --nologo -p:Version="${{ steps.version.outputs.version }}"
@@ -88,18 +97,46 @@ jobs:
           path: ${{ runner.temp }}/cgr-nupkg/*
           if-no-files-found: error
 
+  publish_nuget:
+    name: Publish validated package to NuGet
+    runs-on: ubuntu-latest
+    needs: validate_package
+
+    steps:
+      - name: Download validated package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-github-router-${{ needs.validate_package.outputs.version }}
+          path: ${{ runner.temp }}/cgr-nupkg
+
       - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         shell: bash
         run: |
           test -n "$NUGET_API_KEY" || { echo "NUGET_API_KEY repository secret is required." >&2; exit 1; }
           dotnet nuget push "$RUNNER_TEMP/cgr-nupkg"/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
 
-      - name: Create GitHub Release from validated package
+  publish_github_release:
+    name: Create GitHub Release from validated package
+    runs-on: ubuntu-latest
+    needs: [validate_package, publish_nuget]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download validated package
+        uses: actions/download-artifact@v4
+        with:
+          name: codex-github-router-${{ needs.validate_package.outputs.version }}
+          path: ${{ runner.temp }}/cgr-nupkg
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           prerelease_arg=()
-          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then prerelease_arg=(--prerelease); fi
-          gh release create "${{ steps.version.outputs.tag }}" "$RUNNER_TEMP/cgr-nupkg"/* \
-            --target "$GITHUB_SHA" --title "${{ steps.version.outputs.version }}" --generate-notes "${prerelease_arg[@]}"
+          if [ "${{ needs.validate_package.outputs.prerelease }}" = "true" ]; then prerelease_arg=(--prerelease); fi
+          gh release create "${{ needs.validate_package.outputs.tag }}" "$RUNNER_TEMP/cgr-nupkg"/* \
+            --target "${{ needs.validate_package.outputs.target_sha }}" --title "${{ needs.validate_package.outputs.version }}" --generate-notes "${prerelease_arg[@]}"
