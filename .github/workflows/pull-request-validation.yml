@@ -16,6 +16,8 @@ jobs:
   validate:
     name: Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      CI_PACKAGE_VERSION: 0.0.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,13 +40,67 @@ jobs:
         run: dotnet restore CodexGithubRouter.slnx
 
       - name: Release build
-        run: dotnet build CodexGithubRouter.slnx -c Release --no-restore --nologo
+        run: dotnet build CodexGithubRouter.slnx -c Release --no-restore --nologo -p:Version="${{ env.CI_PACKAGE_VERSION }}"
 
       - name: xUnit unit and sandbox integration tests
-        run: dotnet test CodexGithubRouter.slnx -c Release --no-build --logger "trx;LogFileName=test-results.trx" --nologo
+        run: dotnet test CodexGithubRouter.slnx -c Release --no-build --logger "trx;LogFileName=test-results.trx" --nologo -p:Version="${{ env.CI_PACKAGE_VERSION }}"
+
+      - name: Pack release tool
+        shell: pwsh
+        run: dotnet pack src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --no-build --nologo -p:PackageVersion="${{ env.CI_PACKAGE_VERSION }}" -o "$env:RUNNER_TEMP/cgr-nupkg"
+
+      - name: Install and smoke-test packaged CLI
+        shell: pwsh
+        run: |
+          $packagePath = Join-Path $env:RUNNER_TEMP "cgr-nupkg"
+          $toolPath = Join-Path $env:RUNNER_TEMP "cgr-tool"
+          $configPath = Join-Path $env:RUNNER_TEMP "nuget.config"
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="ci-package" value="$packagePath" />
+            </packageSources>
+          </configuration>
+          "@ | Set-Content -Path $configPath -Encoding utf8NoBOM
+          dotnet tool install --tool-path $toolPath --configfile $configPath codex-github-router --version $env:CI_PACKAGE_VERSION
+          $command = Get-ChildItem -Path $toolPath -File -Filter "cgr*" | Select-Object -First 1
+          if ($null -eq $command) { throw "The packaged cgr command was not installed." }
+          $version = (& $command.FullName --version).Trim()
+          if ($version -ne "v$env:CI_PACKAGE_VERSION") { throw "Unexpected cgr version: $version" }
+          & $command.FullName --help
+
+      - name: Verify packaged UTF-8 hook input and output
+        shell: pwsh
+        run: |
+          $toolPath = Join-Path $env:RUNNER_TEMP "cgr-tool"
+          $command = Get-ChildItem -Path $toolPath -File -Filter "cgr*" | Select-Object -First 1
+          if ($null -eq $command) { throw "The packaged cgr command was not installed." }
+          $hookSandbox = Join-Path $env:RUNNER_TEMP "cgr-hook-utf8"
+          New-Item -ItemType Directory -Path $hookSandbox -Force | Out-Null
+          & git -C $hookSandbox init -q
+          if ($LASTEXITCODE -ne 0) { throw "Could not initialize hook smoke-test repository." }
+          $gitCommonDirectory = (& git -C $hookSandbox rev-parse --git-common-dir).Trim()
+          if (-not [IO.Path]::IsPathRooted($gitCommonDirectory)) {
+            $gitCommonDirectory = Join-Path $hookSandbox $gitCommonDirectory
+          }
+          New-Item -ItemType File -Path (Join-Path $gitCommonDirectory "codex-github-router.auto") -Force | Out-Null
+          "{ invalid claim" | Set-Content -Path (Join-Path $gitCommonDirectory "codex-github-router.work.json") -Encoding utf8NoBOM
+          $payload = [ordered]@{
+            cwd = $hookSandbox
+            hook_event_name = "UserPromptSubmit"
+            model = "test-model"
+            session_id = "current-session"
+            prompt = "Türkçe UTF-8 🚀 hook smoke"
+          } | ConvertTo-Json -Compress
+          $response = $payload | & $command.FullName hook | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Packaged cgr hook exited with code $LASTEXITCODE." }
+          if ($response.decision -ne "block") { throw "Unexpected hook decision: $($response.decision)" }
+          if ($response.reason -notlike "*invalid and must be repaired*") { throw "Unexpected hook response: $($response.reason)" }
 
       - name: Validate diff whitespace
-        shell: bash
+        shell: pwsh
         run: git diff --check "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}"
 
       - name: Upload TRX results
@@ -54,39 +110,3 @@ jobs:
           name: test-results-${{ matrix.os }}
           path: '**/TestResults/**/*.trx'
           if-no-files-found: ignore
-
-  package-smoke:
-    name: Package smoke validation
-    runs-on: ubuntu-latest
-    needs: validate
-    env:
-      CI_PACKAGE_VERSION: 0.0.0-ci.${{ github.run_id }}.${{ github.run_attempt }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.x
-
-      - name: Pack Release tool
-        run: dotnet pack src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --nologo -p:PackageVersion="$CI_PACKAGE_VERSION" -o "$RUNNER_TEMP/cgr-nupkg"
-
-      - name: Install package into temporary tool path
-        run: |
-          cat > "$RUNNER_TEMP/nuget.config" <<EOF
-          <?xml version="1.0" encoding="utf-8"?>
-          <configuration>
-            <packageSources>
-              <clear />
-              <add key="ci-package" value="$RUNNER_TEMP/cgr-nupkg" />
-            </packageSources>
-          </configuration>
-          EOF
-          dotnet tool install --tool-path "$RUNNER_TEMP/cgr-tool" --configfile "$RUNNER_TEMP/nuget.config" codex-github-router --version "$CI_PACKAGE_VERSION"
-
-      - name: Start packaged CLI
-        run: |
-          "$RUNNER_TEMP/cgr-tool/cgr" --help

@@ -1,5 +1,6 @@
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
@@ -74,6 +75,32 @@ public sealed class ConfigurationSandboxTests
         Assert.Equal(0, await ConfigurationInitializer.InitAsync(new[] { "--force" }, sandbox.Paths));
         Assert.True(File.Exists(sandbox.Paths.CodexHooksFile + ".bak"));
         Assert.Contains("echo keep", await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile + ".bak"));
+    }
+
+    [Fact]
+    public async Task Hook_configuration_declares_native_commands_and_preserves_utf8()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "Mevcut kanca 🚀",
+              "hooks": {
+                "SessionStart": [{ "hooks": [{ "type": "command", "command": "echo dünyâ" }] }]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.InitAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var hook = document["hooks"]!["UserPromptSubmit"]![0]!["hooks"]![0]!.AsObject();
+        Assert.Equal("cgr hook", hook["command"]!.GetValue<string>());
+        Assert.Equal("cgr hook", hook["commandWindows"]!.GetValue<string>());
+        Assert.Equal("Mevcut kanca 🚀", document["description"]!.GetValue<string>());
+        var existingHook = document["hooks"]!["SessionStart"]![0]!["hooks"]![0]!["command"]!.GetValue<string>();
+        Assert.Equal("echo dünyâ", existingHook);
     }
 
     [Fact]

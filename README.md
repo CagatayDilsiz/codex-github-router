@@ -196,6 +196,8 @@ dotnet test CodexGithubRouter.slnx -c Release --filter "Category=Integration"
 
 The default suite runs both deterministic Unit tests and sandboxed Integration tests. It does not require GitHub, a network connection, or a live user configuration. Filesystem integration tests use unique temporary sandboxes; normal CLI execution continues to use the user-level `.codex` and `.codex-github-router` directories.
 
+Supported CI platforms are Linux (`ubuntu-latest`) and Windows (`windows-latest`). Pull-request validation runs the full Release build and deterministic test suite on both platforms, including isolated package installation, `cgr --version`, `cgr --help`, native hook command configuration, UTF-8 hook data, path handling, file locking, atomic writes, and Git common-directory/worktree behavior. macOS is not currently a required CI platform.
+
 Create a local tool package:
 
 ```bash
