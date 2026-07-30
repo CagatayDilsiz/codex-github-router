@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Work;
@@ -26,6 +27,7 @@ return args[0].ToLowerInvariant() switch
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "work" => await WorkCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
+    "config" => await ConfigCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     _ => UnknownCommand(args[0])
 };
@@ -56,6 +58,9 @@ static int PrintHelp()
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
           cgr work <status|reconcile|release> [working-directory]
+          cgr config path [working-directory]
+          cgr config show [--effective [working-directory]]
+          cgr config validate [working-directory]
           cgr init [--force]
           cgr pull-request|pr <list|transition> <options> [working-directory]
 
@@ -65,6 +70,7 @@ static int PrintHelp()
           auto        Manage autonomous mode for the repository.
           issue       Manage issues in the repository.
           work        Inspect, reconcile, or explicitly release repository work claims.
+          config      Inspect and validate configuration (path, show, validate).
           init        Initialize the configuration for the Codex Github Router.
           pull-request|pr  Manage pull requests in the repository.
         """);
