@@ -19,7 +19,9 @@ return args[0].ToLowerInvariant() switch
 {
     "--version" or "-v" => PrintVersion(),
     "--help" or "-h" => PrintHelp(),
-    "hook" => await HookService.RunAsync(),
+    "hook" => args.Length > 1 && string.Equals(args[1], "uninstall", StringComparison.OrdinalIgnoreCase)
+        ? await ConfigurationInitializer.UninstallHookAsync(args.Skip(2).ToArray())
+        : await HookService.RunAsync(),
     "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "work" => await WorkCommandHandler.HandleAsync(args.Skip(1).ToArray()),
@@ -50,6 +52,7 @@ static int PrintHelp()
           cgr --version
           cgr --help
           cgr hook
+          cgr hook uninstall
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
           cgr work <status|reconcile|release> [working-directory]
@@ -58,6 +61,7 @@ static int PrintHelp()
 
         Commands:
           hook        Run the hook service to process incoming codex payloads.
+          hook uninstall  Remove CGR hook entries from the Codex hooks configuration.
           auto        Manage autonomous mode for the repository.
           issue       Manage issues in the repository.
           work        Inspect, reconcile, or explicitly release repository work claims.
