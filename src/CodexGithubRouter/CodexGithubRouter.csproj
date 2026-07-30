@@ -12,6 +12,19 @@
     <ToolCommandName>cgr</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
     <PackageId>codex-github-router</PackageId>
+    <Authors>Çağatay Dilsiz</Authors>
+    <Description>Connect Codex sessions with GitHub Issues and Pull Requests through a repository-aware workflow router and hook.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/CagatayDilsiz/codex-github-router</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/CagatayDilsiz/codex-github-router</PackageProjectUrl>
+    <PackageTags>codex github github-actions cli hooks workflow automation</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>
