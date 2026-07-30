@@ -24,6 +24,62 @@ public static class ConfigurationInitializer
         return 0;
     }
 
+    public static Task<int> UninstallHookAsync(string[] args, CancellationToken cancellationToken = default)
+        => UninstallHookAsync(args, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<int> UninstallHookAsync(string[] args, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        var hooksFilePath = paths.CodexHooksFile;
+
+        if (!File.Exists(hooksFilePath))
+        {
+            Console.WriteLine($"No Codex hooks file found at: {hooksFilePath}");
+            return 0;
+        }
+
+        try
+        {
+            var json = await File.ReadAllTextAsync(hooksFilePath, cancellationToken);
+
+            var root = JsonNode.Parse(json);
+
+            if (root is null)
+            {
+                throw new InvalidOperationException("Codex hooks configuration is empty.");
+            }
+
+            if (root["hooks"] is not JsonObject rootHooks)
+            {
+                throw new InvalidOperationException("Codex hooks configuration does not contain a valid 'hooks' object.");
+            }
+
+            if (rootHooks["UserPromptSubmit"] is not JsonArray userPrompt)
+            {
+                Console.WriteLine("No 'UserPromptSubmit' hook group found. Nothing to uninstall.");
+                return 0;
+            }
+
+            var removedCount = RemoveAllCgrCommandBlocks(userPrompt);
+
+            if (removedCount == 0)
+            {
+                Console.WriteLine("No CGR hook entries found. Nothing to uninstall.");
+                return 0;
+            }
+
+            await WriteJsonAtomicallyAsync(hooksFilePath, root, cancellationToken);
+
+            var entryWord = removedCount == 1 ? "entry" : "entries";
+            Console.WriteLine($"Removed {removedCount} CGR hook {entryWord} from: {hooksFilePath}");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Error uninstalling CGR hooks: {ex.Message}");
+            return 1;
+        }
+    }
+
     private static async Task SetupDefaultConfigurationAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
         var path = paths.WorkflowFile;
@@ -188,9 +244,7 @@ public static class ConfigurationInitializer
             .Select(group => group["hooks"] as JsonArray)
             .Where(handlers => handlers is not null)
             .SelectMany(handlers => handlers!.OfType<JsonObject>())
-            .Any(handler =>
-                string.Equals(handler["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(handler["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase));
+            .Any(IsCgrCommandBlock);
     }
 
     private static async Task WriteJsonAtomicallyAsync(string path, JsonNode root, CancellationToken cancellationToken)
@@ -219,9 +273,10 @@ public static class ConfigurationInitializer
         }
     }
 
-    private static void RemoveAllCgrCommandBlocks(JsonArray groups)
+    private static int RemoveAllCgrCommandBlocks(JsonArray groups)
     {
         var emptyGroups = new List<JsonObject>();
+        var totalRemoved = 0;
 
         foreach (var group in groups.OfType<JsonObject>())
         {
@@ -238,6 +293,7 @@ public static class ConfigurationInitializer
             foreach (var hook in existingCgrHooks)
             {
                 hooks.Remove(hook);
+                totalRemoved++;
             }
 
             if (hooks.Count == 0)
@@ -250,18 +306,27 @@ public static class ConfigurationInitializer
         {
             groups.Remove(emptyGroup);
         }
+
+        return totalRemoved;
     }
 
     private static bool IsCgrCommandBlock(JsonObject hook)
     {
-        return
-            string.Equals(
-                hook["type"]?.GetValue<string>(),
-                "command",
-                StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(
-                hook["command"]?.GetValue<string>(),
-                "cgr hook",
-                StringComparison.OrdinalIgnoreCase);
+        if (!string.Equals(hook["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var commandIsCgr = string.Equals(hook["command"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase);
+        var winIsCgr = string.Equals(hook["commandWindows"]?.GetValue<string>(), "cgr hook", StringComparison.OrdinalIgnoreCase);
+        var commandExists = hook["command"] is not null;
+        var winExists = hook["commandWindows"] is not null;
+
+        if (commandExists && winExists)
+        {
+            return commandIsCgr && winIsCgr;
+        }
+
+        return commandIsCgr || winIsCgr;
     }
 }

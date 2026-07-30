@@ -115,4 +115,193 @@ public sealed class ConfigurationSandboxTests
         Assert.Equal(invalid, await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile));
     }
 
+    [Fact]
+    public async Task Hook_uninstall_removes_cgr_entry_and_creates_backup()
+    {
+        using var sandbox = new TestSandbox();
+
+        Assert.Equal(0, await ConfigurationInitializer.InitAsync(new[] { "--force" }, sandbox.Paths));
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+        Assert.True(File.Exists(sandbox.Paths.CodexHooksFile + ".bak"));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Empty(userPrompt);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_preserves_unrelated_hooks()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "existing",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "command": "cgr hook", "timeout": 120 }] },
+                  { "hooks": [{ "type": "command", "command": "echo custom" }] }
+                ],
+                "SessionStart": [{ "hooks": [{ "type": "command", "command": "echo keep" }] }]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Single(userPrompt);
+        var remainingCommand = userPrompt[0]!["hooks"]![0]!["command"]!.GetValue<string>();
+        Assert.Equal("echo custom", remainingCommand);
+
+        var sessionStart = document["hooks"]!["SessionStart"]![0]!["hooks"]![0]!["command"]!.GetValue<string>();
+        Assert.Equal("echo keep", sessionStart);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_removes_multiple_stale_cgr_entries()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "stale entries",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "command": "cgr hook" }] },
+                  { "hooks": [{ "type": "command", "command": "cgr hook", "commandWindows": "cgr hook" }] }
+                ]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Empty(userPrompt);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_no_cgr_entry_succeeds_idempotently()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "no cgr",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "command": "echo hello" }] }
+                ]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Single(userPrompt);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_no_hooks_file_succeeds()
+    {
+        using var sandbox = new TestSandbox();
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_invalid_json_fails_without_corrupting_original()
+    {
+        using var sandbox = new TestSandbox();
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        const string invalid = "{ not valid json";
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, invalid);
+
+        Assert.Equal(1, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+        Assert.Equal(invalid, await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile));
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_recognizes_commandWindows_variant()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "windows only",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "commandWindows": "cgr hook", "timeout": 120 }] }
+                ]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Empty(userPrompt);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_preserves_conflicting_platform_hooks()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "conflicting platforms",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "command": "echo keep", "commandWindows": "cgr hook" }] },
+                  { "hooks": [{ "type": "command", "command": "cgr hook", "commandWindows": "echo keep" }] }
+                ]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Equal(2, userPrompt.Count);
+    }
+
+    [Fact]
+    public async Task Hook_uninstall_recognizes_both_platform_fields()
+    {
+        using var sandbox = new TestSandbox();
+        var hooks = """
+            {
+              "description": "both match",
+              "hooks": {
+                "UserPromptSubmit": [
+                  { "hooks": [{ "type": "command", "command": "cgr hook", "commandWindows": "cgr hook" }] }
+                ]
+              }
+            }
+            """;
+        Directory.CreateDirectory(sandbox.Paths.CodexDirectory);
+        await File.WriteAllTextAsync(sandbox.Paths.CodexHooksFile, hooks);
+
+        Assert.Equal(0, await ConfigurationInitializer.UninstallHookAsync(Array.Empty<string>(), sandbox.Paths));
+
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(sandbox.Paths.CodexHooksFile))!.AsObject();
+        var userPrompt = document["hooks"]!["UserPromptSubmit"]!.AsArray();
+        Assert.Empty(userPrompt);
+    }
+
 }
