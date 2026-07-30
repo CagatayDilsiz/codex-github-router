@@ -23,7 +23,7 @@ gh auth status
 Install the global .NET tool from NuGet after a package has been published:
 
 ```bash
-dotnet tool install --global codex-github-router --version 0.0.1-alpha
+dotnet tool install --global codex-github-router --version 0.1.0-alpha
 ```
 
 Verify the installation:

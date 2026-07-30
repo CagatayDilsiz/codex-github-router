@@ -75,6 +75,20 @@ jobs:
       - name: Pack once
         run: dotnet pack src/CodexGithubRouter/CodexGithubRouter.csproj -c Release --no-build --nologo -p:Version="${{ steps.version.outputs.version }}" -o "$RUNNER_TEMP/cgr-nupkg"
 
+      - name: Verify package metadata
+        shell: bash
+        run: |
+          package_path="$(find "$RUNNER_TEMP/cgr-nupkg" -maxdepth 1 -name '*.nupkg' -print -quit)"
+          nuspec_path="$RUNNER_TEMP/codex-github-router.nuspec"
+          unzip -p "$package_path" '*.nuspec' > "$nuspec_path"
+          grep -F '<authors>Çağatay Dilsiz</authors>' "$nuspec_path"
+          grep -F '<description>Connect Codex sessions with GitHub Issues and Pull Requests through a repository-aware workflow router and hook.</description>' "$nuspec_path"
+          grep -F '<license type="expression">MIT</license>' "$nuspec_path"
+          grep -F '<repository type="git" url="https://github.com/CagatayDilsiz/codex-github-router"' "$nuspec_path"
+          grep -F '<projectUrl>https://github.com/CagatayDilsiz/codex-github-router</projectUrl>' "$nuspec_path"
+          grep -F '<tags>codex github github-actions cli hooks workflow automation</tags>' "$nuspec_path"
+          unzip -l "$package_path" | grep -F 'README.md'
+
       - name: Verify packaged CLI
         shell: bash
         run: |
