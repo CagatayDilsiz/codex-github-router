@@ -252,5 +252,10 @@ public static class WorkflowConfigurationService
         AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
+
+        if (configuration.Policies.Diagnostics.RetentionDays < 1)
+        {
+            throw new InvalidOperationException("Diagnostics retention days must be at least one.");
+        }
     }
 }

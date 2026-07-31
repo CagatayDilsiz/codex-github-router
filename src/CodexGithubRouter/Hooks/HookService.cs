@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Diagnostics;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Workflow;
 using CodexGithubRouter.Git;
@@ -23,6 +24,7 @@ public static class HookService
 
     public static async Task<int> RunAsync(HookExecutionDependencies dependencies)
     {
+        HookDiagnosticScope? scope = null;
         try
         {
             var json = await Console.In.ReadToEndAsync();
@@ -43,47 +45,65 @@ public static class HookService
                 return 0;
             }
 
+            scope = new HookDiagnosticScope(payload.Cwd, dependencies.ResolveGitCommonDirectoryAsync, payload.Model);
+
             // If this executable is accidentally bound to another hook event
             // continue without any intervention.
             if (!string.Equals(payload.HookEventName, "UserPromptSubmit", StringComparison.Ordinal))
             {
+                scope.Bypass();
                 return 0;
             }
 
-            if (!await dependencies.IsAutonomousAsync(payload.Cwd))
+            var autonomousEnabled = await dependencies.IsAutonomousAsync(payload.Cwd);
+            scope.SetAutonomous(autonomousEnabled);
+            if (!autonomousEnabled)
             {
                 // If autonomous mode is disabled, do not intervene in the manual prompt.
+                scope.Bypass();
                 return 0;
             }
 
             var configuration = await dependencies.LoadConfigurationAsync(payload.Cwd);
-            if (!AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt))
+            scope.SetDiagnosticsPolicy(configuration.Policies.Diagnostics);
+            var activationMode = ResolveActivationMode(configuration);
+            var activated = AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt);
+            scope.SetActivation(activationMode, activated);
+            if (!activated)
             {
+                scope.Bypass();
                 return 0;
             }
 
             var gitCommonDirectory = await dependencies.ResolveGitCommonDirectoryAsync(payload.Cwd)
                 ?? throw new InvalidOperationException("Not a valid Git repository.");
+            scope.SetRepository(gitCommonDirectory);
 
             await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
             var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory);
             if (activeClaim is not null && !string.Equals(activeClaim.OwnerSessionId, payload.SessionId, StringComparison.Ordinal))
             {
-                await WriteBlockAsync($"Active work claim for issue #{activeClaim.IssueNumber}{(activeClaim.PullRequestNumber.HasValue ? $" / pull request #{activeClaim.PullRequestNumber.Value}" : string.Empty)} is owned by another Codex session.");
+                scope.SetClaim(activeClaim);
+                var blockReason = $"Active work claim for issue #{activeClaim.IssueNumber}{(activeClaim.PullRequestNumber.HasValue ? $" / pull request #{activeClaim.PullRequestNumber.Value}" : string.Empty)} is owned by another Codex session.";
+                scope.Block(blockReason);
+                await WriteBlockAsync(blockReason);
                 return 0;
             }
 
             if (activeClaim is not null)
             {
+                scope.SetClaim(activeClaim);
                 var claimedDecision = await RouteActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, payload.Model, activeClaim);
                 if (claimedDecision is not null)
                 {
                     if (!string.IsNullOrWhiteSpace(claimedDecision.BlockReason))
                     {
+                        scope.Block(claimedDecision.BlockReason);
                         await WriteBlockAsync(claimedDecision.BlockReason);
                     }
                     else
                     {
+                        scope.Context(claimedDecision.SelectedTask);
                         await WriteAdditionalContextAsync(claimedDecision.AdditionalContext!);
                     }
 
@@ -94,10 +114,11 @@ public static class HookService
                 // the normal no-claim route in this same hook invocation.
             }
 
-            return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, payload.Model);
+            return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, payload.Model, scope);
         }
         catch (WorkClaimFileException exception)
         {
+            scope?.Error(exception);
             await Console.Error.WriteLineAsync(exception.ToString());
             await WriteBlockAsync("The repository work-claim file is invalid and must be repaired before continuing.");
 
@@ -105,6 +126,7 @@ public static class HookService
         }
         catch (JsonException exception)
         {
+            scope?.Error(exception);
             await Console.Error.WriteLineAsync(exception.ToString());
             await WriteBlockAsync("Hook payload is not valid JSON.");
 
@@ -112,12 +134,20 @@ public static class HookService
         }
         catch (Exception exception)
         {
+            scope?.Error(exception);
             await Console.Error.WriteLineAsync(exception.ToString());
 
             await WriteBlockAsync(
                 $"Codex Github Router could not be run: {exception.Message}");
 
             return 0;
+        }
+        finally
+        {
+            if (scope is not null)
+            {
+                await scope.CompleteAsync();
+            }
         }
     }
 
@@ -137,11 +167,13 @@ public static class HookService
         RouterConfiguration configuration,
         string? sessionId,
         string? currentModel,
+        HookDiagnosticScope scope,
         bool allowNoClaimReroute = true)
     {
         var repositoryGateTasks = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (!repositoryGateTasks.IsSuccessful)
         {
+            scope.Block(repositoryGateTasks.Message);
             await WriteBlockAsync(repositoryGateTasks.Message);
             return 0;
         }
@@ -159,6 +191,7 @@ public static class HookService
             var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory, currentModel: currentModel);
             if (!completedIssueTasks.IsSuccessful)
             {
+                scope.Block(completedIssueTasks.Message);
                 await WriteBlockAsync(completedIssueTasks.Message);
                 return 0;
             }
@@ -166,6 +199,7 @@ public static class HookService
             var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, workingDirectory, currentModel: currentModel);
             if (!inProgressIssueTasks.IsSuccessful)
             {
+                scope.Block(inProgressIssueTasks.Message);
                 await WriteBlockAsync(inProgressIssueTasks.Message);
                 return 0;
             }
@@ -173,6 +207,7 @@ public static class HookService
             var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, workingDirectory, currentModel: currentModel);
             if (!newIssueTask.IsSuccessful)
             {
+                scope.Block(newIssueTask.Message);
                 await WriteBlockAsync(newIssueTask.Message);
                 return 0;
             }
@@ -201,16 +236,20 @@ public static class HookService
 
         if (workflowTasks.Count == 0)
         {
-            await WriteBlockAsync(noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.");
+            var noWorkBlockReason = noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
+            scope.Block(noWorkBlockReason);
+            await WriteBlockAsync(noWorkBlockReason);
             return 0;
         }
 
         var actionableTasks = workflowTasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
         if (actionableTasks.Count == 0)
         {
-            await WriteBlockAsync(noEligibleWorkResponse?.NoEligibleWork == true
+            var deferredBlockReason = noEligibleWorkResponse?.NoEligibleWork == true
                 ? noEligibleWorkResponse.Message
-                : "All workflow tasks are deferred. No action is required at this time.");
+                : "All workflow tasks are deferred. No action is required at this time.";
+            scope.Block(deferredBlockReason);
+            await WriteBlockAsync(deferredBlockReason);
             return 0;
         }
 
@@ -224,6 +263,7 @@ public static class HookService
         var blockReason = ResolveRoutingBlockReason(decision, noEligibleWorkResponse);
         if (!string.IsNullOrWhiteSpace(blockReason))
         {
+            scope.Block(blockReason);
             await WriteBlockAsync(blockReason);
             return 0;
         }
@@ -232,7 +272,9 @@ public static class HookService
         {
             if (string.IsNullOrWhiteSpace(sessionId))
             {
-                await WriteBlockAsync("Cannot acquire repository work: the hook payload did not include a session ID.");
+                const string missingSessionReason = "Cannot acquire repository work: the hook payload did not include a session ID.";
+                scope.Block(missingSessionReason);
+                await WriteBlockAsync(missingSessionReason);
                 return 0;
             }
 
@@ -243,6 +285,7 @@ public static class HookService
             var eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
             if (eligibility.IsEnabled && !eligibility.IsEligible)
             {
+                scope.Block(eligibility.Message);
                 await WriteBlockAsync(eligibility.Message);
                 return 0;
             }
@@ -259,7 +302,9 @@ public static class HookService
             });
             if (!acquisition.Acquired)
             {
-                await WriteBlockAsync(acquisition.BlockReason ?? "Could not acquire the repository work claim.");
+                var acquisitionBlockReason = acquisition.BlockReason ?? "Could not acquire the repository work claim.";
+                scope.Block(acquisitionBlockReason);
+                await WriteBlockAsync(acquisitionBlockReason);
                 return 0;
             }
 
@@ -267,17 +312,23 @@ public static class HookService
             var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? newlyAcquiredClaim;
             if (newlyAcquiredClaim is null || acquiredClaim is null)
             {
-                await WriteBlockAsync("Repository work was acquired but could not be re-read safely.");
+                const string rereadFailureReason = "Repository work was acquired but could not be re-read safely.";
+                scope.Block(rereadFailureReason);
+                await WriteBlockAsync(rereadFailureReason);
                 return 0;
             }
+
+            scope.SetClaim(newlyAcquiredClaim);
 
             var refreshedClaimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, acquiredClaim, currentModel);
             if (!refreshedClaimedWork.IsSuccessful)
             {
                 var released = await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, newlyAcquiredClaim);
-                await WriteBlockAsync(released
+                var refreshBlockReason = released
                     ? refreshedClaimedWork.Message
-                    : $"{refreshedClaimedWork.Message} The newly acquired claim could not be released safely because it changed concurrently; no work context was delivered.");
+                    : $"{refreshedClaimedWork.Message} The newly acquired claim could not be released safely because it changed concurrently; no work context was delivered.";
+                scope.Block(refreshBlockReason);
+                await WriteBlockAsync(refreshBlockReason);
                 return 0;
             }
 
@@ -287,14 +338,18 @@ public static class HookService
                 {
                     if (allowNoClaimReroute)
                     {
-                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, configuration, sessionId, currentModel, false);
+                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, configuration, sessionId, currentModel, scope, false);
                     }
 
-                    await WriteBlockAsync("The acquired work became passive or terminal during refresh and was released; no second routing pass is allowed in this invocation.");
+                    const string rerouteDisallowedReason = "The acquired work became passive or terminal during refresh and was released; no second routing pass is allowed in this invocation.";
+                    scope.Block(rerouteDisallowedReason);
+                    await WriteBlockAsync(rerouteDisallowedReason);
                     return 0;
                 }
 
-                await WriteBlockAsync($"Active work claim for issue #{acquiredClaim.IssueNumber}{FormatPullRequest(acquiredClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.");
+                var releaseFailureReason = $"Active work claim for issue #{acquiredClaim.IssueNumber}{FormatPullRequest(acquiredClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.";
+                scope.Block(releaseFailureReason);
+                await WriteBlockAsync(releaseFailureReason);
                 return 0;
             }
 
@@ -304,14 +359,17 @@ public static class HookService
                 refreshedClaimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList());
             if (!string.IsNullOrWhiteSpace(refreshedDecision.BlockReason))
             {
+                scope.Block(refreshedDecision.BlockReason);
                 await WriteBlockAsync(refreshedDecision.BlockReason);
                 return 0;
             }
 
+            scope.Context(refreshedDecision.SelectedTask);
             await WriteAdditionalContextAsync(refreshedDecision.AdditionalContext!);
             return 0;
         }
 
+        scope.Context(decision.SelectedTask);
         await WriteAdditionalContextAsync(decision.AdditionalContext!);
         return 0;
     }
@@ -323,6 +381,12 @@ public static class HookService
             WorkflowItemType.Deferred or
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
+
+    private static string ResolveActivationMode(RouterConfiguration configuration)
+    {
+        var mode = configuration.Policies.AutonomousActivation?.Mode?.Trim();
+        return string.IsNullOrWhiteSpace(mode) ? "always" : mode;
+    }
 
     public static string? ResolveRoutingBlockReason(HookTaskDecision decision, WorkflowResponse? noEligibleWorkResponse)
     {
