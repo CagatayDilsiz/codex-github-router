@@ -9,6 +9,7 @@ using Xunit;
 namespace CodexGithubRouter.Tests;
 
 [Trait("Category", "Integration")]
+[Collection("HookConsoleBinding")]
 public sealed class HookDiagnosticsTests
 {
     [Fact]
