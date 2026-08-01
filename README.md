@@ -168,6 +168,54 @@ Configured gate labels are ORed. A gate is evaluated after any active work claim
 
 The automated tests cover workflow decisions and generated hook context. Validate these repository-dependent recovery paths manually in a disposable repository before enabling autonomous mode: one local-only `codex/issue-<number>-*` branch, one remote-only branch, one branch present locally and remotely, zero matching branches, multiple matching branches, one open head-branch pull request, one closed-unmerged head-branch pull request, and multiple head-branch pull requests.
 
+### Hook diagnostics
+
+Every hook invocation writes a lightweight, machine-readable diagnostic record to the repository's shared Git directory so all worktrees observe the same trail without dirtying the checked-out working tree. Records are stored as one JSON file per invocation under `<git-common>/codex-github-router.diagnostics/`. The Git common directory is resolved with `git rev-parse --git-common-dir`, and each record uses an atomic temporary-file write, so concurrent hook invocations from multiple Codex sessions or worktrees cannot corrupt or overwrite each other's output.
+
+Each record is a structured object, for example:
+
+```json
+{
+  "eventName": "hook.invocation",
+  "invocationId": "0f4c2a1e...",
+  "timestampUtc": "2026-08-01T12:00:00Z",
+  "durationMs": 12,
+  "repositoryIdentity": "...",
+  "autonomousEnabled": true,
+  "activationMode": "always",
+  "activationResult": true,
+  "workflowItemType": "NewIssue",
+  "issueNumber": 5,
+  "pullRequestNumber": 12,
+  "worker": "terra",
+  "model": "gpt-5-codex",
+  "claimId": "0f4c2a1e",
+  "result": "context",
+  "blockReason": "...",
+  "errorType": "...",
+  "errorMessage": "..."
+}
+```
+
+The `result` field distinguishes `bypass` (wrong hook event, autonomous mode disabled, or a non-matching activation prompt), `context` (routing delivered additional context), `block` (a workflow or claim decision blocked the prompt), and `error` (a hook failure). Records never include full prompts, issue or pull-request bodies, generated additional context, authentication material, or complete session identifiers; work-claim identifiers are stored shortened to eight characters. On unexpected errors only the exception type name is persisted; raw exception messages are never stored unless they are one of CGR's own known-safe static messages.
+
+Diagnostics are best-effort: any directory, serialization, lock, or write failure is ignored and never changes the hook response, exit code, claim state, or GitHub mutations. The default configuration retains records for seven days, removing expired records during each invocation.
+
+Retention and disabling are configured under `policies.diagnostics`:
+
+```json
+{
+  "policies": {
+    "diagnostics": {
+      "enabled": true,
+      "retentionDays": 7
+    }
+  }
+}
+```
+
+Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy from the global workflow configuration instead; `enabled: false` therefore disables the trail entirely, and a failed policy resolution falls back to the defaults without changing hook behavior.
+
 ## Development
 
 Clone and build the project:

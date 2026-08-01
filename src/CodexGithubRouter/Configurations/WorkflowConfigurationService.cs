@@ -61,6 +61,28 @@ public static class WorkflowConfigurationService
     public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
         => LoadEffectiveAsync(workingDirectory, paths, cancellationToken);
 
+    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync()
+        => TryResolveDiagnosticsPolicyAsync(ConfigurationPaths.Default);
+
+    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(ConfigurationPathSet paths)
+    {
+        try
+        {
+            if (!File.Exists(paths.WorkflowFile))
+            {
+                return null;
+            }
+
+            await using var stream = File.OpenRead(paths.WorkflowFile);
+            var configuration = await JsonSerializer.DeserializeAsync<RouterConfiguration>(stream, WorkflowJson.Options);
+            return configuration?.Policies?.Diagnostics;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private static async Task<RouterConfiguration> ApplyRepositoryOverrideAsync(
         string repositoryRoot,
         RouterConfiguration globalConfiguration,
@@ -252,5 +274,10 @@ public static class WorkflowConfigurationService
         AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
+
+        if (configuration.Policies.Diagnostics.RetentionDays < 1)
+        {
+            throw new InvalidOperationException("Diagnostics retention days must be at least one.");
+        }
     }
 }
