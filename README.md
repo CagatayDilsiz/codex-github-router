@@ -197,7 +197,7 @@ Each record is a structured object, for example:
 }
 ```
 
-The `result` field distinguishes `bypass` (wrong hook event, autonomous mode disabled, or a non-matching activation prompt), `context` (routing delivered additional context), `block` (a workflow or claim decision blocked the prompt), and `error` (a hook failure). Records never include full prompts, issue or pull-request bodies, generated additional context, authentication material, or complete session identifiers; work-claim identifiers are stored shortened to eight characters.
+The `result` field distinguishes `bypass` (wrong hook event, autonomous mode disabled, or a non-matching activation prompt), `context` (routing delivered additional context), `block` (a workflow or claim decision blocked the prompt), and `error` (a hook failure). Records never include full prompts, issue or pull-request bodies, generated additional context, authentication material, or complete session identifiers; work-claim identifiers are stored shortened to eight characters. On unexpected errors only the exception type name is persisted; raw exception messages are never stored unless they are one of CGR's own known-safe static messages.
 
 Diagnostics are best-effort: any directory, serialization, lock, or write failure is ignored and never changes the hook response, exit code, claim state, or GitHub mutations. The default configuration retains records for seven days, removing expired records during each invocation.
 
@@ -214,7 +214,7 @@ Retention and disabling are configured under `policies.diagnostics`:
 }
 ```
 
-Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is evaluated when CGR loads the workflow configuration, which covers activation decisions and everything after them; the wrong-event and autonomous-disabled bypasses that occur before configuration loading use the default enabled setting.
+Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy from the global workflow configuration instead; `enabled: false` therefore disables the trail entirely, and a failed policy resolution falls back to the defaults without changing hook behavior.
 
 ## Development
 

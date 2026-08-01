@@ -246,6 +246,7 @@ public sealed class HookDiagnosticsTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
+                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory)
             });
 
@@ -270,6 +271,10 @@ public sealed class HookDiagnosticsTests
         Assert.Null(record.IssueNumber);
         Assert.Null(record.PullRequestNumber);
         Assert.Null(record.ClaimId);
+
+        var content = await File.ReadAllTextAsync(file);
+        Assert.DoesNotContain("unrelated prompt", content);
+        Assert.DoesNotContain("current-session", content);
     }
 
     [Fact]
@@ -292,6 +297,180 @@ public sealed class HookDiagnosticsTests
         await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, """{"version":1,"policies":{"diagnostics":{"retentionDays":0}}}""");
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => WorkflowConfigurationService.LoadOrDefaultAsync(sandbox.Paths));
+    }
+
+    [Fact]
+    public async Task Autonomous_disabled_and_diagnostics_disabled_produces_no_record()
+    {
+        using var sandbox = new TestSandbox();
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = "any prompt"
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(new StringWriter());
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(false),
+                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(new DiagnosticsPolicy { Enabled = false }),
+                ResolveGitCommonDirectoryAsync = _ => throw new InvalidOperationException("Must not be resolved when diagnostics are disabled.")
+            });
+
+            Assert.Equal(0, result);
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+
+        Assert.Empty(Directory.GetFiles(sandbox.GitCommonDirectory, "invocation-*.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Autonomous_disabled_with_diagnostics_enabled_writes_bypass_record()
+    {
+        using var sandbox = new TestSandbox();
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = "any prompt"
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(new StringWriter());
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(false),
+                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory)
+            });
+
+            Assert.Equal(0, result);
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+
+        var file = Assert.Single(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "invocation-*.json"));
+        var record = await ReadRecordAsync(file);
+
+        Assert.Equal("bypass", record.Result);
+        Assert.False(record.AutonomousEnabled);
+        Assert.Null(record.ActivationMode);
+        Assert.Null(record.ActivationResult);
+    }
+
+    [Fact]
+    public async Task Failed_write_cleans_up_temporary_file()
+    {
+        using var sandbox = new TestSandbox();
+        var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await HookDiagnosticStore.WriteAsync(
+            sandbox.GitCommonDirectory,
+            new HookDiagnosticEvent { InvocationId = Guid.NewGuid() },
+            cancellation.Token);
+
+        Assert.Empty(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "*.tmp"));
+        Assert.Empty(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "invocation-*.json"));
+    }
+
+    [Fact]
+    public async Task Prune_removes_expired_temporary_files_and_keeps_fresh_ones()
+    {
+        using var sandbox = new TestSandbox();
+        var diagnosticsDirectory = GetDiagnosticsDirectory(sandbox);
+        Directory.CreateDirectory(diagnosticsDirectory);
+        var stale = Path.Combine(diagnosticsDirectory, "invocation-stale.json.tmp");
+        var fresh = Path.Combine(diagnosticsDirectory, "invocation-fresh.json.tmp");
+        await File.WriteAllTextAsync(stale, "partial write");
+        await File.WriteAllTextAsync(fresh, "partial write");
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddDays(-10));
+
+        await HookDiagnosticStore.PruneAsync(sandbox.GitCommonDirectory, retentionDays: 1);
+
+        Assert.False(File.Exists(stale));
+        Assert.True(File.Exists(fresh));
+    }
+
+    [Fact]
+    public async Task Unexpected_error_excludes_exception_message_secrets()
+    {
+        using var sandbox = new TestSandbox();
+        var scope = new HookDiagnosticScope(
+            sandbox.RepositoryDirectory,
+            _ => Task.FromResult<string?>(sandbox.GitCommonDirectory));
+        scope.Error(new InvalidOperationException("Secret ghp_1234567890abcdef leaked from <user prompt> with bearer token xyz-sentinel-789"));
+
+        await scope.CompleteAsync();
+
+        var file = Assert.Single(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "invocation-*.json"));
+        var content = await File.ReadAllTextAsync(file);
+        var record = await ReadRecordAsync(file);
+
+        Assert.Equal("InvalidOperationException", record.ErrorType);
+        Assert.Null(record.ErrorMessage);
+        Assert.DoesNotContain("ghp_1234567890abcdef", content);
+        Assert.DoesNotContain("xyz-sentinel-789", content);
+        Assert.DoesNotContain("user prompt", content);
+    }
+
+    [Fact]
+    public async Task Known_safe_error_message_is_persisted()
+    {
+        using var sandbox = new TestSandbox();
+        var scope = new HookDiagnosticScope(
+            sandbox.RepositoryDirectory,
+            _ => Task.FromResult<string?>(sandbox.GitCommonDirectory));
+        scope.Error(new InvalidOperationException("Not a valid Git repository."));
+
+        await scope.CompleteAsync();
+
+        var file = Assert.Single(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "invocation-*.json"));
+        var record = await ReadRecordAsync(file);
+
+        Assert.Equal("InvalidOperationException", record.ErrorType);
+        Assert.Equal("Not a valid Git repository.", record.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task WorkClaimFileException_message_is_persisted()
+    {
+        using var sandbox = new TestSandbox();
+        var scope = new HookDiagnosticScope(
+            sandbox.RepositoryDirectory,
+            _ => Task.FromResult<string?>(sandbox.GitCommonDirectory));
+        scope.Error(new WorkClaimFileException("The work-claim file contains an invalid claim."));
+
+        await scope.CompleteAsync();
+
+        var file = Assert.Single(Directory.GetFiles(GetDiagnosticsDirectory(sandbox), "invocation-*.json"));
+        var record = await ReadRecordAsync(file);
+
+        Assert.Equal("WorkClaimFileException", record.ErrorType);
+        Assert.Equal("The work-claim file contains an invalid claim.", record.ErrorMessage);
     }
 
     private static string GetDiagnosticsDirectory(TestSandbox sandbox) =>

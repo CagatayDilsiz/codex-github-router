@@ -6,14 +6,17 @@ namespace CodexGithubRouter.Diagnostics;
 public sealed class HookDiagnosticScope
 {
     private const int TruncatedLength = 500;
+    private const string SafeRepositoryResolutionError = "Not a valid Git repository.";
 
     private readonly Guid _invocationId = Guid.NewGuid();
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
     private readonly string? _workingDirectory;
     private readonly Func<string, Task<string?>> _resolveGitCommonDirectory;
+    private readonly Func<Task<DiagnosticsPolicy?>> _resolveDiagnosticsPolicy;
 
     private bool _enabled = true;
     private int _retentionDays = 7;
+    private bool _policyAppliedFromConfig;
     private string? _gitCommonDirectory;
     private string? _activationMode;
     private bool? _activationResult;
@@ -34,10 +37,12 @@ public sealed class HookDiagnosticScope
     public HookDiagnosticScope(
         string? workingDirectory,
         Func<string, Task<string?>> resolveGitCommonDirectory,
+        Func<Task<DiagnosticsPolicy?>>? resolveDiagnosticsPolicy = null,
         string? model = null)
     {
         _workingDirectory = workingDirectory;
         _resolveGitCommonDirectory = resolveGitCommonDirectory;
+        _resolveDiagnosticsPolicy = resolveDiagnosticsPolicy ?? (() => Task.FromResult<DiagnosticsPolicy?>(null));
         _model = model;
     }
 
@@ -45,6 +50,7 @@ public sealed class HookDiagnosticScope
     {
         _enabled = policy.Enabled;
         _retentionDays = policy.RetentionDays;
+        _policyAppliedFromConfig = true;
     }
 
     public void SetAutonomous(bool enabled) => _autonomousEnabled = enabled;
@@ -99,13 +105,22 @@ public sealed class HookDiagnosticScope
     {
         _result = "error";
         _errorType = exception.GetType().Name;
-        _errorMessage = Truncate(exception.Message);
+        _errorMessage = IsSafeErrorMessage(exception) ? Truncate(exception.Message) : null;
     }
 
     public async Task CompleteAsync()
     {
         try
         {
+            if (!_policyAppliedFromConfig)
+            {
+                var policy = await _resolveDiagnosticsPolicy();
+                if (policy is not null)
+                {
+                    SetDiagnosticsPolicy(policy);
+                }
+            }
+
             if (!_enabled)
             {
                 return;
@@ -150,6 +165,16 @@ public sealed class HookDiagnosticScope
         {
             // Best-effort diagnostics must never change hook behavior or exit codes.
         }
+    }
+
+    private static bool IsSafeErrorMessage(Exception exception)
+    {
+        if (exception is WorkClaimFileException)
+        {
+            return true;
+        }
+
+        return string.Equals(exception.Message, SafeRepositoryResolutionError, StringComparison.Ordinal);
     }
 
     private static string? Truncate(string? value)

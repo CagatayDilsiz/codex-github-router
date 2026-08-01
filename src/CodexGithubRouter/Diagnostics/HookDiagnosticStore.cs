@@ -24,12 +24,13 @@ public static class HookDiagnosticStore
 
     public static async Task WriteAsync(string gitCommonDirectory, HookDiagnosticEvent diagnosticEvent, CancellationToken cancellationToken)
     {
+        var temporaryPath = string.Empty;
         try
         {
             var path = GetFilePath(gitCommonDirectory, diagnosticEvent.InvocationId);
+            temporaryPath = path + ".tmp";
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
-            var temporaryPath = path + ".tmp";
             await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 await JsonSerializer.SerializeAsync(stream, diagnosticEvent, JsonOptions, cancellationToken);
@@ -40,6 +41,20 @@ public static class HookDiagnosticStore
         catch (Exception)
         {
             // Best-effort diagnostics must never change hook behavior or exit codes.
+        }
+        finally
+        {
+            if (temporaryPath.Length > 0 && File.Exists(temporaryPath))
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch (Exception)
+                {
+                    // Best-effort cleanup must never change hook behavior or exit codes.
+                }
+            }
         }
     }
 
@@ -62,21 +77,24 @@ public static class HookDiagnosticStore
             }
 
             var cutoff = DateTime.UtcNow.AddDays(-retentionDays);
-            foreach (var file in Directory.EnumerateFiles(directory, "invocation-*.json"))
+            foreach (var pattern in new[] { "invocation-*.json", "invocation-*.json.tmp" })
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
+                foreach (var file in Directory.EnumerateFiles(directory, pattern))
                 {
-                    if (File.GetLastWriteTimeUtc(file) < cutoff)
+                    cancellationToken.ThrowIfCancellationRequested();
+                    try
                     {
-                        File.Delete(file);
+                        if (File.GetLastWriteTimeUtc(file) < cutoff)
+                        {
+                            File.Delete(file);
+                        }
                     }
-                }
-                catch (IOException)
-                {
-                }
-                catch (UnauthorizedAccessException)
-                {
+                    catch (IOException)
+                    {
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                    }
                 }
             }
         }

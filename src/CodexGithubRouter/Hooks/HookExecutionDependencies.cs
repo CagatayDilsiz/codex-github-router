@@ -1,5 +1,6 @@
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Diagnostics;
 using CodexGithubRouter.Git;
 using CodexGithubRouter.Workflow;
 
@@ -12,4 +13,6 @@ public sealed class HookExecutionDependencies
     public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 
     public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+
+    public Func<Task<DiagnosticsPolicy?>> ResolveDiagnosticsPolicyAsync { get; init; } = () => WorkflowConfigurationService.TryResolveDiagnosticsPolicyAsync();
 }

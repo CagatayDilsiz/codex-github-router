@@ -45,7 +45,11 @@ public static class HookService
                 return 0;
             }
 
-            scope = new HookDiagnosticScope(payload.Cwd, dependencies.ResolveGitCommonDirectoryAsync, payload.Model);
+            scope = new HookDiagnosticScope(
+                payload.Cwd,
+                dependencies.ResolveGitCommonDirectoryAsync,
+                dependencies.ResolveDiagnosticsPolicyAsync,
+                payload.Model);
 
             // If this executable is accidentally bound to another hook event
             // continue without any intervention.
