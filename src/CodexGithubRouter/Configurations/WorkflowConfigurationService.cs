@@ -61,6 +61,58 @@ public static class WorkflowConfigurationService
     public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
         => LoadEffectiveAsync(workingDirectory, paths, cancellationToken);
 
+    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(CancellationToken cancellationToken = default)
+        => TryResolveGlobalDiagnosticsPolicyAsync(ConfigurationPaths.Default, cancellationToken);
+
+    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(string? workingDirectory, CancellationToken cancellationToken = default)
+        => TryResolveDiagnosticsPolicyAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(string? workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var repositoryRoot = string.IsNullOrWhiteSpace(workingDirectory)
+                ? null
+                : await GitRepositoryService.GetRepositoryRootAsync(workingDirectory, cancellationToken);
+            if (repositoryRoot is null)
+            {
+                return await TryResolveGlobalDiagnosticsPolicyAsync(paths, cancellationToken);
+            }
+
+            return await TryResolveDiagnosticsPolicyFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyFromRepositoryRootAsync(string repositoryRoot, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var configuration = await LoadEffectiveFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
+            return configuration.Policies.Diagnostics;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<DiagnosticsPolicy?> TryResolveGlobalDiagnosticsPolicyAsync(ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var configuration = await LoadOrDefaultAsync(paths, cancellationToken);
+            return configuration.Policies.Diagnostics;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     private static async Task<RouterConfiguration> ApplyRepositoryOverrideAsync(
         string repositoryRoot,
         RouterConfiguration globalConfiguration,
@@ -252,5 +304,10 @@ public static class WorkflowConfigurationService
         AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
+
+        if (configuration.Policies.Diagnostics.RetentionDays < 1)
+        {
+            throw new InvalidOperationException("Diagnostics retention days must be at least one.");
+        }
     }
 }

@@ -110,6 +110,15 @@ public sealed class RouterPolicies
     public WorkerRoutingPolicy? WorkerRouting { get; init; }
 
     public AutonomousActivationPolicy? AutonomousActivation { get; init; }
+
+    public DiagnosticsPolicy Diagnostics { get; init; } = new();
+}
+
+public sealed class DiagnosticsPolicy
+{
+    public bool Enabled { get; init; } = true;
+
+    public int RetentionDays { get; init; } = 7;
 }
 
 public sealed class AutonomousActivationPolicy

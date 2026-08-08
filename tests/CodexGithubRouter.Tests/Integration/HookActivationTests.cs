@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Diagnostics;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Workflow;
@@ -9,6 +10,7 @@ using Xunit;
 namespace CodexGithubRouter.Tests;
 
 [Trait("Category", "Integration")]
+[Collection("HookConsoleBinding")]
 public sealed class HookActivationTests
 {
     [Theory]
@@ -61,6 +63,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
@@ -69,7 +72,9 @@ public sealed class HookActivationTests
             });
 
             Assert.Equal(0, result);
-            Assert.Equal(0, resolverCalls);
+            // The diagnostic scope best-effort resolves the git common directory to persist
+            // the bypass record; the resolver failure is swallowed and must not change output.
+            Assert.Equal(1, resolverCalls);
             Assert.DoesNotContain("\"decision\"", output.ToString());
             Assert.DoesNotContain("\"hookSpecificOutput\"", output.ToString());
         }
@@ -130,6 +135,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
@@ -138,7 +144,9 @@ public sealed class HookActivationTests
             });
 
             Assert.Equal(0, result);
-            Assert.Equal(1, resolverCalls);
+            // The resolver runs once in the routing boundary and again for the best-effort
+            // diagnostic resolution; the thrown exception is swallowed in both cases.
+            Assert.Equal(2, resolverCalls);
         }
         finally
         {
@@ -180,6 +188,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory, sandbox.Paths),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
@@ -188,7 +197,9 @@ public sealed class HookActivationTests
             });
 
             Assert.Equal(0, result);
-            Assert.Equal(0, resolverCalls);
+            // The diagnostic scope best-effort resolves the git common directory to persist
+            // the bypass record; the resolver failure is swallowed and must not change output.
+            Assert.Equal(1, resolverCalls);
             Assert.DoesNotContain("\"decision\"", output.ToString());
             Assert.DoesNotContain("\"hookSpecificOutput\"", output.ToString());
             Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
