@@ -247,7 +247,7 @@ public sealed class HookDiagnosticsTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory)
             });
 
@@ -323,7 +323,7 @@ public sealed class HookDiagnosticsTests
             var result = await HookService.RunAsync(new HookExecutionDependencies
             {
                 IsAutonomousAsync = _ => Task.FromResult(false),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(new DiagnosticsPolicy { Enabled = false }),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(new DiagnosticsPolicy { Enabled = false }),
                 ResolveGitCommonDirectoryAsync = _ => throw new InvalidOperationException("Must not be resolved when diagnostics are disabled.")
             });
 
@@ -361,7 +361,7 @@ public sealed class HookDiagnosticsTests
             var result = await HookService.RunAsync(new HookExecutionDependencies
             {
                 IsAutonomousAsync = _ => Task.FromResult(false),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory)
             });
 
@@ -380,6 +380,107 @@ public sealed class HookDiagnosticsTests
         Assert.False(record.AutonomousEnabled);
         Assert.Null(record.ActivationMode);
         Assert.Null(record.ActivationResult);
+    }
+
+    [Fact]
+    public async Task Autonomous_disabled_respects_repository_override_disabling_diagnostics()
+    {
+        using var sandbox = new TestSandbox();
+        await WorkflowConfigurationService.WriteDefaultAsync(sandbox.Paths.WorkflowFile);
+        var overridePath = Path.Combine(sandbox.RepositoryDirectory, ".codex-github-router", "workflow.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(overridePath)!);
+        await File.WriteAllTextAsync(overridePath, """{"policies":{"diagnostics":{"enabled":false}}}""");
+
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = "any prompt"
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(new StringWriter());
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(false),
+                ResolveDiagnosticsPolicyAsync = _ => WorkflowConfigurationService.TryResolveDiagnosticsPolicyFromRepositoryRootAsync(sandbox.RepositoryDirectory, sandbox.Paths),
+                ResolveGitCommonDirectoryAsync = _ => throw new InvalidOperationException("Must not be resolved when diagnostics are disabled.")
+            });
+
+            Assert.Equal(0, result);
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+
+        Assert.Empty(Directory.GetFiles(sandbox.GitCommonDirectory, "invocation-*.json", SearchOption.AllDirectories));
+    }
+
+    [Fact]
+    public async Task Invalid_repository_retention_falls_back_to_defaults_and_keeps_pruning()
+    {
+        using var sandbox = new TestSandbox();
+        await WorkflowConfigurationService.WriteDefaultAsync(sandbox.Paths.WorkflowFile);
+        var overridePath = Path.Combine(sandbox.RepositoryDirectory, ".codex-github-router", "workflow.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(overridePath)!);
+        await File.WriteAllTextAsync(overridePath, """{"policies":{"diagnostics":{"retentionDays":0}}}""");
+
+        var diagnosticsDirectory = GetDiagnosticsDirectory(sandbox);
+        Directory.CreateDirectory(diagnosticsDirectory);
+        var staleRecord = Path.Combine(diagnosticsDirectory, "invocation-stale.json");
+        var staleTemporary = Path.Combine(diagnosticsDirectory, "invocation-stale.json.tmp");
+        await File.WriteAllTextAsync(staleRecord, "stale");
+        await File.WriteAllTextAsync(staleTemporary, "stale");
+        File.SetLastWriteTimeUtc(staleRecord, DateTime.UtcNow.AddDays(-30));
+        File.SetLastWriteTimeUtc(staleTemporary, DateTime.UtcNow.AddDays(-30));
+
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        var output = new StringWriter();
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = "any prompt"
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(output);
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(false),
+                ResolveDiagnosticsPolicyAsync = _ => WorkflowConfigurationService.TryResolveDiagnosticsPolicyFromRepositoryRootAsync(sandbox.RepositoryDirectory, sandbox.Paths),
+                ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory)
+            });
+
+            Assert.Equal(0, result);
+            Assert.DoesNotContain("\"decision\"", output.ToString());
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+
+        Assert.False(File.Exists(staleRecord));
+        Assert.False(File.Exists(staleTemporary));
+        var record = Assert.Single(Directory.GetFiles(diagnosticsDirectory, "invocation-*.json"));
+        var eventRecord = await ReadRecordAsync(record);
+        Assert.Equal("bypass", eventRecord.Result);
     }
 
     [Fact]

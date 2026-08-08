@@ -12,7 +12,7 @@ public sealed class HookDiagnosticScope
     private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
     private readonly string? _workingDirectory;
     private readonly Func<string, Task<string?>> _resolveGitCommonDirectory;
-    private readonly Func<Task<DiagnosticsPolicy?>> _resolveDiagnosticsPolicy;
+    private readonly Func<string?, Task<DiagnosticsPolicy?>> _resolveDiagnosticsPolicy;
 
     private bool _enabled = true;
     private int _retentionDays = 7;
@@ -37,12 +37,12 @@ public sealed class HookDiagnosticScope
     public HookDiagnosticScope(
         string? workingDirectory,
         Func<string, Task<string?>> resolveGitCommonDirectory,
-        Func<Task<DiagnosticsPolicy?>>? resolveDiagnosticsPolicy = null,
+        Func<string?, Task<DiagnosticsPolicy?>>? resolveDiagnosticsPolicy = null,
         string? model = null)
     {
         _workingDirectory = workingDirectory;
         _resolveGitCommonDirectory = resolveGitCommonDirectory;
-        _resolveDiagnosticsPolicy = resolveDiagnosticsPolicy ?? (() => Task.FromResult<DiagnosticsPolicy?>(null));
+        _resolveDiagnosticsPolicy = resolveDiagnosticsPolicy ?? (_ => Task.FromResult<DiagnosticsPolicy?>(null));
         _model = model;
     }
 
@@ -114,7 +114,7 @@ public sealed class HookDiagnosticScope
         {
             if (!_policyAppliedFromConfig)
             {
-                var policy = await _resolveDiagnosticsPolicy();
+                var policy = await _resolveDiagnosticsPolicy(_workingDirectory);
                 if (policy is not null)
                 {
                     SetDiagnosticsPolicy(policy);

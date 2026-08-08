@@ -63,7 +63,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
@@ -135,7 +135,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = _ => Task.FromResult(configuration),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;
@@ -188,7 +188,7 @@ public sealed class HookActivationTests
             {
                 IsAutonomousAsync = _ => Task.FromResult(true),
                 LoadConfigurationAsync = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory, sandbox.Paths),
-                ResolveDiagnosticsPolicyAsync = () => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
                 ResolveGitCommonDirectoryAsync = _ =>
                 {
                     resolverCalls++;

@@ -214,7 +214,7 @@ Retention and disabling are configured under `policies.diagnostics`:
 }
 ```
 
-Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy from the global workflow configuration instead; `enabled: false` therefore disables the trail entirely, and a failed policy resolution falls back to the defaults without changing hook behavior.
+Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy best-effort from the effective configuration of the current working directory (repository overrides included); `enabled: false` therefore disables the trail entirely, an invalid policy (for example `retentionDays: 0`) falls back to the defaults, and a failed resolution never changes hook behavior.
 
 ## Development
 

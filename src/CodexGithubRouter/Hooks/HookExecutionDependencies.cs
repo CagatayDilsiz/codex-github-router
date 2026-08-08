@@ -14,5 +14,5 @@ public sealed class HookExecutionDependencies
 
     public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
 
-    public Func<Task<DiagnosticsPolicy?>> ResolveDiagnosticsPolicyAsync { get; init; } = () => WorkflowConfigurationService.TryResolveDiagnosticsPolicyAsync();
+    public Func<string?, Task<DiagnosticsPolicy?>> ResolveDiagnosticsPolicyAsync { get; init; } = workingDirectory => WorkflowConfigurationService.TryResolveDiagnosticsPolicyAsync(workingDirectory);
 }

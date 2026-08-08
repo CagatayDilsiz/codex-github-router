@@ -61,21 +61,51 @@ public static class WorkflowConfigurationService
     public static Task<RouterConfiguration> LoadEffectiveOrDefaultAsync(string workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
         => LoadEffectiveAsync(workingDirectory, paths, cancellationToken);
 
-    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync()
-        => TryResolveDiagnosticsPolicyAsync(ConfigurationPaths.Default);
+    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(CancellationToken cancellationToken = default)
+        => TryResolveGlobalDiagnosticsPolicyAsync(ConfigurationPaths.Default, cancellationToken);
 
-    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(ConfigurationPathSet paths)
+    public static Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(string? workingDirectory, CancellationToken cancellationToken = default)
+        => TryResolveDiagnosticsPolicyAsync(workingDirectory, ConfigurationPaths.Default, cancellationToken);
+
+    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyAsync(string? workingDirectory, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
         try
         {
-            if (!File.Exists(paths.WorkflowFile))
+            var repositoryRoot = string.IsNullOrWhiteSpace(workingDirectory)
+                ? null
+                : await GitRepositoryService.GetRepositoryRootAsync(workingDirectory, cancellationToken);
+            if (repositoryRoot is null)
             {
-                return null;
+                return await TryResolveGlobalDiagnosticsPolicyAsync(paths, cancellationToken);
             }
 
-            await using var stream = File.OpenRead(paths.WorkflowFile);
-            var configuration = await JsonSerializer.DeserializeAsync<RouterConfiguration>(stream, WorkflowJson.Options);
-            return configuration?.Policies?.Diagnostics;
+            return await TryResolveDiagnosticsPolicyFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    public static async Task<DiagnosticsPolicy?> TryResolveDiagnosticsPolicyFromRepositoryRootAsync(string repositoryRoot, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var configuration = await LoadEffectiveFromRepositoryRootAsync(repositoryRoot, paths, cancellationToken);
+            return configuration.Policies.Diagnostics;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static async Task<DiagnosticsPolicy?> TryResolveGlobalDiagnosticsPolicyAsync(ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var configuration = await LoadOrDefaultAsync(paths, cancellationToken);
+            return configuration.Policies.Diagnostics;
         }
         catch (Exception)
         {
