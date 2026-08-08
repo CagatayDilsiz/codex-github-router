@@ -272,6 +272,19 @@ public static class WorkflowConfigurationService
         }
     }
 
+    public static string? ValidateConfiguration(RouterConfiguration configuration)
+    {
+        try
+        {
+            Validate(configuration);
+            return null;
+        }
+        catch (InvalidOperationException exception)
+        {
+            return exception.Message;
+        }
+    }
+
     private static void Validate(RouterConfiguration configuration)
     {
         if (configuration.Version != 1)
