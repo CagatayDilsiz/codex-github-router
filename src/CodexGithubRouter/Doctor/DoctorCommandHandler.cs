@@ -173,7 +173,7 @@ public static class DoctorCommandHandler
 
         var supportedRuntime = ParseNetCoreAppVersions(runtimesProcess.Output)
             .OrderByDescending(version => version)
-            .FirstOrDefault(version => version.Major >= 10);
+            .FirstOrDefault(version => version.Major == 10);
         if (supportedRuntime is null)
         {
             var foundVersions = string.Join(", ", ParseNetCoreAppVersions(runtimesProcess.Output).Select(version => version.ToString()).Distinct());
@@ -302,8 +302,8 @@ public static class DoctorCommandHandler
             result.Checks.Add(new DoctorCheck
             {
                 Name = "CGR Hook Entry",
-                Status = DoctorCheckStatus.Warning,
-                Detail = "Not configured. Run 'cgr init' to register the 'cgr hook' entry."
+                Status = DoctorCheckStatus.Failure,
+                Detail = "Not configured because the hooks file is missing. Run 'cgr init' to register the 'cgr hook' entry."
             });
             return;
         }

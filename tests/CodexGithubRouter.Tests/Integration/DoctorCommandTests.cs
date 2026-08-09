@@ -39,7 +39,8 @@ public sealed class DoctorCommandTests
 
         var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
 
-        Assert.Equal(0, result);
+        Assert.Equal(1, result);
+        Assert.Contains("[FAIL] CGR Hook Entry", Output(deps));
         Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
         Assert.False(File.Exists(sandbox.Paths.CodexHooksFile));
         Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json")));
@@ -107,6 +108,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_dotnet_runtime_with_net10_returns_pass()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         var deps = WithDotNetRuntimes(HealthyDependencies(sandbox), "Microsoft.NETCore.App 10.0.1 [C:\\dotnet\\shared\\Microsoft.NETCore.App]");
 
         var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
@@ -114,6 +116,20 @@ public sealed class DoctorCommandTests
         Assert.Equal(0, result);
         Assert.Contains("[PASS] .NET Runtime", Output(deps));
         Assert.Contains("supports net10.0", Output(deps));
+    }
+
+    [Fact]
+    public async Task Doctor_dotnet_runtime_with_future_major_returns_failure()
+    {
+        using var sandbox = new TestSandbox();
+        var deps = WithDotNetRuntimes(HealthyDependencies(sandbox), "Microsoft.NETCore.App 11.0.0 [C:\\dotnet\\shared\\Microsoft.NETCore.App]");
+
+        var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
+
+        Assert.Equal(1, result);
+        var output = Output(deps);
+        Assert.Contains("[FAIL] .NET Runtime", output);
+        Assert.Contains("No .NET 10 runtime found", output);
     }
 
     [Fact]
@@ -169,6 +185,21 @@ public sealed class DoctorCommandTests
     }
 
     [Fact]
+    public async Task Doctor_missing_hooks_file_reports_failure_with_init_guidance()
+    {
+        using var sandbox = new TestSandbox();
+        var deps = HealthyDependencies(sandbox);
+
+        var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
+
+        Assert.Equal(1, result);
+        var output = Output(deps);
+        Assert.Contains("[WARN] Codex Hooks Configuration", output);
+        Assert.Contains("Run 'cgr init'", output);
+        Assert.Contains("[FAIL] CGR Hook Entry", output);
+    }
+
+    [Fact]
     public async Task Doctor_duplicate_hook_entries_reports_warning()
     {
         using var sandbox = new TestSandbox();
@@ -204,6 +235,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_active_work_claim_shows_summarized_identity()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         var claim = new WorkClaim
         {
             ClaimId = Guid.NewGuid(),
@@ -233,6 +265,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_missing_required_labels_reports_warning_not_failure()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         var deps = HealthyDependencies(sandbox);
         deps = WithLabels(deps, sandbox, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
 
@@ -248,6 +281,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_worker_routing_model_resolves_worker()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         await WriteWorkerRoutingConfigurationAsync(sandbox);
 
         var deps = HealthyDependencies(sandbox);
@@ -264,6 +298,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_worker_routing_unknown_model_reports_warning()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         await WriteWorkerRoutingConfigurationAsync(sandbox);
 
         var deps = HealthyDependencies(sandbox);
@@ -280,6 +315,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_worker_routing_disabled_reports_pass()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         var deps = HealthyDependencies(sandbox);
 
         var result = await DoctorCommandHandler.HandleAsync(new[] { "--model", "gpt-x", sandbox.RepositoryDirectory }, deps);
@@ -327,6 +363,7 @@ public sealed class DoctorCommandTests
     public async Task Doctor_no_arguments_uses_current_directory_and_returns_zero()
     {
         using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, """{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"cgr hook"}]}]}}""");
         var deps = HealthyDependencies(sandbox);
 
         var result = await DoctorCommandHandler.HandleAsync(Array.Empty<string>(), deps);
