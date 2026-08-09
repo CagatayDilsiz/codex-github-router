@@ -15,12 +15,6 @@ public static class DoctorCommandHandler
 
     public static async Task<int> HandleAsync(string[] args, DoctorCommandDependencies dependencies, CancellationToken cancellationToken = default)
     {
-        if (args.Length == 0)
-        {
-            dependencies.Error.WriteLine("Usage: cgr doctor [working-directory] [--model <model>]");
-            return 2;
-        }
-
         if (!TryParseArguments(args, out var workingDirectory, out var model, out var usageError))
         {
             dependencies.Error.WriteLine(usageError);
@@ -94,7 +88,7 @@ public static class DoctorCommandHandler
             Detail = "v" + VersionFormatter.GetVersion()
         });
 
-        await AddExecutableCheckAsync(result, ".NET Runtime", "dotnet", dependencies, cancellationToken);
+        await AddDotNetRuntimeCheckAsync(result, dependencies, cancellationToken);
         await AddExecutableCheckAsync(result, "Git", "git", dependencies, cancellationToken);
         await AddExecutableCheckAsync(result, "GitHub CLI", "gh", dependencies, cancellationToken);
         await AddGitHubAuthenticationCheckAsync(result, dependencies, cancellationToken);
@@ -149,6 +143,75 @@ public static class DoctorCommandHandler
         await AddActiveWorkClaimCheckAsync(result, gitCommonDirectory, dependencies, cancellationToken);
         await AddRequiredLabelsCheckAsync(result, repositoryRoot, dependencies, cancellationToken);
         await AddWorkerRoutingCheckAsync(result, model, dependencies, cancellationToken);
+    }
+
+    private static async Task AddDotNetRuntimeCheckAsync(DoctorResult result, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
+    {
+        var versionProcess = await dependencies.RunVersionProcessAsync("dotnet", cancellationToken);
+        if (versionProcess is null)
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = ".NET Runtime",
+                Status = DoctorCheckStatus.Failure,
+                Detail = "'dotnet' could not be executed. Install the .NET SDK and ensure it is on the PATH."
+            });
+            return;
+        }
+
+        var runtimesProcess = await dependencies.RunDotNetRuntimesProcessAsync(cancellationToken);
+        if (runtimesProcess is null || runtimesProcess.ExitCode != 0)
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = ".NET Runtime",
+                Status = DoctorCheckStatus.Warning,
+                Detail = "'dotnet' is available but installed runtimes could not be determined."
+            });
+            return;
+        }
+
+        var supportedRuntime = ParseNetCoreAppVersions(runtimesProcess.Output)
+            .OrderByDescending(version => version)
+            .FirstOrDefault(version => version.Major >= 10);
+        if (supportedRuntime is null)
+        {
+            var foundVersions = string.Join(", ", ParseNetCoreAppVersions(runtimesProcess.Output).Select(version => version.ToString()).Distinct());
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = ".NET Runtime",
+                Status = DoctorCheckStatus.Failure,
+                Detail = string.IsNullOrWhiteSpace(foundVersions)
+                    ? "No Microsoft.NETCore.App runtime found. This tool targets .NET 10."
+                    : $"No .NET 10 runtime found (found: {foundVersions}). This tool targets .NET 10."
+            });
+            return;
+        }
+
+        result.Checks.Add(new DoctorCheck
+        {
+            Name = ".NET Runtime",
+            Status = DoctorCheckStatus.Pass,
+            Detail = $"Microsoft.NETCore.App {supportedRuntime} (supports net10.0)"
+        });
+    }
+
+    private static IEnumerable<Version> ParseNetCoreAppVersions(string output)
+    {
+        foreach (var line in output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !string.Equals(parts[0], "Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var versionText = parts[1].Split(['-', '+'], 2)[0];
+            if (Version.TryParse(versionText, out var version))
+            {
+                yield return version;
+            }
+        }
     }
 
     private static async Task AddExecutableCheckAsync(
@@ -282,6 +345,17 @@ public static class DoctorCommandHandler
             return;
         }
 
+        if (root is not JsonObject rootObject)
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = "Codex Hooks Configuration",
+                Status = DoctorCheckStatus.Failure,
+                Detail = $"Not a valid JSON object: {hooksFilePath}."
+            });
+            return;
+        }
+
         result.Checks.Add(new DoctorCheck
         {
             Name = "Codex Hooks Configuration",
@@ -289,7 +363,7 @@ public static class DoctorCommandHandler
             Detail = hooksFilePath
         });
 
-        var entryCount = CountCgrHookEntries(root);
+        var entryCount = CountCgrHookEntries(rootObject);
         if (entryCount == 0)
         {
             result.Checks.Add(new DoctorCheck
@@ -653,7 +727,7 @@ public static class DoctorCommandHandler
         });
     }
 
-    private static int CountCgrHookEntries(JsonNode root)
+    private static int CountCgrHookEntries(JsonObject root)
     {
         if (root["hooks"] is not JsonObject rootHooks)
         {
@@ -814,6 +888,19 @@ public sealed class DoctorCommandDependencies
             }
         };
 
+    public Func<CancellationToken, Task<ProcessResult?>> RunDotNetRuntimesProcessAsync { get; init; }
+        = async cancellationToken =>
+        {
+            try
+            {
+                return await ProcessRunner.RunAsync(Environment.CurrentDirectory, "dotnet", new[] { "--list-runtimes" }, cancellationToken);
+            }
+            catch
+            {
+                return null;
+            }
+        };
+
     public Func<CancellationToken, Task<ProcessResult?>> RunGitHubAuthStatusProcessAsync { get; init; }
         = async cancellationToken =>
         {
@@ -840,7 +927,7 @@ public sealed class DoctorCommandDependencies
         = (repositoryRoot, cancellationToken) => WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(repositoryRoot, DefaultPaths, cancellationToken);
 
     public Func<string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
-        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.ReadAsync(gitCommonDirectory, cancellationToken);
+        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, cancellationToken);
 
     public Func<string, CancellationToken, Task<HashSet<string>>> GetRepositoryLabelNamesAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitHubCliService.GetRepositoryLabelNamesAsync(repositoryRoot, cancellationToken);

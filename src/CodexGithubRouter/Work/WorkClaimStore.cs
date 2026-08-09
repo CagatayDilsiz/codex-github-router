@@ -11,6 +11,9 @@ public static class WorkClaimStore
     public static Task<WorkClaim?> ReadAsync(string gitCommonDirectory, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, () => ReadUnsafeAsync(gitCommonDirectory, cancellationToken), cancellationToken);
 
+    public static Task<WorkClaim?> TryReadAsync(string gitCommonDirectory, CancellationToken cancellationToken = default) =>
+        ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
+
     public static Task<WorkClaimAcquisitionResult> TryAcquireAsync(string gitCommonDirectory, WorkClaim requested, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {

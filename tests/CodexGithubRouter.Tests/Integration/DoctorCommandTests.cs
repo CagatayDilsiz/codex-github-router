@@ -32,7 +32,7 @@ public sealed class DoctorCommandTests
     }
 
     [Fact]
-    public async Task Doctor_is_read_only_and_creates_nothing()
+    public async Task Doctor_is_read_only_and_creates_nothing_with_default_wiring()
     {
         using var sandbox = new TestSandbox();
         var deps = HealthyDependencies(sandbox);
@@ -42,7 +42,11 @@ public sealed class DoctorCommandTests
         Assert.Equal(0, result);
         Assert.False(File.Exists(sandbox.Paths.WorkflowFile));
         Assert.False(File.Exists(sandbox.Paths.CodexHooksFile));
+        Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json")));
+        Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.lock")));
+        Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.auto")));
         Assert.Empty(Directory.GetFiles(sandbox.GitCommonDirectory));
+        Assert.Empty(Directory.GetDirectories(sandbox.GitCommonDirectory));
     }
 
     [Fact]
@@ -86,6 +90,33 @@ public sealed class DoctorCommandTests
     }
 
     [Fact]
+    public async Task Doctor_dotnet_runtime_without_net10_returns_failure()
+    {
+        using var sandbox = new TestSandbox();
+        var deps = WithDotNetRuntimes(HealthyDependencies(sandbox), "Microsoft.NETCore.App 9.0.0 [C:\\dotnet\\shared\\Microsoft.NETCore.App]");
+
+        var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
+
+        Assert.Equal(1, result);
+        var output = Output(deps);
+        Assert.Contains("[FAIL] .NET Runtime", output);
+        Assert.Contains("No .NET 10 runtime found", output);
+    }
+
+    [Fact]
+    public async Task Doctor_dotnet_runtime_with_net10_returns_pass()
+    {
+        using var sandbox = new TestSandbox();
+        var deps = WithDotNetRuntimes(HealthyDependencies(sandbox), "Microsoft.NETCore.App 10.0.1 [C:\\dotnet\\shared\\Microsoft.NETCore.App]");
+
+        var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
+
+        Assert.Equal(0, result);
+        Assert.Contains("[PASS] .NET Runtime", Output(deps));
+        Assert.Contains("supports net10.0", Output(deps));
+    }
+
+    [Fact]
     public async Task Doctor_invalid_hooks_json_returns_failure()
     {
         using var sandbox = new TestSandbox();
@@ -98,6 +129,28 @@ public sealed class DoctorCommandTests
         Assert.Equal(1, result);
         Assert.Contains("[FAIL] Codex Hooks Configuration", Output(deps));
         Assert.Contains("Not valid JSON", Output(deps));
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("[1, 2]")]
+    [InlineData("\"text\"")]
+    [InlineData("42")]
+    [InlineData("true")]
+    public async Task Doctor_hooks_file_with_wrong_json_shape_reports_controlled_failure(string json)
+    {
+        using var sandbox = new TestSandbox();
+        await WriteHooksAsync(sandbox, json);
+
+        var deps = HealthyDependencies(sandbox);
+
+        var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
+
+        Assert.Equal(1, result);
+        var output = Output(deps);
+        Assert.Contains("[FAIL] Codex Hooks Configuration", output);
+        Assert.Contains("Not a valid JSON object", output);
+        Assert.Contains("[PASS] .NET Runtime", output);
     }
 
     [Fact]
@@ -138,7 +191,7 @@ public sealed class DoctorCommandTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "garbage");
 
-        var deps = WithRealClaimStore(HealthyDependencies(sandbox));
+        var deps = HealthyDependencies(sandbox);
 
         var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
 
@@ -165,7 +218,7 @@ public sealed class DoctorCommandTests
         };
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), JsonSerializer.Serialize(claim));
 
-        var deps = WithRealClaimStore(HealthyDependencies(sandbox));
+        var deps = HealthyDependencies(sandbox);
 
         var result = await DoctorCommandHandler.HandleAsync(new[] { sandbox.RepositoryDirectory }, deps);
 
@@ -271,11 +324,15 @@ public sealed class DoctorCommandTests
     }
 
     [Fact]
-    public async Task Doctor_no_arguments_returns_usage_error()
+    public async Task Doctor_no_arguments_uses_current_directory_and_returns_zero()
     {
-        var deps = new DoctorCommandDependencies();
+        using var sandbox = new TestSandbox();
+        var deps = HealthyDependencies(sandbox);
+
         var result = await DoctorCommandHandler.HandleAsync(Array.Empty<string>(), deps);
-        Assert.Equal(2, result);
+
+        Assert.Equal(0, result);
+        Assert.Contains("[PASS] Git Repository", Output(deps));
     }
 
     [Fact]
@@ -336,10 +393,10 @@ public sealed class DoctorCommandTests
             GetRepositoryRootAsync = (_, _) => Task.FromResult<string?>(sandbox.RepositoryDirectory),
             GetGitCommonDirectoryAsync = (_, _) => Task.FromResult<string?>(sandbox.GitCommonDirectory),
             RunVersionProcessAsync = (executable, _) => Task.FromResult<ProcessResult?>(new ProcessResult { ExitCode = 0, Output = $"{executable} version 1.0" }),
+            RunDotNetRuntimesProcessAsync = _ => Task.FromResult<ProcessResult?>(new ProcessResult { ExitCode = 0, Output = "Microsoft.NETCore.App 10.0.0 [C:\\dotnet\\shared\\Microsoft.NETCore.App]" }),
             RunGitHubAuthStatusProcessAsync = _ => Task.FromResult<ProcessResult?>(new ProcessResult { ExitCode = 0, Output = "Logged in to github.com as cagatay" }),
             LoadGlobalConfigurationAsync = cancellationToken => WorkflowConfigurationService.LoadOrDefaultAsync(sandbox.Paths, cancellationToken),
             LoadEffectiveConfigurationAsync = (repositoryRoot, cancellationToken) => WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(repositoryRoot, sandbox.Paths, cancellationToken),
-            ReadWorkClaimAsync = (_, _) => Task.FromResult<WorkClaim?>(null),
             GetRepositoryLabelNamesAsync = async (repositoryRoot, cancellationToken) =>
             {
                 var configuration = await WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(repositoryRoot, sandbox.Paths, cancellationToken);
@@ -358,6 +415,7 @@ public sealed class DoctorCommandTests
             GetRepositoryRootAsync = (_, _) => Task.FromResult(repositoryRoot),
             GetGitCommonDirectoryAsync = deps.GetGitCommonDirectoryAsync,
             RunVersionProcessAsync = deps.RunVersionProcessAsync,
+            RunDotNetRuntimesProcessAsync = deps.RunDotNetRuntimesProcessAsync,
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
@@ -377,6 +435,7 @@ public sealed class DoctorCommandTests
             GetRepositoryRootAsync = deps.GetRepositoryRootAsync,
             GetGitCommonDirectoryAsync = deps.GetGitCommonDirectoryAsync,
             RunVersionProcessAsync = (_, _) => Task.FromResult<ProcessResult?>(null),
+            RunDotNetRuntimesProcessAsync = deps.RunDotNetRuntimesProcessAsync,
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
@@ -396,6 +455,7 @@ public sealed class DoctorCommandTests
             GetRepositoryRootAsync = deps.GetRepositoryRootAsync,
             GetGitCommonDirectoryAsync = deps.GetGitCommonDirectoryAsync,
             RunVersionProcessAsync = deps.RunVersionProcessAsync,
+            RunDotNetRuntimesProcessAsync = deps.RunDotNetRuntimesProcessAsync,
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
@@ -405,9 +465,9 @@ public sealed class DoctorCommandTests
         return deps;
     }
 
-    private static DoctorCommandDependencies WithRealClaimStore(DoctorCommandDependencies deps)
+    private static DoctorCommandDependencies WithDotNetRuntimes(DoctorCommandDependencies deps, string runtimesOutput)
     {
-        return new DoctorCommandDependencies
+        deps = new DoctorCommandDependencies
         {
             Paths = deps.Paths,
             Output = deps.Output,
@@ -415,12 +475,14 @@ public sealed class DoctorCommandTests
             GetRepositoryRootAsync = deps.GetRepositoryRootAsync,
             GetGitCommonDirectoryAsync = deps.GetGitCommonDirectoryAsync,
             RunVersionProcessAsync = deps.RunVersionProcessAsync,
+            RunDotNetRuntimesProcessAsync = _ => Task.FromResult<ProcessResult?>(new ProcessResult { ExitCode = 0, Output = runtimesOutput }),
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
-            ReadWorkClaimAsync = (gitCommonDirectory, cancellationToken) => WorkClaimStore.ReadAsync(gitCommonDirectory, cancellationToken),
+            ReadWorkClaimAsync = deps.ReadWorkClaimAsync,
             GetRepositoryLabelNamesAsync = deps.GetRepositoryLabelNamesAsync
         };
+        return deps;
     }
 
     private static async Task WriteHooksAsync(TestSandbox sandbox, string json)
