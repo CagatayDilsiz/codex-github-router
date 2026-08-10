@@ -3,52 +3,43 @@
 > [!WARNING]
 > This project is under active development and is currently in an alpha stage. Commands, configuration, and workflow behavior may change between releases.
 
-Codex GitHub Router (`cgr`) is a small .NET CLI that connects Codex sessions with GitHub Issues and Pull Requests. It installs a Codex `UserPromptSubmit` hook, finds the next actionable workflow item, prioritizes existing review or change-request work, and can prevent new work from starting while an earlier item still requires attention.
+Codex GitHub Router (`cgr`) is a small .NET CLI that connects [Codex](https://openai.com/index/introducing-codex/) sessions with GitHub Issues and Pull Requests. It installs a Codex `UserPromptSubmit` hook, finds the next actionable workflow item, prioritizes existing review or change-request work, and can prevent new work from starting while an earlier item still requires attention.
+
+CGR turns a labeled GitHub workflow (ready → working → done) into router decisions. When you ask Codex to "work on the next task", the hook checks the repository state and delivers the additional context Codex needs: which issue to take, whether an in-progress issue must be resumed, whether a pull request is waiting on a change request, and so on. It intentionally keeps at most one active coding claim per repository so multiple sessions and worktrees agree on who owns the work.
 
 ## Requirements
 
-* .NET 10
-* [GitHub CLI](https://cli.github.com/) installed and authenticated
-* Codex CLI with hooks support
-* A GitHub repository that uses the configured issue and pull-request labels
-
-Verify GitHub CLI authentication before using the router:
-
-```bash
-gh auth status
-```
+- .NET 10 runtime
+- [GitHub CLI](https://cli.github.com/) installed and authenticated (`gh auth status`)
+- Codex CLI with hooks support
+- A GitHub repository that uses the configured issue and pull-request labels
 
 ## Installation
 
-Install the global .NET tool from NuGet after a package has been published:
-
 ```bash
 dotnet tool install --global codex-github-router --version 0.1.0-alpha
-```
-
-Verify the installation:
-
-```bash
 cgr --version
 ```
 
-## Setup
+See [docs/getting-started.md](docs/getting-started.md) for the full install, update, and uninstall lifecycle.
 
-Run the initializer once:
+## Quick start
 
 ```bash
+# 1. Check GitHub authentication
+gh auth status
+
+# 2. Initialize the router (creates the default configuration and registers the Codex hook)
 cgr init
+
+# 3. Enable autonomous mode for your repository (provisions missing labels)
+cgr auto on
+
+# 4. Confirm the environment and repository are healthy
+cgr doctor
 ```
 
-The initializer creates the default workflow configuration and adds a single `cgr hook` command to the user-level Codex hooks file. Existing hooks are preserved, and updates create a backup of the previous hooks file.
-
-To rewrite the generated workflow configuration and refresh the CGR hook entry:
-
-```bash
-cgr init --force
-```
-
-Codex may need to be restarted after changing its hooks configuration.
+After enabling autonomous mode, prompts submitted to Codex inside the repository are routed according to the workflow. Codex may need to be restarted after `cgr init` changes its hooks configuration. A five-minute walkthrough lives in [docs/getting-started.md](docs/getting-started.md).
 
 ## Basic usage
 
@@ -57,242 +48,70 @@ Run these commands from a Git repository connected to GitHub:
 ```bash
 cgr --help
 cgr issue list
+cgr issue list --state InProgress
 cgr pr list
 cgr auto status
-cgr auto on
-cgr doctor
-```
-
-### Active work claims
-
-CGR keeps at most one active coding claim in the repository Git common directory, so every worktree observes the same owner. Inspect or recover the claim with:
-
-```bash
 cgr work status
-cgr work reconcile
-cgr work release --issue <number>
+cgr config validate
+cgr doctor
 ```
 
-`reconcile` removes only claims that GitHub shows as passive or terminal. `release` is an explicit user recovery action and only removes the claim for the supplied issue.
+## Troubleshooting
 
-Model-aware worker routing is opt-in. Configure it under `policies.workerRouting` with a required default worker, worker labels, and exact model slugs:
-
-```json
-{
-  "policies": {
-    "workerRouting": {
-      "defaultWorker": "luna",
-      "workers": {
-        "luna": {
-          "labels": ["codex:worker:luna"],
-          "models": ["gpt-5-codex"]
-        },
-        "terra": {
-          "labels": ["codex:worker:terra"],
-          "models": ["gpt-5-mini"]
-        }
-      }
-    }
-  }
-}
-```
-
-Without this policy, existing routing is unchanged. Worker labels must use the `codex:worker:` namespace so unknown worker labels fail closed. With it enabled, an unlabeled issue uses the default worker, one worker label selects that profile, and multiple or unknown worker labels are rejected. A hook only claims work when its current model belongs to the selected worker; pull-request change requests inherit the worker selected by their linked issue. `cgr auto on` provisions configured worker labels alongside the workflow labels, and `cgr work status` reports the resolved worker and model for newer claims.
-
-Autonomous mode is repository-specific. When it is enabled, the Codex hook can route prompts according to the configured GitHub issue and pull-request workflow. `cgr auto on` validates the workflow configuration and creates only missing labels referenced by its issue and pull-request label rules; existing labels are never changed. CGR stores the applied configuration fingerprint in the repository's shared Git directory so the same setup also works from Git worktrees. After changing the workflow configuration, run `cgr auto on` again to provision any newly required labels safely.
-
-Autonomous activation defaults to `always`. To require an exact user-prompt gate, configure `policies.autonomousActivation` with `mode: "prompt"` and at least one prompt:
-
-```json
-{
-  "policies": {
-    "autonomousActivation": {
-      "mode": "prompt",
-      "prompts": [
-        "sıradaki görevi yapabiliriz",
-        "work on the next task"
-      ]
-    }
-  }
-}
-```
-
-Prompt matching applies Unicode NFC normalization, trims and collapses Unicode whitespace, ignores one trailing ASCII period, and then compares the full strings with ordinal case-insensitive equality. Empty prompts silently bypass the hook; non-matching prompts do not inspect claims or query GitHub. `always` ignores any configured prompt values. Invalid modes and empty prompt-gated lists fail centralized workflow validation. `cgr auto status` displays the active activation mode and configured prompts or count.
-
-Repositories can override only the workflow fields that differ from the global configuration by adding `.codex-github-router/workflow.json` at the repository root. CGR loads the complete global configuration first, recursively merges repository objects, replaces supplied scalar and array values, then validates the effective result. Omitted values inherit the global configuration; arrays are never concatenated; explicit `null` values are rejected; and the repository file is never created or modified automatically.
-
-Effective configuration consumers are read-only: when the global workflow file is missing, CGR uses the built-in defaults in memory and does not create it. The explicit `cgr init` command is the only path that creates the global workflow file.
-
-For example, this repository override changes the ready label and activation prompts while inheriting every other global setting, including the activation mode:
-
-```json
-{
-  "states": {
-    "ready": [
-      {
-        "type": "label",
-        "values": ["project:ready"]
-      }
-    ]
-  },
-  "policies": {
-    "autonomousActivation": {
-      "prompts": ["sıradaki görevi yapabilir miyiz"]
-    }
-  }
-}
-```
-
-The checked-out working tree is the source of the repository override. Invalid JSON or an invalid merged configuration fails before claim acquisition, GitHub discovery, label provisioning, or workflow transitions.
-
-When a single issue is already in the configured `working` state, it takes precedence over ready issues. New work branches use `codex/issue-<number>-<short-description>`; CGR only recovers branches with that exact issue prefix, then checks pull requests for the recovered branch before allowing work to continue. CGR never starts a second issue, branch, or pull request. Multiple working issues are treated as an ambiguous workflow state and block the hook until resolved. A working issue whose linked open pull requests are all `deferred` is non-blocking, so ready work may proceed.
-
-Within each workflow domain, label rules are ORed: any configured label for a state matches that state, and multiple matching labels for that same state are valid. Labels matching different states on the same issue or pull request are ambiguous. CGR blocks the hook with a diagnostic listing those labels rather than depending on label order. A transition to a valid target state removes workflow labels for every other state in that same domain while preserving unrelated labels.
-
-### Repository workflow gates
-
-Critical issue and pull-request workstreams can block unrelated work with the orthogonal repository gate policy. The default configuration uses `codex:gate` and stores it separately from workflow state labels:
-
-```json
-{
-  "policies": {
-    "repositoryGate": {
-      "labels": ["codex:gate"]
-    }
-  }
-}
-```
-
-Configured gate labels are ORed. A gate is evaluated after any active work claim is reconciled and before ordinary routing. Gated ready, interrupted working, and change-request work is prioritized and claimed; gated review, merge, blocked, needs-info, deferred, or unresolved work blocks unrelated prompts. Merged pull requests and abandoned or closed issues are terminal and do not keep a gate active. State transitions preserve gate labels. `cgr work status` reports repository gates separately from the active claim.
-
-### Manual validation for working-issue recovery
-
-The automated tests cover workflow decisions and generated hook context. Validate these repository-dependent recovery paths manually in a disposable repository before enabling autonomous mode: one local-only `codex/issue-<number>-*` branch, one remote-only branch, one branch present locally and remotely, zero matching branches, multiple matching branches, one open head-branch pull request, one closed-unmerged head-branch pull request, and multiple head-branch pull requests.
-
-### Hook diagnostics
-
-Every hook invocation writes a lightweight, machine-readable diagnostic record to the repository's shared Git directory so all worktrees observe the same trail without dirtying the checked-out working tree. Records are stored as one JSON file per invocation under `<git-common>/codex-github-router.diagnostics/`. The Git common directory is resolved with `git rev-parse --git-common-dir`, and each record uses an atomic temporary-file write, so concurrent hook invocations from multiple Codex sessions or worktrees cannot corrupt or overwrite each other's output.
-
-Each record is a structured object, for example:
-
-```json
-{
-  "eventName": "hook.invocation",
-  "invocationId": "0f4c2a1e...",
-  "timestampUtc": "2026-08-01T12:00:00Z",
-  "durationMs": 12,
-  "repositoryIdentity": "...",
-  "autonomousEnabled": true,
-  "activationMode": "always",
-  "activationResult": true,
-  "workflowItemType": "NewIssue",
-  "issueNumber": 5,
-  "pullRequestNumber": 12,
-  "worker": "terra",
-  "model": "gpt-5-codex",
-  "claimId": "0f4c2a1e",
-  "result": "context",
-  "blockReason": "...",
-  "errorType": "...",
-  "errorMessage": "..."
-}
-```
-
-The `result` field distinguishes `bypass` (wrong hook event, autonomous mode disabled, or a non-matching activation prompt), `context` (routing delivered additional context), `block` (a workflow or claim decision blocked the prompt), and `error` (a hook failure). Records never include full prompts, issue or pull-request bodies, generated additional context, authentication material, or complete session identifiers; work-claim identifiers are stored shortened to eight characters. On unexpected errors only the exception type name is persisted; raw exception messages are never stored unless they are one of CGR's own known-safe static messages.
-
-Diagnostics are best-effort: any directory, serialization, lock, or write failure is ignored and never changes the hook response, exit code, claim state, or GitHub mutations. The default configuration retains records for seven days, removing expired records during each invocation.
-
-Retention and disabling are configured under `policies.diagnostics`:
-
-```json
-{
-  "policies": {
-    "diagnostics": {
-      "enabled": true,
-      "retentionDays": 7
-    }
-  }
-}
-```
-
-Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy best-effort from the effective configuration of the current working directory (repository overrides included); `enabled: false` therefore disables the trail entirely, an invalid policy (for example `retentionDays: 0`) falls back to the defaults, and a failed resolution never changes hook behavior.
-
-### Doctor diagnostics
-
-`cgr doctor` is the first troubleshooting step when the router is not behaving. It is strictly read-only: it never creates, modifies, or deletes configuration, hooks, claims, labels, or any repository file. Run it from inside a repository to check both the environment and the repository:
+**Start with `cgr doctor`.** It is strictly read-only and reports independent `PASS` / `WARN` / `FAIL` checks across the environment (version, .NET runtime, Git, GitHub CLI, hooks, global configuration) and the repository (override, effective configuration, autonomous mode, work claim, labels, worker routing). Exit codes: `0` for all-pass or warnings-only, `1` when any required setup fails, `2` for usage errors.
 
 ```bash
 cgr doctor
-cgr doctor /path/to/repository
 cgr doctor --model gpt-5-codex
 ```
 
-Each independent check reports `PASS`, `WARN`, or `FAIL`, so a single problem never hides the other results. A report with any `FAIL` exits with code 1; all-pass and warning-only reports exit with code 0. The command exits with code 2 for usage errors.
+See [docs/troubleshooting.md](docs/troubleshooting.md) for step-by-step recovery guidance.
 
-User-level checks: CGR version, .NET runtime, Git, GitHub CLI availability and authentication, the Codex hooks file (presence and valid JSON), a single registered `cgr hook` entry, and the global workflow configuration (presence and validity). Repository-level checks: valid Git repository and common directory, the repository override at `.codex-github-router/workflow.json` (presence and valid JSON), the effective workflow configuration (version and validation), autonomous-mode status, the active work claim file (validity), the required GitHub labels present in the repository, and worker routing with current-model eligibility when `--model` is supplied.
+## How it works (lifecycle overview)
 
-The report includes an actionable recommendation list for each failing or warning check, for example `cgr init` for a missing hooks entry or global configuration, `cgr auto on` for missing labels, or `gh auth login` for an unauthenticated GitHub CLI. The active work claim summary shows only the work identity (issue, pull request, type, worker, and model) and never the owning session identifier; authentication material and prompt contents are never printed.
+1. Codex submits a user prompt and the installed `cgr hook` fires on `UserPromptSubmit`.
+2. CGR checks autonomous mode and the activation policy (always, or an exact prompt gate).
+3. CGR reconciles the repository work claim, then routes the prompt:
+   - an active claim owned by the current session continues that work,
+   - a change-requested pull request is prioritized,
+   - an in-progress issue is resumed before new work,
+   - otherwise the next ready issue is claimed and started.
+4. The hook returns additional context to Codex (or a `block` decision with a reason), and writes a diagnostic record for troubleshooting.
 
+Workflow and pull-request labels, worker routing, repository gates, and diagnostics are all configurable. See [docs/configuration.md](docs/configuration.md) and [docs/scenarios.md](docs/scenarios.md).
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — install, setup, uninstall lifecycle
+- [Configuration reference](docs/configuration.md) — defaults, overrides, effective merge, validation
+- [Scenarios](docs/scenarios.md) — common workflows with copyable examples
+- [Troubleshooting](docs/troubleshooting.md) — doctor-first recovery guidance
+- [Roadmap](docs/roadmap.md) — intended capabilities
+
+## Current scope and limitations
+
+- At most **one active coding claim** per repository, shared across worktrees.
+- CGR never starts a second issue, branch, or pull request while work is active.
+- Autonomous mode is repository-specific and stored in the shared Git common directory.
+- The router relies on GitHub labels to model state; conflicting labels are treated as an ambiguous state and block the hook.
+- PR review itself is not a claimable work type yet; change requests on linked pull requests are.
+
+See [docs/roadmap.md](docs/roadmap.md) for the intended future capabilities.
 
 ## Development
 
-Clone and build the project:
-
 ```bash
-git clone https://github.com/CagatayDilsiz/codex-github-router.git
-cd codex-github-router
 dotnet restore CodexGithubRouter.slnx
 dotnet build CodexGithubRouter.slnx -c Release --no-restore
-```
-
-Run the CLI directly from source:
-
-```bash
 dotnet run --project src/CodexGithubRouter -- --help
-```
-
-Run the test suite with standard .NET test discovery and filtering. The commands below build the Release output as part of test execution; CI uses `--no-build` only after its preceding Release build step:
-
-```bash
 dotnet test CodexGithubRouter.slnx -c Release
-dotnet test CodexGithubRouter.slnx -c Release --filter FullyQualifiedName~ConfigurationSandboxTests
-dotnet test CodexGithubRouter.slnx -c Release --filter "Category=Unit"
-dotnet test CodexGithubRouter.slnx -c Release --filter "Category=Integration"
 ```
 
-The default suite runs both deterministic Unit tests and sandboxed Integration tests. It does not require GitHub, a network connection, or a live user configuration. Filesystem integration tests use unique temporary sandboxes; normal CLI execution continues to use the user-level `.codex` and `.codex-github-router` directories.
-
-Supported CI platforms are Linux (`ubuntu-latest`) and Windows (`windows-latest`). Pull-request validation runs the full Release build and deterministic test suite on both platforms, including isolated package installation, `cgr --version`, `cgr --help`, native hook command configuration, UTF-8 hook data, path handling, file locking, atomic writes, and Git common-directory/worktree behavior. macOS is not currently a required CI platform.
-
-Create a local tool package:
-
-```bash
-dotnet pack src/CodexGithubRouter/CodexGithubRouter.csproj -c Release
-```
-
-Install the locally packed tool:
-
-```bash
-dotnet tool install --global \
-  --add-source ./src/CodexGithubRouter/nupkg \
-  codex-github-router \
-  --version 0.0.1-dev
-```
+The default test suite runs deterministic unit tests and sandboxed integration tests without requiring GitHub, a network connection, or a live user configuration. CI validates Release builds on Linux (`ubuntu-latest`) and Windows (`windows-latest`); macOS is not a required CI platform.
 
 ## Releases
 
-Releases are published manually from the current `main` head through the **Release NuGet package** GitHub Actions workflow. Until the repository has a valid SemVer release tag, the resolver temporarily uses `0.0.0` as a bootstrap baseline and emits a visible workflow warning. Thus, the first `minor` release with the `alpha` suffix resolves to `0.1.0-alpha`. Once a valid `vX.Y.Z[-suffix]` tag exists, normal tag-based resolution always takes over.
-
-Choose `major`, `minor`, or `build` (`build` means the SemVer patch component). Major resets minor and patch, minor resets patch, and build increments only patch. The optional `suffix` is trimmed and must be valid SemVer prerelease identifiers without a leading `-`. For example, with `v0.0.2-alpha` as the latest tag, selecting `minor` and `alpha` publishes `0.1.0-alpha`; leaving the suffix empty would publish a stable version.
-
-NuGet publication uses Trusted Publishing rather than a long-lived repository secret. In nuget.org, create a trusted publishing policy for repository owner `CagatayDilsiz`, repository `codex-github-router`, workflow file `release.yml` (file name only), and environment `release`. Create the non-sensitive repository variable `NUGET_USER` with the nuget.org profile name used by that policy. The `publish_nuget` job requests a short-lived OIDC-backed API key immediately before push; the `release` environment can also enforce GitHub approvals or protection rules. It restores, builds, tests, packs once, installs the exact package into an isolated tool path, checks `cgr --version` and `cgr --help`, then publishes that same `.nupkg` to NuGet.org and attaches it (with a SHA-256 checksum) to the matching generated-notes GitHub Release. A failed or partial run must be investigated rather than rerun as a duplicate publish.
-
-The checked-in project version is the non-release development value `0.0.1-dev`; the release workflow supplies `-p:Version=<resolved-version>` so package metadata and the CLI version align without release commits. NuGet is the primary installation channel; GitHub Releases retain the matching package, checksum, and notes. Install or update an explicit prerelease with:
-
-```bash
-dotnet tool install --global codex-github-router --version 0.1.0-alpha
-dotnet tool update --global codex-github-router --version 0.1.0-alpha
-```
+Releases are published manually from the current `main` head through the **Release NuGet package** GitHub Actions workflow. NuGet publication uses Trusted Publishing with a short-lived OIDC-backed API key; the release environment can enforce approvals. The checked-in project version is `0.0.1-dev`; the release workflow supplies the resolved version so package metadata and `cgr --version` stay aligned. See [docs/getting-started.md](docs/getting-started.md) for the supported update and uninstall order.
 
 ## License
 
