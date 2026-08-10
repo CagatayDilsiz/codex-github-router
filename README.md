@@ -60,6 +60,7 @@ cgr issue list
 cgr pr list
 cgr auto status
 cgr auto on
+cgr doctor
 ```
 
 ### Active work claims
@@ -215,6 +216,23 @@ Retention and disabling are configured under `policies.diagnostics`:
 ```
 
 Set `enabled` to `false` to disable the diagnostic trail entirely, or lower `retentionDays` to prune records sooner (`retentionDays` must be at least one). To clean records immediately, delete the `codex-github-router.diagnostics` directory inside the repository's Git common directory. The policy is applied from the effective workflow configuration as soon as CGR loads it, which covers activation decisions and everything after them. Wrong-event and autonomous-disabled bypasses occur before configuration loading, so their records resolve the diagnostics policy best-effort from the effective configuration of the current working directory (repository overrides included); `enabled: false` therefore disables the trail entirely, an invalid policy (for example `retentionDays: 0`) falls back to the defaults, and a failed resolution never changes hook behavior.
+
+### Doctor diagnostics
+
+`cgr doctor` is the first troubleshooting step when the router is not behaving. It is strictly read-only: it never creates, modifies, or deletes configuration, hooks, claims, labels, or any repository file. Run it from inside a repository to check both the environment and the repository:
+
+```bash
+cgr doctor
+cgr doctor /path/to/repository
+cgr doctor --model gpt-5-codex
+```
+
+Each independent check reports `PASS`, `WARN`, or `FAIL`, so a single problem never hides the other results. A report with any `FAIL` exits with code 1; all-pass and warning-only reports exit with code 0. The command exits with code 2 for usage errors.
+
+User-level checks: CGR version, .NET runtime, Git, GitHub CLI availability and authentication, the Codex hooks file (presence and valid JSON), a single registered `cgr hook` entry, and the global workflow configuration (presence and validity). Repository-level checks: valid Git repository and common directory, the repository override at `.codex-github-router/workflow.json` (presence and valid JSON), the effective workflow configuration (version and validation), autonomous-mode status, the active work claim file (validity), the required GitHub labels present in the repository, and worker routing with current-model eligibility when `--model` is supplied.
+
+The report includes an actionable recommendation list for each failing or warning check, for example `cgr init` for a missing hooks entry or global configuration, `cgr auto on` for missing labels, or `gh auth login` for an unauthenticated GitHub CLI. The active work claim summary shows only the work identity (issue, pull request, type, worker, and model) and never the owning session identifier; authentication material and prompt contents are never printed.
+
 
 ## Development
 

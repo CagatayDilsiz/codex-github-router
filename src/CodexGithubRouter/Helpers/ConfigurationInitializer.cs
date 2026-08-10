@@ -310,7 +310,7 @@ public static class ConfigurationInitializer
         return totalRemoved;
     }
 
-    private static bool IsCgrCommandBlock(JsonObject hook)
+    public static bool IsCgrCommandBlock(JsonObject hook)
     {
         if (!string.Equals(hook["type"]?.GetValue<string>(), "command", StringComparison.OrdinalIgnoreCase))
         {

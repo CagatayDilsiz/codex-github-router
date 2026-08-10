@@ -19,6 +19,16 @@ public static class WorkerRoutingService
             .OrderBy(label => label, StringComparer.OrdinalIgnoreCase)
             .ToList() ?? new List<string>();
 
+    public static string? ResolveWorkerForModel(RouterConfiguration configuration, string? model)
+    {
+        if (!IsEnabled(configuration) || string.IsNullOrWhiteSpace(model))
+        {
+            return null;
+        }
+
+        return FindWorkerForModel(configuration.Policies!.WorkerRouting!, model);
+    }
+
     public static void Validate(RouterConfiguration configuration)
     {
         var policy = configuration.Policies?.WorkerRouting;

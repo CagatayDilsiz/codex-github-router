@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.Doctor;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
@@ -28,19 +29,14 @@ return args[0].ToLowerInvariant() switch
     "work" => await WorkCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
     "config" => await ConfigCommandHandler.HandleAsync(args.Skip(1).ToArray()),
+    "doctor" => await DoctorCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     _ => UnknownCommand(args[0])
 };
 
 static int PrintVersion()
 {
-    var assembly = System.Reflection.Assembly.GetExecutingAssembly();
-    var infoVersion = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>()
-        .FirstOrDefault()?.InformationalVersion ?? assembly.GetName().Version?.ToString() ?? "Unknown";
-
-
-    Console.WriteLine("v" + VersionFormatter.Normalize(infoVersion));
+    Console.WriteLine("v" + VersionFormatter.GetVersion());
     return 0;
 }
 
@@ -61,6 +57,7 @@ static int PrintHelp()
           cgr config path [working-directory]
           cgr config show [--effective [working-directory]]
           cgr config validate [working-directory]
+          cgr doctor [working-directory] [--model <model>]
           cgr init [--force]
           cgr pull-request|pr <list|transition> <options> [working-directory]
 
@@ -71,6 +68,7 @@ static int PrintHelp()
           issue       Manage issues in the repository.
           work        Inspect, reconcile, or explicitly release repository work claims.
           config      Inspect and validate configuration (path, show, validate).
+          doctor      Run read-only diagnostics for the environment and repository.
           init        Initialize the configuration for the Codex Github Router.
           pull-request|pr  Manage pull requests in the repository.
         """);
