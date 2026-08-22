@@ -4,11 +4,11 @@ This guide walks through the common workflows CGR supports, with copyable exampl
 
 A short reminder of the label-driven lifecycle:
 
-- **Issue states** (`states`): `ready` → `working` → `done`, plus `blocked`, `needs-info`, and `abandoned`. Default labels `codex:ready`, `codex:working`, `codex:done`, `codex:blocked`, `codex:needs-info`, `codex:abandoned`.
+- **Issue states** (`states`): configuration keys `ready` → `inProgress` → `completed`, plus `blocked`, `needsInfo`, and `abandoned`. Default labels `codex:ready`, `codex:working`, `codex:done`, `codex:blocked`, `codex:needs-info`, `codex:abandoned`.
 - **Pull-request states** (`pullRequestStates`): `reviewRequested`, `changesRequested`, `awaitingMerge`, `deferred`. Default labels `codex:rr`, `codex:cr`, `codex:merge-ready`, `codex:deferred`.
 - **Repository gate** (`policies.repositoryGate`): default label `codex:gate`.
 
-Transitions to a valid target state remove workflow labels for every other state in the same domain while preserving unrelated labels. See [configuration.md](configuration.md) for the full reference.
+Transitions to a valid target state remove workflow labels for every other state in the same domain while preserving unrelated labels. Configuration keys are camelCase JSON names; the CLI also accepts friendlier aliases such as `working`, `done`, and `needs-info` — see [configuration.md](configuration.md) for the full reference.
 
 ## Implementing a ready issue
 
@@ -30,7 +30,7 @@ Transitions to a valid target state remove workflow labels for every other state
    cgr issue transition <number> working
    ```
 
-   Transitioning to `working` also ensures the repository still has a single active claim for this issue.
+   Transitions are label mutations only — they never acquire or ensure a work claim. Claiming happens through the hook. Note that transitioning a claimed issue to `blocked`, `needs-info`, or `abandoned` releases that issue's claim.
 
 Inspect what is ready:
 
@@ -76,20 +76,21 @@ Worker routing is opt-in. Configure `policies.workerRouting` (see [configuration
 - An issue with **no** worker label is routed to the `defaultWorker`.
 - An issue with **one** `codex:worker:*` label is routed to that worker profile.
 - **Multiple** worker labels, or unknown worker labels, are rejected (fail closed).
-- A hook claims work only when the current model belongs to the selected worker.
+- A hook claims work only when the current model belongs to the selected worker; a mismatch blocks that prompt with a diagnostic.
 - `cgr auto on` provisions configured worker labels alongside the workflow labels.
 - `cgr work status` reports the resolved worker and model for newer claims.
 
-Verify routing for a model without triggering the hook:
+Verify the model → worker resolution without triggering the hook:
 
 ```bash
 cgr doctor --model gpt-5-codex
 ```
 
-This adds a `Worker Routing` check showing whether the model resolves to a worker and whether that worker owns the currently selected issue. Example output:
+This adds a `Worker Routing` check showing which configured worker accepts the current model. It only resolves **model → worker**; it does not compare against any selected issue — issue/model eligibility is enforced by the hook when claiming. Example output:
 
 ```text
-[PASS] Worker Routing: Enabled; model 'gpt-5-codex' resolves to worker 'luna'.
+[PASS] Worker Routing: Default worker: 'luna'. Configured workers: luna, terra. Current model 'gpt-5-codex' resolves to worker 'luna'.
+[WARN] Worker Routing: Default worker: 'luna'. Configured workers: luna, terra. Current model 'unknown-model' resolves to worker '<none>'.
 ```
 
 ## Prompt-gated and scheduled automation

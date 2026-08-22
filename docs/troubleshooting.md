@@ -28,7 +28,7 @@ The report never prints session identifiers, authentication material, or prompt 
 
 ### Missing or malformed Codex hooks configuration
 
-**Symptom:** `[FAIL] Codex Hooks Configuration` (`Not found:` or `Not valid JSON:`) and `[FAIL] CGR Hook Entry`.
+**Symptom:** with the file missing, `[WARN] Codex Hooks Configuration` (`Not found:`) together with `[FAIL] CGR Hook Entry`; with a malformed file, `[FAIL] Codex Hooks Configuration` (`Not valid JSON:`) and no `CGR Hook Entry` check at all — the hooks checks stop at the parse failure.
 
 **Inspection (read-only):**
 
@@ -37,7 +37,10 @@ cgr doctor
 cgr config path
 ```
 
-**Recovery (mutation):** run `cgr init` to (re)create the hooks file and register the hook. `cgr init` preserves unrelated hooks and backs up the previous file before an update. If the file is malformed, repair it or let `cgr init --force` rewrite the CGR entry, then restart Codex.
+**Recovery (mutation):**
+
+- File missing: run `cgr init` to create the hooks file and register the hook.
+- File present but malformed: repair it manually or restore a backup (`hooks.json.bak`) **first**. `cgr init --force` does not recover a malformed hooks file — it fails during parsing and preserves your file untouched. Once the JSON is valid, `cgr init --force` refreshes the CGR entry; unrelated hooks are preserved and a backup is written before an update. Then restart Codex.
 
 > The missing hooks file itself reports `WARN`, but the derived `CGR Hook Entry` check is `FAIL`: without a registered hook the router cannot run through Codex, and warnings-only reports exit `0`. Only fixing the entry moves the report to a clean exit.
 
@@ -86,7 +89,9 @@ Remember the merge rules: arrays are never concatenated, scalars and arrays repl
 
 ### Worker / model mismatch
 
-**Symptom:** the hook blocks with a message like `Issue #5 belongs to worker 'luna', but the current model resolves to worker 'terra'`, or `cgr doctor --model <model>` shows a `Worker Routing` failure.
+**Symptom:** the hook blocks with a message like `Issue #5 belongs to worker 'luna', but the current model resolves to worker 'terra'`, or `cgr doctor --model <model>` reports `[WARN] Worker Routing` with the model resolving to worker `<none>`.
+
+Note that `cgr doctor --model` only resolves **model → worker**; it never compares against a selected issue. Issue/model eligibility is enforced by the hook at claim time, so a doctor warning means no configured worker accepts the model at all.
 
 **Inspection (read-only):**
 
@@ -95,32 +100,48 @@ cgr doctor --model gpt-5-codex
 cgr work status
 ```
 
-**Recovery (mutation):** align the current model with the worker owning the issue, or change the issue's `codex:worker:*` label so it matches the model's worker. Unknown or multiple worker labels fail closed; remove them. Verify with `cgr doctor --model <model>`.
+**Recovery (mutation):** align the current model with the worker owning the issue (switch models), or change the issue's `codex:worker:*` label so it matches the model's worker. Unknown or multiple worker labels fail closed; remove them. Verify with `cgr doctor --model <model>`.
 
 ### Missing required labels
 
 **Symptom:** `[WARN] Required GitHub Labels` with `Missing label(s):`.
 
-**Recovery (mutation):** run `cgr auto on`. It validates the workflow configuration and creates **only** the missing labels referenced by the configured rules; existing labels are never changed. Re-run it after changing the workflow configuration to provision newly required labels safely.
+**Recovery (mutation):** run `cgr auto on`. It validates the workflow configuration and creates **only** the missing labels referenced by the configuration — issue and pull-request workflow labels plus repository-gate and configured worker labels; existing labels are never changed. Re-run it after changing the workflow configuration to provision newly required labels safely.
 
-### Invalid or stale work claims
+### Invalid (structurally broken) work-claim file
 
-**Symptom:** `[FAIL] Active Work Claim` (invalid claim file) or a claim that no longer matches GitHub state.
+**Symptom:** `[FAIL] Active Work Claim`, or `cgr work` commands failing with `Invalid work-claim file: ...`.
 
-**Inspection (read-only) first:**
+Because the claim file cannot be parsed, **every claim command fails until it is repaired**: `cgr work status`, `cgr work reconcile`, and `cgr work release --issue <number>` all read (and validate) the claim file first, so they cannot be used to recover a structurally invalid file.
+
+**Inspection (read-only):**
 
 ```bash
-cgr work status
+cgr doctor
 ```
 
-`cgr work status` reports the active claim (issue, pull request, type, worker, model) and any repository gate. It never changes anything.
+**Recovery (mutation), in order:**
+
+1. Confirm **no active Codex session owns the claimed issue** — check open sessions and teammates. The claim records the owning session, but doctor never prints session identifiers by design.
+2. Repair `<git-common>/codex-github-router.work.json` manually, or remove that single file after ownership is confirmed.
+3. Verify with `cgr doctor`; the hook recreates a valid claim on the next routed prompt.
+
+> Do **not** delete the claim file or autonomous marker blindly while an active session may own the work.
+
+### Valid but stale or passive work claims
+
+**Symptom:** `[PASS] Active Work Claim` with an issue/pull request that GitHub shows as merged, closed, blocked, deferred, or otherwise no longer actionable; prompts keep routing to stale work.
+
+**Inspection (read-only):**
+
+```bash
+cgr work status        # shows the claim's issue, pull request, type, worker, and model
+```
 
 **Recovery (mutation), in order of preference:**
 
-1. `cgr work reconcile` — removes only claims that GitHub shows as **passive or terminal** (for example a merged pull request). Safe when a session no longer owns the work.
+1. `cgr work reconcile` — removes only claims that GitHub shows as **passive or terminal** (for example a merged pull request). Safe when no session owns active work.
 2. `cgr work release --issue <number>` — explicit user recovery; removes the claim **only** for the supplied issue.
-
-> Do **not** delete the claim file or autonomous marker blindly. An active Codex session may still own the work. Inspect with `cgr work status`, confirm no session owns the issue, and prefer `reconcile`/`release` over deleting files.
 
 ### Autonomous mode disabled or repository state inconsistent
 
@@ -144,7 +165,7 @@ If multiple issues are marked `working`, that is an ambiguous workflow state and
 
 ## Structured hook diagnostics
 
-Every hook invocation writes a lightweight, machine-readable record to the repository's shared Git directory so all worktrees observe the same trail without dirtying the checked-out tree.
+Hook invocations that reach routing write a lightweight, machine-readable record to the repository's shared Git directory so all worktrees observe the same trail without dirtying the checked-out tree. Payloads that fail earlier — empty input or malformed JSON — return before any record is created, and diagnostics are best-effort throughout: a failed write never changes hook behavior.
 
 ### Location
 

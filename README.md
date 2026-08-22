@@ -32,7 +32,7 @@ gh auth status
 # 2. Initialize the router (creates the default configuration and registers the Codex hook)
 cgr init
 
-# 3. Enable autonomous mode for your repository (provisions missing labels)
+# 3. Enable autonomous mode for your repository (provisions missing workflow, gate, and worker labels)
 cgr auto on
 
 # 4. Confirm the environment and repository are healthy

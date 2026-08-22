@@ -49,14 +49,16 @@ The `version` field must be `1`. Any other value fails validation with `Unsuppor
 
 Each issue state is a list of rules; rules are **ORed** — any configured label for a state matches that state, and multiple matching labels for the same state are valid. Defaults:
 
-| State | Default labels | Meaning |
+| Configuration key | Default labels | Meaning |
 | --- | --- | --- |
 | `ready` | `codex:ready` | actionable next work |
-| `working` | `codex:working` | actively in progress |
-| `done` | `codex:done` | completed |
+| `inProgress` | `codex:working` | actively in progress |
+| `completed` | `codex:done` | completed |
 | `blocked` | `codex:blocked` | blocked |
-| `needs-info` | `codex:needs-info` | waiting for information |
+| `needsInfo` | `codex:needs-info` | waiting for information |
 | `abandoned` | `codex:abandoned` | abandoned / terminal |
+
+> Configuration keys are camelCase JSON property names (`inProgress`, `completed`, `needsInfo`). They are distinct from the human-friendly aliases accepted by the CLI (`cgr issue list --state working`, `cgr issue transition 5 done`): the CLI accepts `ready`/`ready-to-start`/`begin`, `working`/`in-progress`/`inprogress`, `completed`/`done`, `blocked`, `needs-info`/`need-info`/`needsinfo`, and `abandoned`.
 
 Example: a repository that uses its own ready label:
 
@@ -77,12 +79,12 @@ Example: a repository that uses its own ready label:
 
 Same rule shape and OR semantics. Defaults:
 
-| State | Default labels | Meaning |
-| --- | --- | --- |
-| `reviewRequested` | `codex:rr` | awaiting review |
-| `changesRequested` | `codex:cr` | change request pending |
-| `awaitingMerge` | `codex:merge-ready` | ready to merge |
-| `deferred` | `codex:deferred` | intentionally deferred |
+| Configuration key | Default labels | CLI aliases (`cgr pr transition`) | Meaning |
+| --- | --- | --- | --- |
+| `reviewRequested` | `codex:rr` | `review-requested`, `ready-for-review` | awaiting review |
+| `changesRequested` | `codex:cr` | `changes-requested` | change request pending |
+| `awaitingMerge` | `codex:merge-ready` | `awaiting-merge` | ready to merge |
+| `deferred` | `codex:deferred` | `deferred` | intentionally deferred |
 
 Pull-request states are evaluated against **open** pull requests. A `merged` or `closed` pull request is terminal and bypasses label-based PR state.
 
@@ -152,7 +154,7 @@ Opt-in, model-aware worker routing. When the `workerRouting` object is present, 
 - `workers`: worker profiles, each with at least one `labels` entry and one `models` entry.
 - Worker labels **must** use the `codex:worker:` namespace; unknown worker labels fail closed.
 
-Resolution rules: an unlabeled issue uses the default worker; one worker label selects that profile; multiple worker labels are conflicting and rejected; unknown worker labels are rejected. A hook claims work only when the current model belongs to the selected worker (`cgr doctor --model <model>` shows the same resolution). Pull-request change requests inherit the worker selected by their linked issue; a pull request closing issues assigned to different workers is a conflict.
+Resolution rules: an unlabeled issue uses the default worker; one worker label selects that profile; multiple worker labels are conflicting and rejected; unknown worker labels are rejected. A hook claims work only when the current model belongs to the selected worker. `cgr doctor --model <model>` resolves **model → worker** only and reports `WARN` when no configured worker accepts the model; it does not compare against a selected issue — issue/model eligibility is enforced by the hook at claim time. Pull-request change requests inherit the worker selected by their linked issue; a pull request closing issues assigned to different workers is a conflict.
 
 Validation: a default worker is required, worker names are case-insensitively unique, labels must not be shared between workers, models must not be shared between workers, and the default worker must exist.
 

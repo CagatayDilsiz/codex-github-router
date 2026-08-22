@@ -42,11 +42,13 @@ cgr init
 - writes the default workflow configuration to `~/.codex-github-router/workflow.json`, and
 - adds a single `cgr hook` command to the user-level Codex hooks file at `~/.codex/hooks.json`.
 
-Existing hooks are preserved. If the hooks file already contains a `cgr hook` entry, `cgr init` reports that and does nothing; use `--force` to rewrite the generated configuration and refresh the hook entry:
+Existing hooks are preserved. Plain `cgr init` never overwrites an existing global workflow configuration. If the hooks file already contains a `cgr hook` entry, `cgr init` reports that and does nothing; use `--force` to rewrite the generated global workflow configuration with the current built-in defaults and refresh the hook entry:
 
 ```bash
 cgr init --force
 ```
+
+> `cgr init --force` requires valid JSON in `~/.codex/hooks.json`. A malformed hooks file fails during parsing and is left untouched; repair it or restore a backup (`hooks.json.bak`) first, then run `--force`.
 
 Codex may need to be restarted after its hooks configuration changes.
 
@@ -71,7 +73,7 @@ From inside the repository:
 cgr auto on
 ```
 
-Autonomous mode is repository-specific. Enabling it validates the workflow configuration and provisions only the missing labels referenced by the configured issue and pull-request rules; existing labels are never changed. The applied configuration fingerprint is stored in the repository's shared Git directory so the same setup works from Git worktrees.
+Autonomous mode is repository-specific. Enabling it validates the workflow configuration and provisions only the missing labels referenced by the configuration — issue and pull-request workflow labels plus repository-gate and configured worker labels; existing labels are never changed. The applied configuration fingerprint is stored in the repository's shared Git directory so the same setup works from Git worktrees.
 
 Check the state:
 
@@ -108,7 +110,7 @@ Update the tool to a specific prerelease:
 dotnet tool update --global codex-github-router --version 0.1.0-alpha
 ```
 
-After updating, run `cgr init --force` if the hooks entry format changed and `cgr doctor` to confirm everything is healthy. Repository-scoped state (autonomous markers, work claims, branches, working files) is intentionally left untouched by tool updates.
+After updating, run `cgr init --force` to refresh the generated configuration and hook entry (requires valid hooks JSON — see the note above), then `cgr doctor` to confirm everything is healthy. Repository-scoped state (autonomous markers, work claims, branches, working files) is intentionally left untouched by tool updates.
 
 ## Uninstall
 
@@ -144,8 +146,8 @@ Running `cgr hook uninstall` again after no CGR hook remains is safe: it reports
 | Global workflow configuration | `~/.codex-github-router/workflow.json` |
 | Codex hooks file | `~/.codex/hooks.json` |
 | Repository override | `<repo>/.codex-github-router/workflow.json` |
-| Autonomous marker | `<repo>/.git/codex-github-router.auto` |
-| Active work claim | `<repo>/.git/codex-github-router.work.json` |
-| Hook diagnostics | `<repo>/.git/codex-github-router.diagnostics/` |
+| Autonomous marker | `<git-common>/codex-github-router.auto` |
+| Active work claim | `<git-common>/codex-github-router.work.json` |
+| Hook diagnostics | `<git-common>/codex-github-router.diagnostics/` |
 
-Paths resolve from the user profile; on Windows the `.codex` and `.codex-github-router` directories live under `%USERPROFILE%`, on Unix under `$HOME`. The repository-scoped files live in the **Git common directory** (`git rev-parse --git-common-dir`), which is shared by all worktrees.
+Paths resolve from the user profile; on Windows the `.codex` and `.codex-github-router` directories live under `%USERPROFILE%`, on Unix under `$HOME`. `<git-common>` is the repository's **Git common directory** (`git rev-parse --git-common-dir`), which is shared by all worktrees; for a plain checkout it is the `.git` directory.

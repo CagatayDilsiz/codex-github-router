@@ -187,21 +187,50 @@ public static class WorkflowConfigurationService
     }
 
     public static async Task WriteDefaultAsync(string path, CancellationToken cancellationToken = default)
+        => await WriteDefaultAsync(path, overwrite: false, cancellationToken);
+
+    public static async Task WriteDefaultAsync(string path, bool overwrite, CancellationToken cancellationToken = default)
     {
         var directory = Path.GetDirectoryName(path)
         ?? throw new InvalidOperationException("Configuration directory could not be resolved.");
 
-        Directory.CreateDirectory(directory);       
+        Directory.CreateDirectory(directory);
 
+        if (!overwrite)
+        {
+            try
+            {
+                await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+
+                await JsonSerializer.SerializeAsync(stream, new RouterConfiguration(), WorkflowJson.Options, cancellationToken);
+            }
+            catch (IOException) when (File.Exists(path))
+            {
+                // Another process created it first. Ignore the exception and proceed to load the existing configuration.
+            }
+
+            return;
+        }
+
+        var temporaryPath = path + ".tmp";
         try
         {
-            await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await JsonSerializer.SerializeAsync(stream, new RouterConfiguration(), WorkflowJson.Options, cancellationToken);
+            }
 
-            await JsonSerializer.SerializeAsync(stream, new RouterConfiguration(), WorkflowJson.Options, cancellationToken);
+            _ = JsonSerializer.Deserialize<RouterConfiguration>(await File.ReadAllTextAsync(temporaryPath, cancellationToken), WorkflowJson.Options)
+                ?? throw new InvalidOperationException("Generated workflow configuration is invalid.");
+
+            File.Move(temporaryPath, path, overwrite: true);
         }
-        catch (IOException) when (File.Exists(path))
+        finally
         {
-            // Another process created it first. Ignore the exception and proceed to load the existing configuration.
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
         }
     }
 
