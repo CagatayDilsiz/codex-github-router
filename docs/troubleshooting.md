@@ -40,7 +40,14 @@ cgr config path
 **Recovery (mutation):**
 
 - File missing: run `cgr init` to create the hooks file and register the hook.
-- File present but malformed: repair it manually or restore a backup (`hooks.json.bak`) **first**. `cgr init --force` does not recover a malformed hooks file — it fails during parsing and preserves your file untouched. Once the JSON is valid, `cgr init --force` refreshes the CGR entry; unrelated hooks are preserved and a backup is written before an update. Then restart Codex.
+- File present but malformed: repair it manually or restore a backup (`hooks.json.bak`) **first**. No `cgr init` variant recovers a malformed hooks file — both fail during parsing and preserve your file untouched. Once the JSON is valid, refresh only the hook registration with:
+
+  ```bash
+  cgr hook uninstall
+  cgr init
+  ```
+
+  Unrelated hooks are preserved and a backup is written before an update. Only add `--force` to `init` if you also want to reset your global workflow configuration to built-in defaults (destructive, no backup). Then restart Codex.
 
 > The missing hooks file itself reports `WARN`, but the derived `CGR Hook Entry` check is `FAIL`: without a registered hook the router cannot run through Codex, and warnings-only reports exit `0`. Only fixing the entry moves the report to a clean exit.
 
@@ -50,8 +57,9 @@ cgr config path
 
 **Recovery (mutation):**
 
-- No entry: `cgr init` (or `cgr init --force` if the entry exists but is stale).
-- Duplicate entries: remove the duplicates from `~/.codex/hooks.json` or run `cgr init --force`, which replaces the CGR command blocks. Unrelated hook groups and handlers are preserved.
+- No entry: run `cgr hook uninstall` followed by `cgr init` to re-register while keeping your global workflow configuration.
+- Duplicate entries: remove the duplicates from `~/.codex/hooks.json`, or run `cgr hook uninstall` followed by `cgr init`, which replaces the CGR command blocks. Unrelated hook groups and handlers are preserved.
+- Only use `cgr init --force` when you additionally want to reset your global workflow configuration to built-in defaults — it discards customizations without a backup.
 - Verify: `cgr doctor` should report exactly one entry.
 
 ### Missing Git / GitHub CLI, or unauthenticated `gh`
@@ -82,7 +90,7 @@ cgr config validate             # validation error message, exit 1 on invalid
 
 **Recovery (mutation):** fix the reported file:
 
-- global: `~/.codex-github-router/workflow.json`; `cgr init` rewrites the default, or edit the file directly;
+- global: `~/.codex-github-router/workflow.json` — edit the file directly; plain `cgr init` preserves it, while `cgr init --force` resets it to the built-in defaults (destructive, no backup);
 - repository override: `<repo>/.codex-github-router/workflow.json` — check for invalid JSON, an unsupported `version`, explicit `null` values, or invalid effective policy values.
 
 Remember the merge rules: arrays are never concatenated, scalars and arrays replace inherited values, and explicit `null` is rejected. Invalid configuration fails before claim acquisition, GitHub discovery, label provisioning, or workflow transitions.

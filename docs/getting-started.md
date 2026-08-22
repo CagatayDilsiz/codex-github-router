@@ -42,13 +42,22 @@ cgr init
 - writes the default workflow configuration to `~/.codex-github-router/workflow.json`, and
 - adds a single `cgr hook` command to the user-level Codex hooks file at `~/.codex/hooks.json`.
 
-Existing hooks are preserved. Plain `cgr init` never overwrites an existing global workflow configuration. If the hooks file already contains a `cgr hook` entry, `cgr init` reports that and does nothing; use `--force` to rewrite the generated global workflow configuration with the current built-in defaults and refresh the hook entry:
+Existing hooks are preserved. Plain `cgr init` never overwrites an existing global workflow configuration. If the hooks file already contains a `cgr hook` entry, `cgr init` reports that and does nothing.
+
+To refresh only the hook registration while **keeping** your global workflow configuration, uninstall the hook entry first and re-run init:
+
+```bash
+cgr hook uninstall
+cgr init
+```
+
+To explicitly reset the generated global workflow configuration back to the current built-in defaults (discarding any customizations) and refresh the hook entry, run:
 
 ```bash
 cgr init --force
 ```
 
-> `cgr init --force` requires valid JSON in `~/.codex/hooks.json`. A malformed hooks file fails during parsing and is left untouched; repair it or restore a backup (`hooks.json.bak`) first, then run `--force`.
+> `cgr init --force` is destructive to your global workflow configuration: it rewrites `~/.codex-github-router/workflow.json` with built-in defaults and does not create a backup of the previous file. Use it only when you want that reset — not as a routine update step. It also requires valid JSON in `~/.codex/hooks.json`; a malformed hooks file fails during parsing and is left untouched, so repair it or restore a backup (`hooks.json.bak`) before running it.
 
 Codex may need to be restarted after its hooks configuration changes.
 
@@ -110,7 +119,16 @@ Update the tool to a specific prerelease:
 dotnet tool update --global codex-github-router --version 0.1.0-alpha
 ```
 
-After updating, run `cgr init --force` to refresh the generated configuration and hook entry (requires valid hooks JSON — see the note above), then `cgr doctor` to confirm everything is healthy. Repository-scoped state (autonomous markers, work claims, branches, working files) is intentionally left untouched by tool updates.
+After updating, refresh only the hook registration — this preserves your global workflow configuration:
+
+```bash
+cgr hook uninstall
+cgr init
+```
+
+Then run `cgr doctor` to confirm everything is healthy. Repository-scoped state (autonomous markers, work claims, branches, working files) is intentionally left untouched by tool updates.
+
+Do **not** run `cgr init --force` as a routine update step: it resets `~/.codex-github-router/workflow.json` to the built-in defaults and discards customizations (see [Five-minute quick start](#five-minute-quick-start)). Only use it when you explicitly want that reset.
 
 ## Uninstall
 
