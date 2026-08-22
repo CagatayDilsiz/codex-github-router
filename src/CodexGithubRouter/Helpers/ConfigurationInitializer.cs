@@ -19,7 +19,10 @@ public static class ConfigurationInitializer
             return 1;
         }
 
-        await SetupDefaultConfigurationAsync(force, paths, cancellationToken);
+        if (await SetupDefaultConfigurationAsync(force, paths, cancellationToken) != 0)
+        {
+            return 1;
+        }
 
         return 0;
     }
@@ -80,19 +83,31 @@ public static class ConfigurationInitializer
         }
     }
 
-    private static async Task SetupDefaultConfigurationAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
+    private static async Task<int> SetupDefaultConfigurationAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)
     {
         var path = paths.WorkflowFile;
+        var existedBefore = File.Exists(path);
 
-        if (File.Exists(path) && !force)
+        if (existedBefore && !force)
         {
             Console.WriteLine($"Configuration already exists: {path}");
-            return;
+            return 0;
         }
 
-        await WorkflowConfigurationService.WriteDefaultAsync(path, cancellationToken);
+        try
+        {
+            await WorkflowConfigurationService.WriteDefaultAsync(path, overwrite: existedBefore, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            Console.Error.WriteLine($"Error writing the workflow configuration: {exception.Message}");
+            return 1;
+        }
 
-        Console.WriteLine($"Default configuration written: {path}");
+        Console.WriteLine(existedBefore
+            ? $"Workflow configuration rewritten with current defaults: {path}"
+            : $"Default configuration written: {path}");
+        return 0;
     }
 
     private static async Task<int> SetupCodexHooksAsync(bool force, ConfigurationPathSet paths, CancellationToken cancellationToken = default)

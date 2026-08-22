@@ -34,6 +34,39 @@ public sealed class ConfigurationSandboxTests
     }
 
     [Fact]
+    public async Task Init_force_rewrites_an_existing_global_workflow_configuration_to_defaults()
+    {
+        using var sandbox = new TestSandbox();
+        const string stale = """{"version":99}""";
+        Directory.CreateDirectory(Path.GetDirectoryName(sandbox.Paths.WorkflowFile)!);
+        await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, stale);
+
+        Assert.Equal(0, await ConfigurationInitializer.InitAsync(new[] { "--force" }, sandbox.Paths));
+
+        var content = await File.ReadAllTextAsync(sandbox.Paths.WorkflowFile);
+        Assert.NotEqual(stale, content);
+        Assert.DoesNotContain("\"version\": 99", content);
+        var reloaded = await WorkflowConfigurationService.LoadAsync(sandbox.Paths.WorkflowFile);
+        Assert.Equal(1, reloaded.Version);
+        Assert.Contains("codex:gate", reloaded.Policies.RepositoryGate.Labels);
+        Assert.False(File.Exists(sandbox.Paths.WorkflowFile + ".tmp"));
+    }
+
+    [Fact]
+    public async Task Plain_init_preserves_an_existing_global_workflow_configuration()
+    {
+        using var sandbox = new TestSandbox();
+        const string existing = """{"version":99,"states":{"ready":[{"type":"label","values":["project:ready"]}]}}""";
+        Directory.CreateDirectory(Path.GetDirectoryName(sandbox.Paths.WorkflowFile)!);
+        await File.WriteAllTextAsync(sandbox.Paths.WorkflowFile, existing);
+
+        Assert.Equal(0, await ConfigurationInitializer.InitAsync(Array.Empty<string>(), sandbox.Paths));
+
+        Assert.Equal(existing, await File.ReadAllTextAsync(sandbox.Paths.WorkflowFile));
+        Assert.True(File.Exists(sandbox.Paths.CodexHooksFile));
+    }
+
+    [Fact]
     public async Task Invalid_json_and_unsupported_versions_are_reported_without_fallback_creation()
     {
         using var sandbox = new TestSandbox();
