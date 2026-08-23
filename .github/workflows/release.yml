@@ -159,4 +159,5 @@ jobs:
           prerelease_arg=()
           if [ "${{ needs.validate_package.outputs.prerelease }}" = "true" ]; then prerelease_arg=(--prerelease); fi
           gh release create "${{ needs.validate_package.outputs.tag }}" "$RUNNER_TEMP/cgr-nupkg"/* \
+            --repo "${{ github.repository }}" \
             --target "${{ needs.validate_package.outputs.target_sha }}" --title "${{ needs.validate_package.outputs.version }}" --generate-notes "${prerelease_arg[@]}"
