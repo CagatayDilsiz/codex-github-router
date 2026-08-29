@@ -227,7 +227,8 @@ public static class WorkerRoutingService
         RouterConfiguration configuration,
         int scanLimit,
         string? currentModel,
-        Func<int, Task<IReadOnlyList<Issue>>> fetchIssues)
+        Func<int, Task<IReadOnlyList<Issue>>> fetchIssues,
+        AssignmentIdentity? assignmentIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(fetchIssues);
@@ -245,13 +246,13 @@ public static class WorkerRoutingService
                 issues[issue.Number] = issue;
             }
 
-            if (!IsEnabled(configuration))
+            if (!IsEnabled(configuration) && !AssignmentRoutingService.IsEnabled(configuration))
             {
                 break;
             }
 
             var current = issues.Values.ToList();
-            var eligibleCount = FilterIssues(configuration, current, currentModel).EligibleIssues.Count;
+            var eligibleCount = FilterIssues(configuration, current, currentModel, assignmentIdentity).EligibleIssues.Count;
             if (eligibleCount >= scanLimit || window.Count < requestedLimit || window.Count <= previousWindowCount)
             {
                 break;
@@ -262,7 +263,7 @@ public static class WorkerRoutingService
         }
 
         var discovered = issues.Values.ToList();
-        var filter = FilterIssues(configuration, discovered, currentModel);
+        var filter = FilterIssues(configuration, discovered, currentModel, assignmentIdentity);
         return new WorkerCandidateDiscoveryResult(discovered, filter.IneligibleIssues);
     }
 
@@ -358,6 +359,31 @@ public static class WorkerRoutingService
         var message = FormatNoEligibleWorkMessage(currentModel, ineligible);
         return new WorkerIssueFilterResult(eligible, ineligible, issues.Count > 0 && eligible.Count == 0, message);
     }
+
+    public static WorkerIssueFilterResult FilterIssues(RouterConfiguration configuration, IReadOnlyList<Issue> issues, string? currentModel, AssignmentIdentity? assignmentIdentity)
+    {
+        var workerFiltered = FilterIssues(configuration, issues, currentModel);
+        if (!AssignmentRoutingService.IsEnabled(configuration))
+        {
+            return workerFiltered;
+        }
+
+        var assignmentFiltered = AssignmentRoutingService.FilterIssues(configuration, assignmentIdentity, workerFiltered.EligibleIssues);
+        var noEligibleWork = issues.Count > 0 &&
+            assignmentFiltered.EligibleIssues.Count == 0 &&
+            (assignmentFiltered.IneligibleIssues.Count > 0 || workerFiltered.NoEligibleWork);
+        var message = noEligibleWork
+            ? CombineMessages(workerFiltered.Message, assignmentFiltered.Message)
+            : string.Empty;
+        return new WorkerIssueFilterResult(
+            assignmentFiltered.EligibleIssues.ToList(),
+            workerFiltered.IneligibleIssues,
+            noEligibleWork,
+            message);
+    }
+
+    private static string CombineMessages(params string?[] messages) =>
+        string.Join(Environment.NewLine, messages.Where(message => !string.IsNullOrWhiteSpace(message)).Distinct(StringComparer.Ordinal));
 
     public static string FormatNoEligibleWorkMessage(string? currentModel, IReadOnlyList<WorkerEligibility> ineligible)
     {

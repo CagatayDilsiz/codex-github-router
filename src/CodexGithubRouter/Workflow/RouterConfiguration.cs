@@ -109,6 +109,8 @@ public sealed class RouterPolicies
 
     public WorkerRoutingPolicy? WorkerRouting { get; init; }
 
+    public AssignmentRoutingPolicy? AssignmentRouting { get; init; }
+
     public AutonomousActivationPolicy? AutonomousActivation { get; init; }
 
     public DiagnosticsPolicy Diagnostics { get; init; } = new();
@@ -145,4 +147,15 @@ public sealed class WorkerProfileConfiguration
     public List<string> Labels { get; init; } = new();
 
     public List<string> Models { get; init; } = new();
+}
+
+public sealed class AssignmentRoutingPolicy
+{
+    public string Mode { get; init; } = "ignore";
+
+    public string Unassigned { get; init; } = "allow";
+
+    public Dictionary<string, List<string>> Identities { get; init; } = new();
+
+    public string? DefaultIdentity { get; init; }
 }

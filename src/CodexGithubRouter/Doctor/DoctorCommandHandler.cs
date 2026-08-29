@@ -143,6 +143,7 @@ public static class DoctorCommandHandler
         await AddActiveWorkClaimCheckAsync(result, gitCommonDirectory, dependencies, cancellationToken);
         await AddRequiredLabelsCheckAsync(result, repositoryRoot, dependencies, cancellationToken);
         await AddWorkerRoutingCheckAsync(result, model, dependencies, cancellationToken);
+        await AddAssignmentRoutingCheckAsync(result, dependencies, cancellationToken);
     }
 
     private static async Task AddDotNetRuntimeCheckAsync(DoctorResult result, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
@@ -723,6 +724,56 @@ public static class DoctorCommandHandler
         {
             Name = "Worker Routing",
             Status = worker is null ? DoctorCheckStatus.Warning : DoctorCheckStatus.Pass,
+            Detail = detail
+        });
+    }
+
+    private static async Task AddAssignmentRoutingCheckAsync(DoctorResult result, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
+    {
+        RouterConfiguration configuration;
+        try
+        {
+            configuration = await dependencies.LoadEffectiveConfigurationAsync(result.RepositoryRoot!, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = "Assignment Routing",
+                Status = DoctorCheckStatus.Warning,
+                Detail = $"Skipped: {exception.Message}"
+            });
+            return;
+        }
+
+        if (!AssignmentRoutingService.IsEnabled(configuration))
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = "Assignment Routing",
+                Status = DoctorCheckStatus.Pass,
+                Detail = "Disabled; assignment-aware routing is not active."
+            });
+            return;
+        }
+
+        var policy = configuration.Policies!.AssignmentRouting!;
+        var mode = AssignmentRoutingService.GetMode(configuration);
+        var unassigned = AssignmentRoutingService.GetUnassignedMode(configuration);
+        var identityNames = policy.Identities is { Count: > 0 }
+            ? string.Join(", ", policy.Identities.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
+            : "none";
+        var detail = $"Mode: '{mode}'. Unassigned policy: '{unassigned}'. Configured identities: {identityNames}. Default identity: '{policy.DefaultIdentity ?? "<none>"}'.";
+
+        if (AssignmentRoutingService.RequiresLocalIdentity(configuration) && string.IsNullOrWhiteSpace(policy.DefaultIdentity) && policy.Identities is not { Count: > 0 })
+        {
+            detail += " No default identity is configured; resolution will rely on the authenticated GitHub account.";
+        }
+
+        result.Checks.Add(new DoctorCheck
+        {
+            Name = "Assignment Routing",
+            Status = DoctorCheckStatus.Pass,
             Detail = detail
         });
     }

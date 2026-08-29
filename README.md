@@ -58,7 +58,7 @@ cgr doctor
 
 ## Troubleshooting
 
-**Start with `cgr doctor`.** It is strictly read-only and reports independent `PASS` / `WARN` / `FAIL` checks across the environment (version, .NET runtime, Git, GitHub CLI, hooks, global configuration) and the repository (override, effective configuration, autonomous mode, work claim, labels, worker routing). Exit codes: `0` for all-pass or warnings-only, `1` when any required setup fails, `2` for usage errors.
+**Start with `cgr doctor`.** It is strictly read-only and reports independent `PASS` / `WARN` / `FAIL` checks across the environment (version, .NET runtime, Git, GitHub CLI, hooks, global configuration) and the repository (override, effective configuration, autonomous mode, work claim, labels, worker routing, assignment routing). Exit codes: `0` for all-pass or warnings-only, `1` when any required setup fails, `2` for usage errors.
 
 ```bash
 cgr doctor
@@ -78,7 +78,7 @@ See [docs/troubleshooting.md](docs/troubleshooting.md) for step-by-step recovery
    - otherwise the next ready issue is claimed and started.
 4. The hook returns additional context to Codex (or a `block` decision with a reason), and writes a diagnostic record for troubleshooting.
 
-Workflow and pull-request labels, worker routing, repository gates, and diagnostics are all configurable. See [docs/configuration.md](docs/configuration.md) and [docs/scenarios.md](docs/scenarios.md).
+Workflow and pull-request labels, worker routing, assignee-aware routing, repository gates, and diagnostics are all configurable. See [docs/configuration.md](docs/configuration.md) and [docs/scenarios.md](docs/scenarios.md).
 
 ## Documentation
 

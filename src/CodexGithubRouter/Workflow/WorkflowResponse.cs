@@ -11,4 +11,6 @@ public class WorkflowResponse
     public bool NoEligibleWork { get; init; }
 
     public IReadOnlyList<WorkerEligibility> IneligibleWorkerIssues { get; init; } = Array.Empty<WorkerEligibility>();
+
+    public IReadOnlyList<AssignmentEligibility> IneligibleAssignmentIssues { get; init; } = Array.Empty<AssignmentEligibility>();
 }

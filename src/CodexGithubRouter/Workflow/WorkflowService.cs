@@ -262,15 +262,13 @@ public static class WorkflowService
         };
     }
 
-    public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
+    public static async Task<WorkflowResponse> CheckInProgressIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null, AssignmentIdentity? assignmentIdentity = null)
     {
         var inProgressFilters = IssueFilterResolver.ByState(configuration, WorkflowState.InProgress, scanLimit);
-        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, inProgressFilters, true, scanLimit, currentModel);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, inProgressFilters, true, scanLimit, currentModel, assignmentIdentity);
         var inProgressIssues = discovery.Issues;
 
-        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
-            ? WorkerRoutingService.FilterIssues(configuration, inProgressIssues, currentModel).EligibleIssues
-            : inProgressIssues;
+        var conflictIssues = FilterEligibleIssues(configuration, inProgressIssues, assignmentIdentity, currentModel);
         var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
@@ -279,11 +277,12 @@ public static class WorkflowService
             inProgressIssues,
             pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
             currentModel,
-            pullRequestNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, pullRequestNumber, CancellationToken.None));
+            pullRequestNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, pullRequestNumber, CancellationToken.None),
+            assignmentIdentity);
         return response;
     }
 
-    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null, Func<int, Task<Issue>>? getIssue = null)
+    public static async Task<WorkflowResponse> EvaluateInProgressIssuesAsync(RouterConfiguration configuration, IReadOnlyList<Issue> inProgressIssues, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null, Func<int, Task<Issue>>? getIssue = null, AssignmentIdentity? assignmentIdentity = null)
     {
         if (inProgressIssues.Count == 0)
         {
@@ -320,12 +319,12 @@ public static class WorkflowService
             });
         }
 
-        var filtered = WorkerRoutingService.FilterCodingTasks(configuration, inProgressIssues, new WorkflowResponse
+        var filtered = AssignmentRoutingService.FilterCodingTasks(configuration, assignmentIdentity, inProgressIssues, WorkerRoutingService.FilterCodingTasks(configuration, inProgressIssues, new WorkflowResponse
         {
             IsSuccessful = true,
             Message = "In-progress issue evaluation completed.",
             Tasks = tasks
-        }, currentModel);
+        }, currentModel));
 
         var codingIssueNumbers = filtered.Tasks
             .Where(task => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue)
@@ -344,7 +343,7 @@ public static class WorkflowService
         return filtered;
     }
 
-    public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
+    public static async Task<WorkflowResponse> CheckNewIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null, AssignmentIdentity? assignmentIdentity = null)
     {        
         var openIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, scanLimit);
 
@@ -357,11 +356,9 @@ public static class WorkflowService
             };
         }
 
-        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, openIssueFilters, false, scanLimit, currentModel);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, openIssueFilters, false, scanLimit, currentModel, assignmentIdentity);
         var openIssues = discovery.Issues;
-        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
-            ? WorkerRoutingService.FilterIssues(configuration, openIssues, currentModel).EligibleIssues
-            : openIssues;
+        var conflictIssues = FilterEligibleIssues(configuration, openIssues, assignmentIdentity, currentModel);
         var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
@@ -373,12 +370,12 @@ public static class WorkflowService
                 IssueNumber = issue.Number
             }).ToList();
 
-            return WorkerRoutingService.FilterCodingTasks(configuration, openIssues, new WorkflowResponse
+            return AssignmentRoutingService.FilterCodingTasks(configuration, assignmentIdentity, openIssues, WorkerRoutingService.FilterCodingTasks(configuration, openIssues, new WorkflowResponse
             {
                 Tasks = workflowTasks,
                 IsSuccessful = true,
                 Message = "New issues found."
-            }, currentModel);
+            }, currentModel));
         }
         else
         {
@@ -549,7 +546,7 @@ public static class WorkflowService
         Status = new WorkflowTaskStatus { Message = message }
     };
 
-    public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null)
+    public static async Task<WorkflowResponse> CheckCompletedIssuesAsync(RouterConfiguration configuration, string workingDirectory, int scanLimit = 30, string? currentModel = null, AssignmentIdentity? assignmentIdentity = null)
     {
         
         var completedIssueFilters = IssueFilterResolver.ByState(configuration, WorkflowState.Completed, scanLimit);
@@ -563,12 +560,10 @@ public static class WorkflowService
             };
         }       
 
-        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, completedIssueFilters, true, scanLimit, currentModel);
+        var discovery = await DiscoverIssuesAsync(configuration, workingDirectory, completedIssueFilters, true, scanLimit, currentModel, assignmentIdentity);
         var completedIssues = discovery.Issues;
 
-        var conflictIssues = WorkerRoutingService.IsEnabled(configuration)
-            ? WorkerRoutingService.FilterIssues(configuration, completedIssues, currentModel).EligibleIssues
-            : completedIssues;
+        var conflictIssues = FilterEligibleIssues(configuration, completedIssues, assignmentIdentity, currentModel);
         var conflict = FindIssueConflict(conflictIssues, configuration);
         if (conflict is not null) return conflict;
 
@@ -579,7 +574,7 @@ public static class WorkflowService
                 completedIssues,
                 pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
                 issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
-            return WorkerRoutingService.FilterCodingTasks(configuration, completedIssues, response, currentModel);
+            return AssignmentRoutingService.FilterCodingTasks(configuration, assignmentIdentity, completedIssues, WorkerRoutingService.FilterCodingTasks(configuration, completedIssues, response, currentModel));
         }
         else
         {
@@ -867,7 +862,8 @@ public static class WorkflowService
         IssueFilters filters,
         bool addLinkedPRToSelection,
         int scanLimit,
-        string? currentModel) =>
+        string? currentModel,
+        AssignmentIdentity? assignmentIdentity) =>
         WorkerRoutingService.DiscoverCandidatesAsync(
             configuration,
             scanLimit,
@@ -883,7 +879,19 @@ public static class WorkflowService
                     SortDirection = filters.SortDirection
                 },
                 addLinkedPRToSelection,
-                CancellationToken.None));
+                CancellationToken.None),
+            assignmentIdentity);
+
+    private static List<Issue> FilterEligibleIssues(RouterConfiguration configuration, IReadOnlyList<Issue> issues, AssignmentIdentity? assignmentIdentity, string? currentModel)
+    {
+        var workerEligible = WorkerRoutingService.IsEnabled(configuration)
+            ? WorkerRoutingService.FilterIssues(configuration, issues, currentModel).EligibleIssues.ToList()
+            : issues.ToList();
+
+        return AssignmentRoutingService.IsEnabled(configuration)
+            ? AssignmentRoutingService.FilterIssues(configuration, assignmentIdentity, workerEligible).EligibleIssues.ToList()
+            : workerEligible;
+    }
 
     private static async Task<PullRequestWorkerConflict?> FindPullRequestWorkerConflictAsync(
         RouterConfiguration configuration,

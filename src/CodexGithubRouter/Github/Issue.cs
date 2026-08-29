@@ -26,6 +26,9 @@ public class Issue
 
     [JsonPropertyName("closedByPullRequestsReferences")]
     public List<ClosingIssueReference> ClosingPullRequestsReferences { get; set; } = new List<ClosingIssueReference>();
+
+    [JsonPropertyName("assignees")]
+    public List<GithubUser> Assignees { get; set; } = new List<GithubUser>();
 }
 
 public sealed class GithubLabel
