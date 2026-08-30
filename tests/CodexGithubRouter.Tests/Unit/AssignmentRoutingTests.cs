@@ -383,76 +383,119 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
-    public async Task Candidate_discovery_expands_past_lower_ranked_work_to_find_preferred_work()
+    public async Task Preferred_candidates_are_found_directly_without_relying_on_the_generic_window()
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
-        var calls = new List<int>();
+        var genericCalls = 0;
         var result = await WorkerRoutingService.DiscoverCandidatesAsync(
             configuration,
             1,
             null,
             async limit =>
             {
-                calls.Add(limit);
+                genericCalls++;
                 await Task.Yield();
-                return limit == 1
-                    ? new[] { IssueWithAssignee(1, "bob") }
-                    : new[] { IssueWithAssignee(1, "bob"), IssueWithAssignee(2, "alice") };
+                return await PreferredCandidatesAsync(limit, new[] { IssueWithAssignee(10, "bob") }, new[] { IssueWithAssignee(31, "alice") });
             },
-            identity);
+            identity,
+            async limit => await PreferredCandidatesAsync(limit, new[] { IssueWithAssignee(31, "alice") }, Array.Empty<Issue>()));
 
-        Assert.Equal(new[] { 1, 2 }, calls);
-        Assert.Contains(result.Issues, issue => issue.Number == 2);
+        Assert.Equal(0, genericCalls);
+        Assert.Contains(result.Issues, issue => issue.Number == 31);
         var filtered = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues);
-        Assert.Contains(filtered.EligibleIssues, issue => issue.Number == 2);
+        Assert.Contains(filtered.EligibleIssues, issue => issue.Number == 31);
     }
 
     [Fact]
-    public async Task Candidate_discovery_stops_immediately_when_preferred_work_is_found()
+    public async Task Candidate_discovery_falls_back_to_the_generic_scan_when_no_preferred_candidate_exists()
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
-        var calls = new List<int>();
         var result = await WorkerRoutingService.DiscoverCandidatesAsync(
             configuration,
             1,
             null,
             async limit =>
             {
-                calls.Add(limit);
                 await Task.Yield();
-                return new[] { IssueWithAssignee(1, "alice") };
+                return new[] { IssueWithAssignee(1, "bob") };
             },
-            identity);
+            identity,
+            async limit =>
+            {
+                await Task.Yield();
+                return Array.Empty<Issue>();
+            });
 
-        Assert.Equal(new[] { 1 }, calls);
-        Assert.Equal(1, result.Issues.Single().Number);
+        Assert.Contains(result.Issues, issue => issue.Number == 1);
     }
 
     [Fact]
-    public async Task Candidate_discovery_prefer_scan_is_bounded_by_the_maximum_scan_limit()
+    public async Task Preferred_candidates_must_satisfy_worker_routing_before_they_are_used()
     {
-        var configuration = AssignmentConfiguration("prefer", "allow");
+        var configuration = WorkerAndAssignmentConfiguration(assignmentMode: "prefer", unassigned: "allow");
         var identity = Identity("alice");
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            1,
+            "terra-model",
+            async limit =>
+            {
+                await Task.Yield();
+                return new[] { WorkerIssue(2, "codex:worker:terra", "bob") };
+            },
+            identity,
+            async limit =>
+            {
+                await Task.Yield();
+                return new[] { WorkerIssue(1, "codex:worker:luna", "alice") };
+            });
+
+        Assert.Contains(result.Issues, issue => issue.Number == 2);
+    }
+
+    [Fact]
+    public async Task Candidate_discovery_generic_scan_is_bounded_by_the_maximum_scan_limit()
+    {
+        var configuration = new RouterConfiguration
+        {
+            Policies = new RouterPolicies
+            {
+                WorkerRouting = new WorkerRoutingPolicy
+                {
+                    DefaultWorker = "luna",
+                    Workers = new Dictionary<string, WorkerProfileConfiguration>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["luna"] = new() { Labels = new() { "codex:worker:luna" }, Models = new() { "luna-model" } },
+                        ["terra"] = new() { Labels = new() { "codex:worker:terra" }, Models = new() { "terra-model" } }
+                    }
+                }
+            }
+        };
         var calls = new List<int>();
         var result = await WorkerRoutingService.DiscoverCandidatesAsync(
             configuration,
             1,
-            null,
+            "terra-model",
             async limit =>
             {
                 calls.Add(limit);
                 await Task.Yield();
                 return Enumerable.Range(1, limit)
-                    .Select(number => IssueWithAssignee(number, "bob"))
+                    .Select(number => WorkerIssue(number, "codex:worker:luna", "bob"))
                     .ToList();
-            },
-            identity);
+            });
 
         Assert.Equal(WorkerRoutingService.MaxDiscoveryScanLimit, calls.Last());
-        var eligible = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues);
-        Assert.DoesNotContain(eligible.EligibleIssues, issue => AssignmentRoutingService.Evaluate(configuration, identity, issue).SelectionRank == 0);
+        var filtered = WorkerRoutingService.FilterIssues(configuration, result.Issues, "terra-model");
+        Assert.DoesNotContain(filtered.EligibleIssues, issue => issue.Number > 0);
+    }
+
+    private static async Task<IReadOnlyList<Issue>> PreferredCandidatesAsync(int limit, IEnumerable<Issue> preferred, IEnumerable<Issue> fallback)
+    {
+        await Task.Yield();
+        return preferred.Concat(fallback).Take(limit).ToList();
     }
 
     [Fact]
@@ -498,6 +541,55 @@ public sealed class AssignmentRoutingTests
         Assert.Empty(filtered.Tasks);
         Assert.True(filtered.NoEligibleWork);
         Assert.Single(filtered.IneligibleAssignmentIssues);
+    }
+
+    [Fact]
+    public void Filter_coding_tasks_removes_blocker_states_for_issues_of_other_developers()
+    {
+        var configuration = AssignmentConfiguration("require", "exclude");
+        var identity = Identity("alice");
+        var response = new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new() { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, PullRequestNumber = 11, Status = new WorkflowTaskStatus { Message = "closed without merge" } },
+                new() { Type = WorkflowItemType.UnknownPullRequestState, IssueNumber = 2, PullRequestNumber = 22, Status = new WorkflowTaskStatus { Message = "unknown state" } },
+                new() { Type = WorkflowItemType.CloseIssue, IssueNumber = 3 },
+                new() { Type = WorkflowItemType.RecoverCompletedIssue, IssueNumber = 4 }
+            }
+        };
+        var issues = new[] { IssueWithAssignee(1, "bob"), IssueWithAssignee(2, "bob"), IssueWithAssignee(3, "alice"), IssueWithAssignee(4, "alice") };
+
+        var filtered = AssignmentRoutingService.FilterCodingTasks(configuration, identity, issues, response);
+
+        Assert.DoesNotContain(filtered.Tasks, task => task.Type is WorkflowItemType.ClosedWithoutMerge or WorkflowItemType.UnknownPullRequestState);
+        Assert.Contains(filtered.Tasks, task => task.Type == WorkflowItemType.CloseIssue);
+        Assert.Contains(filtered.Tasks, task => task.Type == WorkflowItemType.RecoverCompletedIssue);
+        Assert.Equal(2, filtered.IneligibleAssignmentIssues.Count);
+        Assert.False(filtered.NoEligibleWork);
+    }
+
+    [Fact]
+    public void Filter_coding_tasks_blocks_with_assignment_message_when_only_another_developers_blocker_state_exists()
+    {
+        var configuration = AssignmentConfiguration("require", "exclude");
+        var identity = Identity("alice");
+        var response = new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new() { Type = WorkflowItemType.UnknownPullRequestState, IssueNumber = 1, PullRequestNumber = 11, Status = new WorkflowTaskStatus { Message = "unknown state" } }
+            }
+        };
+
+        var filtered = AssignmentRoutingService.FilterCodingTasks(configuration, identity, new[] { IssueWithAssignee(1, "bob") }, response);
+
+        Assert.Empty(filtered.Tasks);
+        Assert.True(filtered.NoEligibleWork);
+        Assert.Single(filtered.IneligibleAssignmentIssues);
+        Assert.Contains("requires the current identity", filtered.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

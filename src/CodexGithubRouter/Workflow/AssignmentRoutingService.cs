@@ -261,33 +261,16 @@ public static class AssignmentRoutingService
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    public static bool IsPreferredScanComplete(RouterConfiguration configuration, AssignmentIdentity? identity, IReadOnlyList<Issue> issues, int requiredPreferredCount)
-    {
-        if (!IsEnabled(configuration) || identity is null || !string.Equals(GetMode(configuration), ModePrefer, StringComparison.Ordinal))
-        {
-            return true;
-        }
+    public static bool IsPreferMode(RouterConfiguration configuration) =>
+        IsEnabled(configuration) && string.Equals(GetMode(configuration), ModePrefer, StringComparison.Ordinal);
 
-        var preferredCount = 0;
-        foreach (var issue in issues)
-        {
-            var eligibility = Evaluate(configuration, identity, issue);
-            if (eligibility.IsEligible && eligibility.SelectionRank == 0)
-            {
-                preferredCount++;
-                if (preferredCount >= requiredPreferredCount)
-                {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
+    public static bool IsPreferredCandidate(RouterConfiguration configuration, AssignmentIdentity? identity, Issue issue) =>
+        Evaluate(configuration, identity, issue).SelectionRank == 0;
 
     private static bool IsIssueDerivedDeveloperWork(WorkflowItemType type) =>
         type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue
-            or WorkflowItemType.RecoverCompletedIssue or WorkflowItemType.RecoverCurrentPullRequest or WorkflowItemType.LinkPullRequestsToIssues;
+            or WorkflowItemType.RecoverCompletedIssue or WorkflowItemType.RecoverCurrentPullRequest or WorkflowItemType.LinkPullRequestsToIssues
+            or WorkflowItemType.ClosedWithoutMerge or WorkflowItemType.UnknownPullRequestState;
 
     private static bool IsAllowedMode(string mode)
     {

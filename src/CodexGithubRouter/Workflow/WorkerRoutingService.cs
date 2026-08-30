@@ -230,11 +230,26 @@ public static class WorkerRoutingService
         int scanLimit,
         string? currentModel,
         Func<int, Task<IReadOnlyList<Issue>>> fetchIssues,
-        AssignmentIdentity? assignmentIdentity = null)
+        AssignmentIdentity? assignmentIdentity = null,
+        Func<int, Task<IReadOnlyList<Issue>>>? fetchPreferredIssues = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(fetchIssues);
         if (scanLimit <= 0) throw new ArgumentOutOfRangeException(nameof(scanLimit));
+
+        if (fetchPreferredIssues is not null && IsPreferredPhaseActive(configuration, assignmentIdentity))
+        {
+            var preferredIssues = (await fetchPreferredIssues(scanLimit)).ToList();
+            if (preferredIssues.Count > 0)
+            {
+                var preferredFilter = FilterIssues(configuration, preferredIssues, currentModel, assignmentIdentity);
+                var hasPreferredCandidate = preferredFilter.EligibleIssues.Any(issue => AssignmentRoutingService.IsPreferredCandidate(configuration, assignmentIdentity, issue));
+                if (hasPreferredCandidate)
+                {
+                    return new WorkerCandidateDiscoveryResult(preferredIssues, preferredFilter.IneligibleIssues);
+                }
+            }
+        }
 
         var requestedLimit = scanLimit;
         var issues = new Dictionary<int, Issue>();
@@ -255,9 +270,8 @@ public static class WorkerRoutingService
 
             var current = issues.Values.ToList();
             var eligibleCount = FilterIssues(configuration, current, currentModel, assignmentIdentity).EligibleIssues.Count;
-            var preferredScanComplete = AssignmentRoutingService.IsPreferredScanComplete(configuration, assignmentIdentity, current, scanLimit);
             var scanExhausted = window.Count < requestedLimit || window.Count <= previousWindowCount || requestedLimit >= MaxDiscoveryScanLimit;
-            if ((eligibleCount >= scanLimit && preferredScanComplete) || scanExhausted)
+            if (eligibleCount >= scanLimit || scanExhausted)
             {
                 break;
             }
@@ -270,6 +284,9 @@ public static class WorkerRoutingService
         var filter = FilterIssues(configuration, discovered, currentModel, assignmentIdentity);
         return new WorkerCandidateDiscoveryResult(discovered, filter.IneligibleIssues);
     }
+
+    private static bool IsPreferredPhaseActive(RouterConfiguration configuration, AssignmentIdentity? assignmentIdentity) =>
+        AssignmentRoutingService.IsPreferMode(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 };
 
     public static WorkflowResponse FilterCodingTasks(
         RouterConfiguration configuration,

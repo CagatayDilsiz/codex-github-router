@@ -863,8 +863,42 @@ public static class WorkflowService
         bool addLinkedPRToSelection,
         int scanLimit,
         string? currentModel,
-        AssignmentIdentity? assignmentIdentity) =>
-        WorkerRoutingService.DiscoverCandidatesAsync(
+        AssignmentIdentity? assignmentIdentity)
+    {
+        async Task<IReadOnlyList<Issue>> FetchPreferredIssuesAsync(int requestedLimit)
+        {
+            var byNumber = new Dictionary<int, Issue>();
+            foreach (var username in assignmentIdentity!.GitHubUsernames)
+            {
+                var preferredFilters = new IssueFilters
+                {
+                    Labels = filters.Labels.ToList(),
+                    SearchTerms = filters.SearchTerms.Append($"assignee:{username}").ToList(),
+                    Limit = requestedLimit,
+                    SortBy = filters.SortBy,
+                    SortDirection = filters.SortDirection
+                };
+                var issues = await GitHubCliService.GetIssuesAsync(
+                    workingDirectory,
+                    preferredFilters,
+                    addLinkedPRToSelection,
+                    CancellationToken.None);
+                foreach (var issue in issues)
+                {
+                    byNumber[issue.Number] = issue;
+                }
+            }
+
+            return byNumber.Values.OrderBy(issue => issue.Number).ToList();
+        }
+
+        Func<int, Task<IReadOnlyList<Issue>>>? fetchPreferredIssues = null;
+        if (AssignmentRoutingService.IsPreferMode(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 })
+        {
+            fetchPreferredIssues = FetchPreferredIssuesAsync;
+        }
+
+        return WorkerRoutingService.DiscoverCandidatesAsync(
             configuration,
             scanLimit,
             currentModel,
@@ -880,7 +914,9 @@ public static class WorkflowService
                 },
                 addLinkedPRToSelection,
                 CancellationToken.None),
-            assignmentIdentity);
+            assignmentIdentity,
+            fetchPreferredIssues);
+    }
 
     private static List<Issue> FilterEligibleIssues(RouterConfiguration configuration, IReadOnlyList<Issue> issues, AssignmentIdentity? assignmentIdentity, string? currentModel)
     {

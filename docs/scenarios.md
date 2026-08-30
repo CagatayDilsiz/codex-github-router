@@ -119,7 +119,8 @@ The repository `workflow.json` never defines the identity.
 Behavior highlights:
 
 - With `require`, the router only claims issues where one of your Git-config GitHub usernames is an assignee; `unassigned: exclude` additionally skips unassigned issues.
-- With `prefer`, your assigned issues are selected first, unassigned second, and other developers' issues last — without blocking.
+- With `prefer`, your assigned issues are selected first, unassigned second, and other developers' issues last — without blocking. Assigned-to-me candidates are queried directly, so preference is deterministic rather than dependent on a broad scan window.
+- Assignment applies to all issue-derived developer work, including the `ClosedWithoutMerge` and `UnknownPullRequestState` blocker states: another developer's broken issue cannot block a strict-routing session.
 - When the Git-config key is absent, the identity falls back to the authenticated GitHub account (`gh api user .login`). If the identity is unresolved in `prefer`/`require` mode, the hook blocks with a diagnostic instead of accidentally routing someone else's work.
 - Assignment routing composes with worker routing: an issue must be eligible under **both** policies to be routed.
 - Repository gates and continuation of your active work claim ignore assignment state (assignment is opt-in per selector).
