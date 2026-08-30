@@ -154,8 +154,4 @@ public sealed class AssignmentRoutingPolicy
     public string Mode { get; init; } = "ignore";
 
     public string Unassigned { get; init; } = "allow";
-
-    public Dictionary<string, List<string>> Identities { get; init; } = new();
-
-    public string? DefaultIdentity { get; init; }
 }

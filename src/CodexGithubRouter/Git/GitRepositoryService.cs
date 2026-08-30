@@ -54,4 +54,20 @@ public static class GitRepositoryService
 
         return Path.GetFullPath(Path.Combine(workingDirectory, output));
     }
+
+    public static async Task<string?> GetConfigValueAsync(string workingDirectory, string key, CancellationToken cancellationToken = default) =>
+        await GetConfigValueAsync(workingDirectory, key, environment: null, cancellationToken);
+
+    public static async Task<string?> GetConfigValueAsync(string workingDirectory, string key, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(workingDirectory, "git", new[] { "config", "--get", key }, environment, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var output = process.Output?.Trim();
+        return string.IsNullOrWhiteSpace(output) ? null : output;
+    }
 }

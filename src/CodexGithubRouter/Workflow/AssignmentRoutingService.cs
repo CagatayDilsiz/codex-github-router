@@ -10,6 +10,8 @@ public static class AssignmentRoutingService
     public const string UnassignedAllow = "allow";
     public const string UnassignedExclude = "exclude";
 
+    public const string LocalIdentityConfigKey = "codex-github-router.identity";
+
     public static bool IsEnabled(RouterConfiguration configuration) =>
         configuration.Policies?.AssignmentRouting is not null;
 
@@ -39,116 +41,47 @@ public static class AssignmentRoutingService
         {
             throw new InvalidOperationException("Assignment routing unassigned policy must be one of: allow, exclude.");
         }
-
-        var identityNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (policy.Identities is not null)
-        {
-            foreach (var entry in policy.Identities)
-            {
-                var identityName = entry.Key;
-                if (string.IsNullOrWhiteSpace(identityName))
-                {
-                    throw new InvalidOperationException("Assignment routing identity names must not be empty.");
-                }
-
-                if (!string.Equals(identityName, identityName.Trim(), StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException($"Assignment routing identity '{identityName}' must not have leading or trailing whitespace.");
-                }
-
-                if (!identityNames.Add(identityName))
-                {
-                    throw new InvalidOperationException($"Assignment routing identity '{identityName}' is configured more than once.");
-                }
-
-                var usernames = entry.Value;
-                if (usernames is null || usernames.Count == 0)
-                {
-                    throw new InvalidOperationException($"Assignment routing identity '{identityName}' requires at least one GitHub username.");
-                }
-
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var username in usernames)
-                {
-                    if (string.IsNullOrWhiteSpace(username))
-                    {
-                        throw new InvalidOperationException($"Assignment routing identity '{identityName}' contains an empty GitHub username.");
-                    }
-
-                    if (!string.Equals(username, username.Trim(), StringComparison.Ordinal))
-                    {
-                        throw new InvalidOperationException($"GitHub username '{username}' for assignment routing identity '{identityName}' must not have leading or trailing whitespace.");
-                    }
-
-                    if (!seen.Add(username))
-                    {
-                        throw new InvalidOperationException($"GitHub username '{username}' is configured more than once for assignment routing identity '{identityName}'.");
-                    }
-                }
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(policy.DefaultIdentity))
-        {
-            if (!string.Equals(policy.DefaultIdentity, policy.DefaultIdentity.Trim(), StringComparison.Ordinal))
-            {
-                throw new InvalidOperationException("Assignment routing default identity must not have leading or trailing whitespace.");
-            }
-
-            if (policy.Identities is null || !ContainsIdentity(policy.Identities, policy.DefaultIdentity))
-            {
-                throw new InvalidOperationException($"Assignment routing default identity '{policy.DefaultIdentity}' is not configured.");
-            }
-        }
     }
 
-    public static AssignmentIdentityResolution Resolve(RouterConfiguration configuration, string? authenticatedGitHubLogin)
+    public static AssignmentIdentityResolution Resolve(RouterConfiguration configuration, IReadOnlyList<string>? localGitHubUsernames)
     {
         if (!IsEnabled(configuration) || !RequiresLocalIdentity(configuration))
         {
             return AssignmentIdentityResolution.NotEnabled;
         }
 
-        var policy = configuration.Policies!.AssignmentRouting!;
-
-        if (!string.IsNullOrWhiteSpace(policy.DefaultIdentity))
+        var usernames = (localGitHubUsernames ?? Array.Empty<string>())
+            .Select(username => username.Trim())
+            .Where(username => !string.IsNullOrWhiteSpace(username))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(username => username, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (usernames.Count == 0)
         {
-            var normalizedDefault = policy.DefaultIdentity.Trim();
-            List<string>? usernames = null;
-            foreach (var entry in policy.Identities ?? new Dictionary<string, List<string>>())
-            {
-                if (string.Equals(entry.Key, normalizedDefault, StringComparison.OrdinalIgnoreCase))
-                {
-                    usernames = entry.Value;
-                    break;
-                }
-            }
-
-            if (usernames is null || usernames.Count == 0)
-            {
-                return AssignmentIdentityResolution.Failure($"Assignment routing is enabled, but the configured default identity '{policy.DefaultIdentity}' is not configured with any GitHub usernames.");
-            }
-
-            return new AssignmentIdentityResolution
-            {
-                IsEnabled = true,
-                IsResolved = true,
-                Identity = CreateIdentity(normalizedDefault, usernames)
-            };
+            return AssignmentIdentityResolution.Failure("Assignment routing is enabled, but the current identity could not be resolved: no CGR Git identity is configured and the authenticated GitHub account is unavailable.");
         }
 
-        if (string.IsNullOrWhiteSpace(authenticatedGitHubLogin))
-        {
-            return AssignmentIdentityResolution.Failure("Assignment routing is enabled, but the current identity could not be resolved: no default identity is configured and the authenticated GitHub account is unavailable.");
-        }
-
-        var login = authenticatedGitHubLogin.Trim();
         return new AssignmentIdentityResolution
         {
             IsEnabled = true,
             IsResolved = true,
-            Identity = CreateIdentity(login, new[] { login })
+            Identity = CreateIdentity(usernames.First(), usernames)
         };
+    }
+
+    public static IReadOnlyList<string> ParseIdentityUsernames(string? rawValue)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return Array.Empty<string>();
+        }
+
+        return rawValue
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(username => !string.IsNullOrWhiteSpace(username))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(username => username, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     public static AssignmentEligibility Evaluate(RouterConfiguration configuration, AssignmentIdentity? identity, Issue issue)
@@ -169,11 +102,6 @@ public static class AssignmentRoutingService
 
         if (mode == ModeIgnore)
         {
-            if (isUnassigned && unassigned == UnassignedExclude)
-            {
-                return Ineligible(identity, issue, $"Issue #{issue.Number} is unassigned and unassigned work is excluded by the assignment policy.");
-            }
-
             return Eligible(identity, issue, 0, assignedToCurrent, isUnassigned);
         }
 
@@ -247,7 +175,7 @@ public static class AssignmentRoutingService
         var ineligible = new List<AssignmentEligibility>();
         foreach (var task in response.Tasks)
         {
-            if (task.Type is not (WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue))
+            if (!IsIssueDerivedDeveloperWork(task.Type))
             {
                 eligibleTasks.Add(task);
                 continue;
@@ -271,7 +199,7 @@ public static class AssignmentRoutingService
             }
         }
 
-        var noEligibleWork = (response.NoEligibleWork || (response.Tasks.Any(task => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue) &&
+        var noEligibleWork = (response.NoEligibleWork || (response.Tasks.Any(task => IsIssueDerivedDeveloperWork(task.Type)) &&
             eligibleTasks.Count == 0 && ineligible.Count > 0)) && response.Tasks.Count > 0;
         var message = noEligibleWork
             ? CombineMessages(response.Message, FormatNoEligibleWorkMessage(identity, ineligible))
@@ -333,8 +261,33 @@ public static class AssignmentRoutingService
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .ToList();
 
-    private static bool ContainsIdentity(Dictionary<string, List<string>> identities, string identity) =>
-        identities.Keys.Any(name => string.Equals(name, identity, StringComparison.OrdinalIgnoreCase));
+    public static bool IsPreferredScanComplete(RouterConfiguration configuration, AssignmentIdentity? identity, IReadOnlyList<Issue> issues, int requiredPreferredCount)
+    {
+        if (!IsEnabled(configuration) || identity is null || !string.Equals(GetMode(configuration), ModePrefer, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var preferredCount = 0;
+        foreach (var issue in issues)
+        {
+            var eligibility = Evaluate(configuration, identity, issue);
+            if (eligibility.IsEligible && eligibility.SelectionRank == 0)
+            {
+                preferredCount++;
+                if (preferredCount >= requiredPreferredCount)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsIssueDerivedDeveloperWork(WorkflowItemType type) =>
+        type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue
+            or WorkflowItemType.RecoverCompletedIssue or WorkflowItemType.RecoverCurrentPullRequest or WorkflowItemType.LinkPullRequestsToIssues;
 
     private static bool IsAllowedMode(string mode)
     {

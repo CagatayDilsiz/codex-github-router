@@ -160,48 +160,52 @@ Validation: a default worker is required, worker names are case-insensitively un
 
 ### `assignmentRouting`
 
-Opt-in, assignee-aware routing for the current identity. When the `assignmentRouting` object is present, routing is enabled. Place the machine-specific `identities` and `defaultIdentity` in the **global** configuration; the repository override usually contributes only the shared `mode` and `unassigned` policy.
+Opt-in, assignee-aware routing for the current identity. When the `assignmentRouting` object is present, routing is enabled. The current identity is resolved from **machine-local** source only — never from repository `workflow.json` — so the repository override contributes only the shared `mode` and `unassigned` policy.
 
 ```json
 {
   "policies": {
     "assignmentRouting": {
       "mode": "prefer",
-      "unassigned": "allow",
-      "identities": {
-        "alice-desktop": ["alice-mac", "alice-work"]
-      },
-      "defaultIdentity": "alice-desktop"
+      "unassigned": "allow"
     }
   }
 }
 ```
 
 - `mode`: `ignore` (default), `prefer`, or `require`.
-  - `ignore`: assignment state does not affect eligibility.
+  - `ignore`: assignment state does not affect eligibility; assignment routing is effectively off. `unassigned` is ignored and no identity is resolved.
   - `prefer`: assigned-to-me work is selected first, unassigned second, other developers' assigned work last.
   - `require`: only work assigned to the current identity is eligible (unassigned per `unassigned`).
-- `unassigned`: `allow` (default) or `exclude`.
+- `unassigned`: `allow` (default) or `exclude`. Only meaningful in `prefer`/`require` modes.
   - `allow`: unassigned issues are eligible.
   - `exclude`: unassigned issues are filtered out.
-- `identities`: local identity names mapped to lists of GitHub usernames (at least one each). Assignee matching is per-username and case-insensitive; any matching username makes the identity own the issue.
-- `defaultIdentity`: optional name of the `identities` entry that identifies this machine. When set, it is used directly.
-- Identity resolution: when no `defaultIdentity` is set, CGR falls back to the authenticated GitHub account (`.login`). If the identity cannot be resolved in `prefer` or `require` mode, discovery fails closed — no coding work is selected and the hook blocks with an explanatory message. `ignore` mode never resolves an identity.
+- Identity resolution (global precedence): CGR reads the git config key `codex-github-router.identity` as the effective value — a repository-local value overrides a global one — and treats it as a comma-separated list of GitHub usernames (e.g. `alice-mac, alice-work`). Each username maps to the current identity; assignee matching is per-username and case-insensitive. When the git config key is absent, CGR falls back to the authenticated GitHub CLI account (`.login`). No source is ever inferred from `user.name`/`user.email`. If the identity cannot be resolved in `prefer`/`require` mode, discovery fails closed — no coding work is selected and the hook blocks with an explanatory message. `ignore` mode never resolves an identity.
+
+Set the identity on each machine, e.g.:
+
+```
+git config --global codex-github-router.identity "alice-mac, alice-work"
+```
+
+or per-repository:
+
+```
+git config --local codex-github-router.identity "alice-mac"
+```
 
 Eligibility summary (`me` = any issue assignee within the current identity's usernames):
 
 | mode | unassigned | assigned-to-me | unassigned | other developer |
 | --- | --- | --- | --- | --- |
 | ignore | allow | eligible, rank 0 | eligible, rank 0 | eligible, rank 0 |
-| ignore | exclude | eligible, rank 0 | filtered | eligible, rank 0 |
+| ignore | exclude | eligible, rank 0 | eligible, rank 0 | eligible, rank 0 |
 | prefer | allow | eligible, rank 0 | eligible, rank 1 | eligible, rank 2 |
 | prefer | exclude | eligible, rank 0 | filtered | eligible, rank 2 |
 | require | allow | eligible, rank 0 | eligible, rank 1 | filtered |
 | require | exclude | eligible, rank 0 | filtered | filtered |
 
-Ranking is deterministic: within a task type the hook selects the task with the lowest rank; ranks are equal when assignment routing is disabled, so existing ordering is preserved. Assignment joins worker routing by intersection (an issue must be eligible under both), and applies only to coding work (new issues, in-progress resumes, and change requests). Repository gates and active-claim continuation are exempt. `cgr doctor` reports the resolved assignment routing settings.
-
-Validation: `mode` must be one of `ignore`/`prefer`/`require`; `unassigned` must be one of `allow`/`exclude`; identity names are case-insensitively unique and trimmed; each identity has at least one non-empty trimmed username with no duplicates; `defaultIdentity` must reference a configured identity.
+Ranking is deterministic: within a task type the hook selects the task with the lowest rank; ranks are equal when assignment routing is disabled, so existing ordering is preserved. In `prefer` mode, candidate discovery keeps scanning past lower-ranked eligible work to confirm a better-ranked issue is not hidden later, up to a bounded scan cap (`MaxDiscoveryScanLimit`). Assignment joins worker routing by intersection (an issue must be eligible under both), and applies to issue-derived developer work: new issues, in-progress resumes, change requests, completed-issue recovery, current-pull-request recovery, and pull-request-to-issue linking. Repository gates and active-claim continuation are exempt. `cgr doctor` reports the resolved identity and its source.
 
 ### `repositoryGate`
 

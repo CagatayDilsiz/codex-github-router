@@ -8,7 +8,7 @@ CGR currently keeps a single active coding claim per repository, shared across w
 
 ## Multi-developer routing with shared coordination
 
-Assignee-aware routing (`policies.assignmentRouting`) now routes the current session toward issues it owns, using GitHub assignees with `ignore`/`prefer`/`require` modes, an explicit unassigned policy, local identity resolution, and fail-closed diagnostics. Remaining gaps are shared coordination: automatically unassigning issues that become claims (so other developers do not pick them up), reviewer-based routing, and cross-worktree ownership management so multiple developers do not claim the same issue.
+Assignee-aware routing (`policies.assignmentRouting`) now routes the current session toward issues it owns, using GitHub assignees with `ignore`/`prefer`/`require` modes, an explicit unassigned policy, local identity resolution, and fail-closed diagnostics. Remaining gaps are shared coordination: keeping claimed issues assigned to their owning developer across machines (unassigning a claimed issue would make it *more* eligible for other developers under `prefer`/`require`), reviewer-based routing, and cross-worktree ownership management so multiple developers do not claim the same issue.
 
 ## Native GitHub review/check signals in workflow evaluation
 

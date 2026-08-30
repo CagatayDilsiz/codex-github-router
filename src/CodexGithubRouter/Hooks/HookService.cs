@@ -20,6 +20,36 @@ public static class HookService
     public static IReadOnlyList<WorkflowItem> SelectWorkflowTasks(IReadOnlyList<WorkflowItem> repositoryGateTasks, IReadOnlyList<WorkflowItem> ordinaryTasks) =>
         repositoryGateTasks.Count > 0 ? repositoryGateTasks : ordinaryTasks;
 
+    public static async Task<AssignmentIdentityResolution> ResolveAssignmentIdentityAsync(
+        RouterConfiguration configuration,
+        string workingDirectory,
+        HookExecutionDependencies dependencies,
+        CancellationToken cancellationToken)
+    {
+        var localIdentity = await dependencies.ResolveLocalIdentityAsync(workingDirectory, cancellationToken);
+        var identityUsernames = AssignmentRoutingService.ParseIdentityUsernames(localIdentity);
+        if (identityUsernames.Count == 0)
+        {
+            string? authenticatedLogin = null;
+            try
+            {
+                authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(workingDirectory, cancellationToken);
+            }
+            catch
+            {
+                // A missing or failing GitHub CLI must not crash the hook; identity resolution
+                // simply fails closed below when no CGR Git identity is configured.
+            }
+
+            if (!string.IsNullOrWhiteSpace(authenticatedLogin))
+            {
+                identityUsernames = new[] { authenticatedLogin.Trim() };
+            }
+        }
+
+        return AssignmentRoutingService.Resolve(configuration, identityUsernames);
+    }
+
     public static Task<int> RunAsync() => RunAsync(new HookExecutionDependencies());
 
     public static async Task<int> RunAsync(HookExecutionDependencies dependencies)
@@ -197,8 +227,7 @@ public static class HookService
             var needsLocalIdentity = AssignmentRoutingService.RequiresLocalIdentity(configuration);
             if (needsLocalIdentity)
             {
-                var authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(workingDirectory, CancellationToken.None);
-                var identityResolution = AssignmentRoutingService.Resolve(configuration, authenticatedLogin);
+                var identityResolution = await ResolveAssignmentIdentityAsync(configuration, workingDirectory, dependencies, CancellationToken.None);
                 if (identityResolution.IsEnabled && !identityResolution.IsResolved)
                 {
                     scope.SetIdentity(identityResolution.Identity?.Name);

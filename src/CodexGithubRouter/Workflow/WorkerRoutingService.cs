@@ -223,6 +223,8 @@ public static class WorkerRoutingService
         };
     }
 
+    public const int MaxDiscoveryScanLimit = 512;
+
     public static async Task<WorkerCandidateDiscoveryResult> DiscoverCandidatesAsync(
         RouterConfiguration configuration,
         int scanLimit,
@@ -253,7 +255,9 @@ public static class WorkerRoutingService
 
             var current = issues.Values.ToList();
             var eligibleCount = FilterIssues(configuration, current, currentModel, assignmentIdentity).EligibleIssues.Count;
-            if (eligibleCount >= scanLimit || window.Count < requestedLimit || window.Count <= previousWindowCount)
+            var preferredScanComplete = AssignmentRoutingService.IsPreferredScanComplete(configuration, assignmentIdentity, current, scanLimit);
+            var scanExhausted = window.Count < requestedLimit || window.Count <= previousWindowCount || requestedLimit >= MaxDiscoveryScanLimit;
+            if ((eligibleCount >= scanLimit && preferredScanComplete) || scanExhausted)
             {
                 break;
             }

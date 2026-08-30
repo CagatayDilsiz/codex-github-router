@@ -37,7 +37,7 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
-    public void Ignore_exclude_filters_only_unassigned_issues()
+    public void Ignore_mode_ignores_all_assignment_state()
     {
         var configuration = AssignmentConfiguration("ignore", "exclude");
         var identity = Identity("alice");
@@ -46,8 +46,9 @@ public sealed class AssignmentRoutingTests
         var unassigned = AssignmentRoutingService.Evaluate(configuration, identity, IssueWithAssignee(2));
 
         Assert.True(assigned.IsEligible);
-        Assert.False(unassigned.IsEligible);
-        Assert.Contains("unassigned", unassigned.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(unassigned.IsEligible);
+        Assert.Equal(0, assigned.SelectionRank);
+        Assert.Equal(0, unassigned.SelectionRank);
     }
 
     [Fact]
@@ -157,17 +158,14 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
-    public void Resolve_uses_the_configured_default_identity_when_set()
+    public void Resolve_uses_the_git_config_identity_usernames()
     {
-        var configuration = AssignmentConfiguration("prefer", "allow", defaultIdentity: "alice", identities: new Dictionary<string, List<string>>
-        {
-            ["alice"] = new() { "alice-mac", "alice-laptop" }
-        });
+        var configuration = AssignmentConfiguration("prefer", "allow");
 
-        var resolution = AssignmentRoutingService.Resolve(configuration, "unrelated-login");
+        var resolution = AssignmentRoutingService.Resolve(configuration, new[] { "alice-mac", "alice-laptop" });
 
         Assert.True(resolution.IsResolved);
-        Assert.Equal("alice", resolution.Identity!.Name);
+        Assert.Equal("alice-laptop", resolution.Identity!.Name);
         Assert.Equal(new[] { "alice-laptop", "alice-mac" }, resolution.Identity.GitHubUsernames);
     }
 
@@ -176,7 +174,7 @@ public sealed class AssignmentRoutingTests
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
 
-        var resolution = AssignmentRoutingService.Resolve(configuration, "authenticated-dev");
+        var resolution = AssignmentRoutingService.Resolve(configuration, new[] { "authenticated-dev" });
 
         Assert.True(resolution.IsResolved);
         Assert.Equal("authenticated-dev", resolution.Identity!.Name);
@@ -184,11 +182,20 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
+    public void Parse_identity_usernames_splits_and_normalizes_comma_separated_values()
+    {
+        Assert.Equal(new[] { "ALICE-LAPTOP", "alice-mac" }, AssignmentRoutingService.ParseIdentityUsernames(" alice-mac , ALICE-LAPTOP, alice-mac "));
+        Assert.Empty(AssignmentRoutingService.ParseIdentityUsernames(null));
+        Assert.Empty(AssignmentRoutingService.ParseIdentityUsernames("  "));
+        Assert.Empty(AssignmentRoutingService.ParseIdentityUsernames(","));
+    }
+
+    [Fact]
     public void Resolve_fails_closed_when_no_identity_is_available()
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
 
-        var resolution = AssignmentRoutingService.Resolve(configuration, null);
+        var resolution = AssignmentRoutingService.Resolve(configuration, Array.Empty<string>());
 
         Assert.True(resolution.IsEnabled);
         Assert.False(resolution.IsResolved);
@@ -200,9 +207,59 @@ public sealed class AssignmentRoutingTests
     {
         var configuration = AssignmentConfiguration("ignore", "allow");
 
-        var resolution = AssignmentRoutingService.Resolve(configuration, "authenticated-dev");
+        var resolution = AssignmentRoutingService.Resolve(configuration, new[] { "authenticated-dev" });
 
         Assert.False(resolution.IsEnabled);
+    }
+
+    [Fact]
+    public async Task Hook_identity_resolution_prefers_git_config_over_authenticated_login()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var dependencies = new HookExecutionDependencies
+        {
+            ResolveLocalIdentityAsync = (_, _) => Task.FromResult<string?>("alice-mac, ALICE-LAPTOP"),
+            ResolveAuthenticatedGitHubLoginAsync = (_, _) => Task.FromResult<string?>("unrelated-login")
+        };
+
+        var resolution = await HookService.ResolveAssignmentIdentityAsync(configuration, "working-directory", dependencies, CancellationToken.None);
+
+        Assert.True(resolution.IsResolved);
+        Assert.Equal(new[] { "ALICE-LAPTOP", "alice-mac" }, resolution.Identity!.GitHubUsernames);
+        Assert.DoesNotContain("unrelated-login", resolution.Identity.GitHubUsernames);
+    }
+
+    [Fact]
+    public async Task Hook_identity_resolution_falls_back_to_authenticated_login()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var dependencies = new HookExecutionDependencies
+        {
+            ResolveLocalIdentityAsync = (_, _) => Task.FromResult<string?>(null),
+            ResolveAuthenticatedGitHubLoginAsync = (_, _) => Task.FromResult<string?>("authenticated-dev")
+        };
+
+        var resolution = await HookService.ResolveAssignmentIdentityAsync(configuration, "working-directory", dependencies, CancellationToken.None);
+
+        Assert.True(resolution.IsResolved);
+        Assert.Equal(new[] { "authenticated-dev" }, resolution.Identity!.GitHubUsernames);
+    }
+
+    [Fact]
+    public async Task Hook_identity_resolution_fails_closed_after_authenticated_login_failure()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var dependencies = new HookExecutionDependencies
+        {
+            ResolveLocalIdentityAsync = (_, _) => Task.FromResult<string?>(null),
+            ResolveAuthenticatedGitHubLoginAsync = (_, _) => throw new InvalidOperationException("gh is not available")
+        };
+
+        var resolution = await HookService.ResolveAssignmentIdentityAsync(configuration, "working-directory", dependencies, CancellationToken.None);
+
+        Assert.True(resolution.IsEnabled);
+        Assert.False(resolution.IsResolved);
+        Assert.Contains("could not be resolved", resolution.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -216,56 +273,6 @@ public sealed class AssignmentRoutingTests
         Assert.Contains("unassigned", Assert.Throws<InvalidOperationException>(() => AssignmentRoutingService.Validate(new RouterConfiguration
         {
             Policies = new RouterPolicies { AssignmentRouting = new AssignmentRoutingPolicy { Unassigned = "sometimes" } }
-        })).Message, StringComparison.OrdinalIgnoreCase);
-
-        Assert.Contains("at least one GitHub username", Assert.Throws<InvalidOperationException>(() => AssignmentRoutingService.Validate(new RouterConfiguration
-        {
-            Policies = new RouterPolicies
-            {
-                AssignmentRouting = new AssignmentRoutingPolicy
-                {
-                    Mode = "prefer",
-                    Identities = new Dictionary<string, List<string>> { ["alice"] = new() }
-                }
-            }
-        })).Message, StringComparison.Ordinal);
-
-        Assert.Contains("empty", Assert.Throws<InvalidOperationException>(() => AssignmentRoutingService.Validate(new RouterConfiguration
-        {
-            Policies = new RouterPolicies
-            {
-                AssignmentRouting = new AssignmentRoutingPolicy
-                {
-                    Identities = new Dictionary<string, List<string>> { ["alice"] = new() { "" } }
-                }
-            }
-        })).Message, StringComparison.OrdinalIgnoreCase);
-
-        Assert.Contains("more than once", Assert.Throws<InvalidOperationException>(() => AssignmentRoutingService.Validate(new RouterConfiguration
-        {
-            Policies = new RouterPolicies
-            {
-                AssignmentRouting = new AssignmentRoutingPolicy
-                {
-                    Identities = new Dictionary<string, List<string>>
-                    {
-                        ["alice"] = new() { "alice" },
-                        ["Alice"] = new() { "alice" }
-                    }
-                }
-            }
-        })).Message, StringComparison.OrdinalIgnoreCase);
-
-        Assert.Contains("not configured", Assert.Throws<InvalidOperationException>(() => AssignmentRoutingService.Validate(new RouterConfiguration
-        {
-            Policies = new RouterPolicies
-            {
-                AssignmentRouting = new AssignmentRoutingPolicy
-                {
-                    DefaultIdentity = "missing",
-                    Identities = new Dictionary<string, List<string>> { ["alice"] = new() { "alice" } }
-                }
-            }
         })).Message, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -376,6 +383,124 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
+    public async Task Candidate_discovery_expands_past_lower_ranked_work_to_find_preferred_work()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var identity = Identity("alice");
+        var calls = new List<int>();
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            1,
+            null,
+            async limit =>
+            {
+                calls.Add(limit);
+                await Task.Yield();
+                return limit == 1
+                    ? new[] { IssueWithAssignee(1, "bob") }
+                    : new[] { IssueWithAssignee(1, "bob"), IssueWithAssignee(2, "alice") };
+            },
+            identity);
+
+        Assert.Equal(new[] { 1, 2 }, calls);
+        Assert.Contains(result.Issues, issue => issue.Number == 2);
+        var filtered = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues);
+        Assert.Contains(filtered.EligibleIssues, issue => issue.Number == 2);
+    }
+
+    [Fact]
+    public async Task Candidate_discovery_stops_immediately_when_preferred_work_is_found()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var identity = Identity("alice");
+        var calls = new List<int>();
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            1,
+            null,
+            async limit =>
+            {
+                calls.Add(limit);
+                await Task.Yield();
+                return new[] { IssueWithAssignee(1, "alice") };
+            },
+            identity);
+
+        Assert.Equal(new[] { 1 }, calls);
+        Assert.Equal(1, result.Issues.Single().Number);
+    }
+
+    [Fact]
+    public async Task Candidate_discovery_prefer_scan_is_bounded_by_the_maximum_scan_limit()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var identity = Identity("alice");
+        var calls = new List<int>();
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            1,
+            null,
+            async limit =>
+            {
+                calls.Add(limit);
+                await Task.Yield();
+                return Enumerable.Range(1, limit)
+                    .Select(number => IssueWithAssignee(number, "bob"))
+                    .ToList();
+            },
+            identity);
+
+        Assert.Equal(WorkerRoutingService.MaxDiscoveryScanLimit, calls.Last());
+        var eligible = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues);
+        Assert.DoesNotContain(eligible.EligibleIssues, issue => AssignmentRoutingService.Evaluate(configuration, identity, issue).SelectionRank == 0);
+    }
+
+    [Fact]
+    public void Filter_coding_tasks_applies_assignment_to_recovery_and_pull_request_linking_work()
+    {
+        var configuration = AssignmentConfiguration("require", "exclude");
+        var identity = Identity("alice");
+        var response = new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new() { Type = WorkflowItemType.RecoverCompletedIssue, IssueNumber = 1 },
+                new() { Type = WorkflowItemType.RecoverCurrentPullRequest, IssueNumber = 2 },
+                new() { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 3 },
+                new() { Type = WorkflowItemType.CloseIssue, IssueNumber = 4 }
+            }
+        };
+        var issues = new[] { IssueWithAssignee(1, "bob"), IssueWithAssignee(2, "bob"), IssueWithAssignee(3, "alice") };
+
+        var filtered = AssignmentRoutingService.FilterCodingTasks(configuration, identity, issues, response);
+
+        Assert.Equal(2, filtered.Tasks.Count);
+        Assert.Contains(filtered.Tasks, task => task.Type == WorkflowItemType.LinkPullRequestsToIssues && task.IssueNumber == 3);
+        Assert.Contains(filtered.Tasks, task => task.Type == WorkflowItemType.CloseIssue);
+        Assert.DoesNotContain(filtered.Tasks, task => task.Type is WorkflowItemType.RecoverCompletedIssue or WorkflowItemType.RecoverCurrentPullRequest);
+        Assert.Equal(2, filtered.IneligibleAssignmentIssues.Count);
+    }
+
+    [Fact]
+    public void Filter_coding_tasks_blocks_when_recovery_work_is_excluded_for_the_current_identity()
+    {
+        var configuration = AssignmentConfiguration("require", "exclude");
+        var identity = Identity("alice");
+        var response = new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.RecoverCurrentPullRequest, IssueNumber = 1 } }
+        };
+
+        var filtered = AssignmentRoutingService.FilterCodingTasks(configuration, identity, new[] { IssueWithAssignee(1, "bob") }, response);
+
+        Assert.Empty(filtered.Tasks);
+        Assert.True(filtered.NoEligibleWork);
+        Assert.Single(filtered.IneligibleAssignmentIssues);
+    }
+
+    [Fact]
     public void No_eligible_work_message_describes_identity_and_assignees()
     {
         var configuration = AssignmentConfiguration("require", "allow");
@@ -431,18 +556,14 @@ public sealed class AssignmentRoutingTests
 
     private static RouterConfiguration AssignmentConfiguration(
         string mode,
-        string unassigned,
-        string? defaultIdentity = null,
-        Dictionary<string, List<string>>? identities = null) => new()
+        string unassigned) => new()
         {
             Policies = new RouterPolicies
             {
                 AssignmentRouting = new AssignmentRoutingPolicy
                 {
                     Mode = mode,
-                    Unassigned = unassigned,
-                    DefaultIdentity = defaultIdentity,
-                    Identities = identities ?? new Dictionary<string, List<string>>()
+                    Unassigned = unassigned
                 }
             }
         };

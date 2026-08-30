@@ -760,22 +760,54 @@ public static class DoctorCommandHandler
         var policy = configuration.Policies!.AssignmentRouting!;
         var mode = AssignmentRoutingService.GetMode(configuration);
         var unassigned = AssignmentRoutingService.GetUnassignedMode(configuration);
-        var identityNames = policy.Identities is { Count: > 0 }
-            ? string.Join(", ", policy.Identities.Keys.OrderBy(name => name, StringComparer.OrdinalIgnoreCase))
-            : "none";
-        var detail = $"Mode: '{mode}'. Unassigned policy: '{unassigned}'. Configured identities: {identityNames}. Default identity: '{policy.DefaultIdentity ?? "<none>"}'.";
+        var detail = $"Mode: '{mode}'. Unassigned policy: '{unassigned}'.";
+        var status = DoctorCheckStatus.Pass;
 
-        if (AssignmentRoutingService.RequiresLocalIdentity(configuration) && string.IsNullOrWhiteSpace(policy.DefaultIdentity) && policy.Identities is not { Count: > 0 })
+        if (AssignmentRoutingService.RequiresLocalIdentity(configuration))
         {
-            detail += " No default identity is configured; resolution will rely on the authenticated GitHub account.";
+            var (usernames, source) = await ResolveIdentitySourcesAsync(result.RepositoryRoot!, dependencies, cancellationToken);
+            var resolution = AssignmentRoutingService.Resolve(configuration, usernames);
+            detail += $" Local identity: '{string.Join(", ", usernames)}' ({source}).";
+            if (!resolution.IsResolved)
+            {
+                status = DoctorCheckStatus.Warning;
+                detail += $" {resolution.Message}";
+            }
         }
 
         result.Checks.Add(new DoctorCheck
         {
             Name = "Assignment Routing",
-            Status = DoctorCheckStatus.Pass,
+            Status = status,
             Detail = detail
         });
+    }
+
+    private static async Task<(IReadOnlyList<string> Usernames, string Source)> ResolveIdentitySourcesAsync(string repositoryRoot, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
+    {
+        var gitIdentityValue = await dependencies.ResolveLocalIdentityAsync(repositoryRoot, cancellationToken);
+        var gitUsernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+        if (gitUsernames.Count > 0)
+        {
+            return (gitUsernames, $"Git config key '{AssignmentRoutingService.LocalIdentityConfigKey}'");
+        }
+
+        string? authenticatedLogin = null;
+        try
+        {
+            authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(repositoryRoot, cancellationToken);
+        }
+        catch
+        {
+            // A missing or failing GitHub CLI is reported as an unresolved identity.
+        }
+
+        if (!string.IsNullOrWhiteSpace(authenticatedLogin))
+        {
+            return (new[] { authenticatedLogin.Trim() }, "authenticated GitHub CLI account");
+        }
+
+        return (Array.Empty<string>(), "no source");
     }
 
     private static int CountCgrHookEntries(JsonObject root)
@@ -982,4 +1014,10 @@ public sealed class DoctorCommandDependencies
 
     public Func<string, CancellationToken, Task<HashSet<string>>> GetRepositoryLabelNamesAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitHubCliService.GetRepositoryLabelNamesAsync(repositoryRoot, cancellationToken);
+
+    public Func<string, CancellationToken, Task<string?>> ResolveLocalIdentityAsync { get; init; }
+        = (repositoryRoot, cancellationToken) => GitRepositoryService.GetConfigValueAsync(repositoryRoot, AssignmentRoutingService.LocalIdentityConfigKey, cancellationToken);
+
+    public Func<string, CancellationToken, Task<string?>> ResolveAuthenticatedGitHubLoginAsync { get; init; }
+        = (repositoryRoot, cancellationToken) => GitHubCliService.GetAuthenticatedUserAsync(repositoryRoot, cancellationToken);
 }
