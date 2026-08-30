@@ -1,3 +1,4 @@
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Work;
 
@@ -867,7 +868,7 @@ public static class WorkflowService
     {
         async Task<IReadOnlyList<Issue>> FetchPreferredIssuesAsync(int requestedLimit)
         {
-            var byNumber = new Dictionary<int, Issue>();
+            var perUsername = new List<IReadOnlyList<Issue>>();
             foreach (var username in assignmentIdentity!.GitHubUsernames)
             {
                 var preferredFilters = new IssueFilters
@@ -878,18 +879,14 @@ public static class WorkflowService
                     SortBy = filters.SortBy,
                     SortDirection = filters.SortDirection
                 };
-                var issues = await GitHubCliService.GetIssuesAsync(
+                perUsername.Add(await GitHubCliService.GetIssuesAsync(
                     workingDirectory,
                     preferredFilters,
                     addLinkedPRToSelection,
-                    CancellationToken.None);
-                foreach (var issue in issues)
-                {
-                    byNumber[issue.Number] = issue;
-                }
+                    CancellationToken.None));
             }
 
-            return byNumber.Values.OrderBy(issue => issue.Number).ToList();
+            return MergePreferredIssues(perUsername, filters.SortBy, filters.SortDirection);
         }
 
         Func<int, Task<IReadOnlyList<Issue>>>? fetchPreferredIssues = null;
@@ -917,6 +914,33 @@ public static class WorkflowService
             assignmentIdentity,
             fetchPreferredIssues);
     }
+
+    public static IReadOnlyList<Issue> MergePreferredIssues(
+        IReadOnlyList<IReadOnlyList<Issue>> perUsernameIssues,
+        IssueSortField? sortBy,
+        SortDirection? sortDirection)
+    {
+        var byNumber = new Dictionary<int, Issue>();
+        foreach (var issues in perUsernameIssues)
+        {
+            foreach (var issue in issues)
+            {
+                byNumber[issue.Number] = issue;
+            }
+        }
+
+        return OrderBySortField(byNumber.Values, sortBy ?? IssueSortField.CreatedAt, sortDirection ?? SortDirection.Ascending).ToList();
+    }
+
+    private static IOrderedEnumerable<Issue> OrderBySortField(IEnumerable<Issue> issues, IssueSortField sortBy, SortDirection sortDirection) =>
+        (sortBy, sortDirection) switch
+        {
+            (IssueSortField.CreatedAt, SortDirection.Ascending) => issues.OrderBy(issue => issue.CreatedAt),
+            (IssueSortField.CreatedAt, SortDirection.Descending) => issues.OrderByDescending(issue => issue.CreatedAt),
+            (IssueSortField.UpdatedAt, SortDirection.Ascending) => issues.OrderBy(issue => issue.UpdatedAt),
+            (IssueSortField.UpdatedAt, SortDirection.Descending) => issues.OrderByDescending(issue => issue.UpdatedAt),
+            _ => issues.OrderBy(issue => issue.CreatedAt)
+        };
 
     private static List<Issue> FilterEligibleIssues(RouterConfiguration configuration, IReadOnlyList<Issue> issues, AssignmentIdentity? assignmentIdentity, string? currentModel)
     {

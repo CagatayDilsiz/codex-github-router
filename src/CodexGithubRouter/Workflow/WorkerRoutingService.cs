@@ -239,15 +239,38 @@ public static class WorkerRoutingService
 
         if (fetchPreferredIssues is not null && IsPreferredPhaseActive(configuration, assignmentIdentity))
         {
-            var preferredIssues = (await fetchPreferredIssues(scanLimit)).ToList();
-            if (preferredIssues.Count > 0)
+            var preferredRequestedLimit = scanLimit;
+            var preferredIssues = new Dictionary<int, Issue>();
+            var previousPreferredWindowCount = -1;
+
+            while (true)
             {
-                var preferredFilter = FilterIssues(configuration, preferredIssues, currentModel, assignmentIdentity);
+                var preferredWindow = await fetchPreferredIssues(preferredRequestedLimit);
+                foreach (var issue in preferredWindow)
+                {
+                    preferredIssues[issue.Number] = issue;
+                }
+
+                if (preferredIssues.Count == 0)
+                {
+                    break;
+                }
+
+                var preferredFilter = FilterIssues(configuration, preferredIssues.Values.ToList(), currentModel, assignmentIdentity);
                 var hasPreferredCandidate = preferredFilter.EligibleIssues.Any(issue => AssignmentRoutingService.IsPreferredCandidate(configuration, assignmentIdentity, issue));
                 if (hasPreferredCandidate)
                 {
-                    return new WorkerCandidateDiscoveryResult(preferredIssues, preferredFilter.IneligibleIssues);
+                    return new WorkerCandidateDiscoveryResult(preferredIssues.Values.ToList(), preferredFilter.IneligibleIssues);
                 }
+
+                var preferredExhausted = preferredWindow.Count < preferredRequestedLimit || preferredWindow.Count <= previousPreferredWindowCount;
+                if (preferredExhausted)
+                {
+                    break;
+                }
+
+                previousPreferredWindowCount = preferredWindow.Count;
+                preferredRequestedLimit = checked(preferredRequestedLimit * 2);
             }
         }
 

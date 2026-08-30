@@ -1,3 +1,4 @@
+using CodexGithubRouter.Configurations;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Workflow;
@@ -456,6 +457,65 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
+    public async Task Preferred_discovery_expands_past_worker_ineligible_issues_to_find_an_assigned_to_me_candidate()
+    {
+        var configuration = WorkerAndAssignmentConfiguration(assignmentMode: "prefer", unassigned: "allow");
+        var identity = Identity("alice");
+        var preferredCalls = new List<int>();
+        var genericCalls = 0;
+        var lunaOnly = Enumerable.Range(1, 30).Select(number => WorkerIssue(number, "codex:worker:luna", "alice")).ToList();
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            30,
+            "terra-model",
+            async limit =>
+            {
+                genericCalls++;
+                await Task.Yield();
+                return new[] { WorkerIssue(31, "codex:worker:terra", "alice") };
+            },
+            identity,
+            async limit =>
+            {
+                preferredCalls.Add(limit);
+                await Task.Yield();
+                return limit >= 60
+                    ? lunaOnly.Concat(new[] { WorkerIssue(31, "codex:worker:terra", "alice") }).ToList()
+                    : lunaOnly.ToList();
+            });
+
+        Assert.Equal(new[] { 30, 60 }, preferredCalls);
+        Assert.Equal(0, genericCalls);
+        var workerEligible = WorkerRoutingService.FilterIssues(configuration, result.Issues, "terra-model").EligibleIssues;
+        Assert.Equal(31, Assert.Single(AssignmentRoutingService.FilterIssues(configuration, identity, workerEligible).EligibleIssues).Number);
+    }
+
+    [Fact]
+    public void Preferred_merge_preserves_the_configured_sort_after_deduping_across_usernames()
+    {
+        var merged = WorkflowService.MergePreferredIssues(
+            new[]
+            {
+                new[]
+                {
+                    IssueWithSort(31, new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero)),
+                    IssueWithSort(1, new DateTimeOffset(2026, 3, 15, 0, 0, 0, TimeSpan.Zero)),
+                    IssueWithSort(10, new DateTimeOffset(2026, 2, 10, 0, 0, 0, TimeSpan.Zero))
+                },
+                new[]
+                {
+                    IssueWithSort(10, new DateTimeOffset(2026, 2, 10, 0, 0, 0, TimeSpan.Zero)),
+                    IssueWithSort(31, new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero))
+                }
+            },
+            IssueSortField.CreatedAt,
+            SortDirection.Descending);
+
+        Assert.Equal(new[] { 1, 10, 31 }, merged.Select(issue => issue.Number));
+        Assert.Equal(3, merged.Count);
+    }
+
+    [Fact]
     public async Task Candidate_discovery_generic_scan_is_bounded_by_the_maximum_scan_limit()
     {
         var configuration = new RouterConfiguration
@@ -693,5 +753,12 @@ public sealed class AssignmentRoutingTests
         Number = number,
         Labels = new List<GithubLabel> { new() { Name = "codex:ready" }, new() { Name = workerLabel } },
         Assignees = assignees.Select(login => new GithubUser { Login = login }).ToList()
+    };
+
+    private static Issue IssueWithSort(int number, DateTimeOffset createdAt) => new()
+    {
+        Number = number,
+        Labels = new List<GithubLabel> { new() { Name = "codex:ready" } },
+        CreatedAt = createdAt
     };
 }
