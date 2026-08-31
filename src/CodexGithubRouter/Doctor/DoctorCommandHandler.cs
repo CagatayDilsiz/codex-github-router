@@ -143,6 +143,7 @@ public static class DoctorCommandHandler
         await AddActiveWorkClaimCheckAsync(result, gitCommonDirectory, dependencies, cancellationToken);
         await AddRequiredLabelsCheckAsync(result, repositoryRoot, dependencies, cancellationToken);
         await AddWorkerRoutingCheckAsync(result, model, dependencies, cancellationToken);
+        await AddAssignmentRoutingCheckAsync(result, dependencies, cancellationToken);
     }
 
     private static async Task AddDotNetRuntimeCheckAsync(DoctorResult result, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
@@ -727,6 +728,88 @@ public static class DoctorCommandHandler
         });
     }
 
+    private static async Task AddAssignmentRoutingCheckAsync(DoctorResult result, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
+    {
+        RouterConfiguration configuration;
+        try
+        {
+            configuration = await dependencies.LoadEffectiveConfigurationAsync(result.RepositoryRoot!, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = "Assignment Routing",
+                Status = DoctorCheckStatus.Warning,
+                Detail = $"Skipped: {exception.Message}"
+            });
+            return;
+        }
+
+        if (!AssignmentRoutingService.IsEnabled(configuration))
+        {
+            result.Checks.Add(new DoctorCheck
+            {
+                Name = "Assignment Routing",
+                Status = DoctorCheckStatus.Pass,
+                Detail = "Disabled; assignment-aware routing is not active."
+            });
+            return;
+        }
+
+        var policy = configuration.Policies!.AssignmentRouting!;
+        var mode = AssignmentRoutingService.GetMode(configuration);
+        var unassigned = AssignmentRoutingService.GetUnassignedMode(configuration);
+        var detail = $"Mode: '{mode}'. Unassigned policy: '{unassigned}'.";
+        var status = DoctorCheckStatus.Pass;
+
+        if (AssignmentRoutingService.RequiresLocalIdentity(configuration))
+        {
+            var (usernames, source) = await ResolveIdentitySourcesAsync(result.RepositoryRoot!, dependencies, cancellationToken);
+            var resolution = AssignmentRoutingService.Resolve(configuration, usernames);
+            detail += $" Local identity: '{string.Join(", ", usernames)}' ({source}).";
+            if (!resolution.IsResolved)
+            {
+                status = DoctorCheckStatus.Warning;
+                detail += $" {resolution.Message}";
+            }
+        }
+
+        result.Checks.Add(new DoctorCheck
+        {
+            Name = "Assignment Routing",
+            Status = status,
+            Detail = detail
+        });
+    }
+
+    private static async Task<(IReadOnlyList<string> Usernames, string Source)> ResolveIdentitySourcesAsync(string repositoryRoot, DoctorCommandDependencies dependencies, CancellationToken cancellationToken)
+    {
+        var gitIdentityValue = await dependencies.ResolveLocalIdentityAsync(repositoryRoot, cancellationToken);
+        var gitUsernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+        if (gitUsernames.Count > 0)
+        {
+            return (gitUsernames, $"Git config key '{AssignmentRoutingService.LocalIdentityConfigKey}'");
+        }
+
+        string? authenticatedLogin = null;
+        try
+        {
+            authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(repositoryRoot, cancellationToken);
+        }
+        catch
+        {
+            // A missing or failing GitHub CLI is reported as an unresolved identity.
+        }
+
+        if (!string.IsNullOrWhiteSpace(authenticatedLogin))
+        {
+            return (new[] { authenticatedLogin.Trim() }, "authenticated GitHub CLI account");
+        }
+
+        return (Array.Empty<string>(), "no source");
+    }
+
     private static int CountCgrHookEntries(JsonObject root)
     {
         if (root["hooks"] is not JsonObject rootHooks)
@@ -931,4 +1014,10 @@ public sealed class DoctorCommandDependencies
 
     public Func<string, CancellationToken, Task<HashSet<string>>> GetRepositoryLabelNamesAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitHubCliService.GetRepositoryLabelNamesAsync(repositoryRoot, cancellationToken);
+
+    public Func<string, CancellationToken, Task<string?>> ResolveLocalIdentityAsync { get; init; }
+        = (repositoryRoot, cancellationToken) => GitRepositoryService.GetConfigValueAsync(repositoryRoot, AssignmentRoutingService.LocalIdentityConfigKey, cancellationToken);
+
+    public Func<string, CancellationToken, Task<string?>> ResolveAuthenticatedGitHubLoginAsync { get; init; }
+        = (repositoryRoot, cancellationToken) => GitHubCliService.GetAuthenticatedUserAsync(repositoryRoot, cancellationToken);
 }

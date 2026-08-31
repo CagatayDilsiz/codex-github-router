@@ -6,7 +6,8 @@ public sealed class WorkflowItem
     public int IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
     public WorkflowTaskStatus Status { get; init; } = new WorkflowTaskStatus();
-    
+
+    public int SelectionRank { get; set; }
 }
 
 public enum WorkflowItemType

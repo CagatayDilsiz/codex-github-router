@@ -4,7 +4,10 @@ namespace CodexGithubRouter.Helpers;
 
 public static class ProcessRunner
 {
-    public static async Task<ProcessResult> RunAsync(string workingDirectory, string fileName, IEnumerable<string>? arguments,  CancellationToken cancellationToken = default)
+    public static async Task<ProcessResult> RunAsync(string workingDirectory, string fileName, IEnumerable<string>? arguments, CancellationToken cancellationToken = default) =>
+        await RunAsync(workingDirectory, fileName, arguments, environment: null, cancellationToken);
+
+    public static async Task<ProcessResult> RunAsync(string workingDirectory, string fileName, IEnumerable<string>? arguments, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken = default)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -15,6 +18,14 @@ public static class ProcessRunner
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        if (environment is not null)
+        {
+            foreach (var entry in environment)
+            {
+                startInfo.Environment[entry.Key] = entry.Value;
+            }
+        }
 
         if (arguments != null)
         {

@@ -345,6 +345,7 @@ public static class WorkflowConfigurationService
 
         AutonomousActivationService.Validate(configuration.Policies.AutonomousActivation);
         WorkerRoutingService.Validate(configuration);
+        AssignmentRoutingService.Validate(configuration);
         WorkflowLabelConfiguration.ValidateNoConflictingLabels(configuration);
 
         if (configuration.Policies.Diagnostics.RetentionDays < 1)

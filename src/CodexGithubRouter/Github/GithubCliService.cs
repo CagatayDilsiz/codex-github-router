@@ -150,11 +150,11 @@ public static class GitHubCliService
 
         if (addLinkedPRToSelection)
         {
-            arguments.Add("number,title,url,labels,createdAt,updatedAt,closedByPullRequestsReferences");
+            arguments.Add("number,title,url,labels,createdAt,updatedAt,closedByPullRequestsReferences,assignees");
         }
         else
         {
-            arguments.Add("number,title,url,labels,createdAt,updatedAt");
+            arguments.Add("number,title,url,labels,createdAt,updatedAt,assignees");
         }
         
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
@@ -233,7 +233,7 @@ public static class GitHubCliService
             "view",
             issueNumber.ToString(CultureInfo.InvariantCulture),
             "--json",
-            "number,title,url,labels,createdAt,updatedAt,state,closedByPullRequestsReferences"
+            "number,title,url,labels,createdAt,updatedAt,state,closedByPullRequestsReferences,assignees"
         };
 
         var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
@@ -339,7 +339,19 @@ public static class GitHubCliService
         return true;
     }
 
-    
+    public static async Task<string?> GetAuthenticatedUserAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", new[] { "api", "user", "--jq", ".login" }, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        var login = process.Output.Trim();
+        return string.IsNullOrWhiteSpace(login) ? null : login;
+    }
+
     public static string? BuildSearchQuery(IssueFilters filters)
     {
         var searchTerms = new List<string>();

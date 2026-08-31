@@ -26,6 +26,7 @@ public sealed class HookDiagnosticScope
     private int? _pullRequestNumber;
     private string? _worker;
     private string? _model;
+    private string? _identity;
     private string? _claimId;
     private string _result = "bypass";
     private string? _blockReason;
@@ -74,6 +75,8 @@ public sealed class HookDiagnosticScope
         _worker = string.IsNullOrWhiteSpace(claim.WorkerProfile) ? _worker : claim.WorkerProfile;
         _model = string.IsNullOrWhiteSpace(claim.Model) ? _model : claim.Model;
     }
+
+    public void SetIdentity(string? identity) => _identity = string.IsNullOrWhiteSpace(identity) ? null : identity;
 
     public void SetSelectedTask(WorkflowItem? task)
     {
@@ -151,6 +154,7 @@ public sealed class HookDiagnosticScope
                 PullRequestNumber = _pullRequestNumber,
                 Worker = _worker,
                 Model = _model,
+                Identity = _identity,
                 ClaimId = _claimId,
                 Result = _result,
                 BlockReason = _blockReason,

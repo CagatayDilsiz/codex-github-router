@@ -28,7 +28,7 @@ public sealed class DoctorCommandTests
         Assert.Contains("[PASS] Global Workflow Configuration", Output(deps));
         Assert.Contains("[PASS] Git Repository", Output(deps));
         Assert.Contains("[PASS] Required GitHub Labels", Output(deps));
-        Assert.Contains("Summary: 16 passed, 0 warning(s), 0 failed.", Output(deps));
+        Assert.Contains("Summary: 17 passed, 0 warning(s), 0 failed.", Output(deps));
     }
 
     [Fact]

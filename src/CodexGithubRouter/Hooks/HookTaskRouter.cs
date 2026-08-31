@@ -31,13 +31,19 @@ public static class HookTaskRouter
             return new HookTaskDecision { BlockReason = blocker.Status.Message };
         }
 
-        var changeRequest = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.ChangeRequest && task.PullRequestNumber.HasValue);
+        var changeRequest = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.ChangeRequest && task.PullRequestNumber.HasValue)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
         if (changeRequest is not null)
         {
             return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
         }
 
-        var currentPullRequestRecovery = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.RecoverCurrentPullRequest && task.PullRequestNumber.HasValue);
+        var currentPullRequestRecovery = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.RecoverCurrentPullRequest && task.PullRequestNumber.HasValue)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
         if (currentPullRequestRecovery is not null)
         {
             return new HookTaskDecision
@@ -47,7 +53,10 @@ public static class HookTaskRouter
             };
         }
 
-        var completedRecovery = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.RecoverCompletedIssue);
+        var completedRecovery = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.RecoverCompletedIssue)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
         if (completedRecovery is not null)
         {
             return new HookTaskDecision
@@ -63,13 +72,19 @@ public static class HookTaskRouter
             return new HookTaskDecision { SelectedTask = actionableTasks.First(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues), AdditionalContext = ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()) };
         }
 
-        var inProgressIssue = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.ResumeInProgressIssue);
+        var inProgressIssue = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.ResumeInProgressIssue)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
         if (inProgressIssue is not null)
         {
             return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber) };
         }
 
-        var newIssue = actionableTasks.FirstOrDefault(task => task.Type == WorkflowItemType.NewIssue);
+        var newIssue = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.NewIssue)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
         if (newIssue is not null)
         {
             return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber) };

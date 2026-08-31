@@ -28,6 +28,8 @@ public sealed class HookDiagnosticEvent
 
     public string? Model { get; init; }
 
+    public string? Identity { get; init; }
+
     public string? ClaimId { get; init; }
 
     public string Result { get; init; } = "bypass";

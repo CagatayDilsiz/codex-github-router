@@ -158,6 +158,55 @@ Resolution rules: an unlabeled issue uses the default worker; one worker label s
 
 Validation: a default worker is required, worker names are case-insensitively unique, labels must not be shared between workers, models must not be shared between workers, and the default worker must exist.
 
+### `assignmentRouting`
+
+Opt-in, assignee-aware routing for the current identity. When the `assignmentRouting` object is present, routing is enabled. The current identity is resolved from **machine-local** source only — never from repository `workflow.json` — so the repository override contributes only the shared `mode` and `unassigned` policy.
+
+```json
+{
+  "policies": {
+    "assignmentRouting": {
+      "mode": "prefer",
+      "unassigned": "allow"
+    }
+  }
+}
+```
+
+- `mode`: `ignore` (default), `prefer`, or `require`.
+  - `ignore`: assignment state does not affect eligibility; assignment routing is effectively off. `unassigned` is ignored and no identity is resolved.
+  - `prefer`: assigned-to-me work is selected first, unassigned second, other developers' assigned work last.
+  - `require`: only work assigned to the current identity is eligible (unassigned per `unassigned`).
+- `unassigned`: `allow` (default) or `exclude`. Only meaningful in `prefer`/`require` modes.
+  - `allow`: unassigned issues are eligible.
+  - `exclude`: unassigned issues are filtered out.
+- Identity resolution (global precedence): CGR reads the git config key `codex-github-router.identity` as the effective value — a repository-local value overrides a global one — and treats it as a comma-separated list of GitHub usernames (e.g. `alice-mac, alice-work`). Each username maps to the current identity; assignee matching is per-username and case-insensitive. When the git config key is absent, CGR falls back to the authenticated GitHub CLI account (`.login`). No source is ever inferred from `user.name`/`user.email`. If the identity cannot be resolved in `prefer`/`require` mode, discovery fails closed — no coding work is selected and the hook blocks with an explanatory message. `ignore` mode never resolves an identity.
+
+Set the identity on each machine, e.g.:
+
+```
+git config --global codex-github-router.identity "alice-mac, alice-work"
+```
+
+or per-repository:
+
+```
+git config --local codex-github-router.identity "alice-mac"
+```
+
+Eligibility summary (`me` = any issue assignee within the current identity's usernames):
+
+| mode | unassigned | assigned-to-me | unassigned | other developer |
+| --- | --- | --- | --- | --- |
+| ignore | allow | eligible, rank 0 | eligible, rank 0 | eligible, rank 0 |
+| ignore | exclude | eligible, rank 0 | eligible, rank 0 | eligible, rank 0 |
+| prefer | allow | eligible, rank 0 | eligible, rank 1 | eligible, rank 2 |
+| prefer | exclude | eligible, rank 0 | filtered | eligible, rank 2 |
+| require | allow | eligible, rank 0 | eligible, rank 1 | filtered |
+| require | exclude | eligible, rank 0 | filtered | filtered |
+
+Ranking is deterministic: within a task type the hook selects the task with the lowest rank; ranks are equal when assignment routing is disabled, so existing ordering is preserved. Assignment-aware candidate discovery is tiered so that priority is applied over the whole discoverable set, not just a capped window: first it searches issues assigned to the current identity directly (`assignee:` for each configured username; `prefer` and `require`), then unassigned issues when `unassigned: allow` (`no:assignee`), and only last falls back to a general scan bounded by `MaxDiscoveryScanLimit`. Each tier scans until it finds an eligible candidate under the combined worker+assignment policy or provably runs out of results, and merged results across multiple identity usernames retain the configured issue sort. This guarantees that, for example, an unassigned issue is always preferred over another developer's issue in `prefer`, and an assigned-to-me issue is preferred over unassigned in `require`. `ignore` mode activates none of the assignment tiers, so assignment state is ignored and existing generic discovery ordering is preserved. Assignment joins worker routing by intersection (an issue must be eligible under both), and applies to issue-derived developer work: new issues, in-progress resumes, change requests, completed-issue recovery, current-pull-request recovery, pull-request-to-issue linking, and the `ClosedWithoutMerge` / `UnknownPullRequestState` blocker states, so another developer's broken issue cannot block a strict-routing session. Repository gates and active-claim continuation are exempt. `cgr doctor` reports the resolved identity and its source.
+
 ### `repositoryGate`
 
 Orthogonal gate policy that can block unrelated work.
@@ -234,12 +283,13 @@ The checked-out working tree is the source of the repository override. Invalid J
 - `defaultIssueSelection.limit` must be greater than zero.
 - `autonomousActivation.mode` must be `always` or `prompt`; `prompt` requires at least one non-empty prompt with no duplicates after normalization.
 - `workerRouting`, when present, must satisfy the routing validation described above.
+- `assignmentRouting`, when present, must satisfy the routing validation described above.
 - Labels must not conflict: a label cannot map to multiple states within the same domain (issue or pull request); repository gate labels must not also be workflow labels; worker labels must not be workflow or gate labels; label names must not have leading/trailing whitespace.
 - `diagnostics.retentionDays` must be at least one.
 
 ## Built-in defaults (global file missing)
 
-When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), and `diagnostics` enabled with `retentionDays` 7.
+When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), and `diagnostics` enabled with `retentionDays` 7.
 
 ## Effective diagnostics policy
 

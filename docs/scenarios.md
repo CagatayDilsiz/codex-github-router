@@ -93,6 +93,44 @@ This adds a `Worker Routing` check showing which configured worker accepts the c
 [WARN] Worker Routing: Default worker: 'luna'. Configured workers: luna, terra. Current model 'unknown-model' resolves to worker '<none>'.
 ```
 
+## Assignee-aware routing
+
+Assignee-aware routing is opt-in. Configure `policies.assignmentRouting` (see [configuration.md](configuration.md)); when it is absent, existing routing is unchanged.
+
+```json
+{
+  "policies": {
+    "assignmentRouting": {
+      "mode": "require",
+      "unassigned": "exclude"
+    }
+  }
+}
+```
+
+The current identity is machine-local state. Point each machine at its GitHub usernames with a comma-separated git config value (a repository-local value overrides the global one), and keep the shared `mode`/`unassigned` policy in the repository override (`.codex-github-router/workflow.json`):
+
+```
+git config --global codex-github-router.identity "alice-mac, alice-work"
+```
+
+The repository `workflow.json` never defines the identity.
+
+Behavior highlights:
+
+- With `require`, the router only claims issues where one of your Git-config GitHub usernames is an assignee; `unassigned: exclude` additionally skips unassigned issues.
+- With `prefer`, your assigned issues are selected first, unassigned second, and other developers' issues last — without blocking. Discovery is tiered (assigned-to-me, then unassigned when allowed, then a bounded general scan) so an unassigned issue is always chosen over another developer's even when it sits beyond the first discovery window. Merged assigned-to-me results keep the configured sort order.
+- Assignment applies to all issue-derived developer work, including the `ClosedWithoutMerge` and `UnknownPullRequestState` blocker states: another developer's broken issue cannot block a strict-routing session.
+- When the Git-config key is absent, the identity falls back to the authenticated GitHub account (`gh api user .login`). If the identity is unresolved in `prefer`/`require` mode, the hook blocks with a diagnostic instead of accidentally routing someone else's work.
+- Assignment routing composes with worker routing: an issue must be eligible under **both** policies to be routed.
+- Repository gates and continuation of your active work claim ignore assignment state (assignment is opt-in per selector).
+
+`cgr doctor` shows the resolved settings:
+
+```text
+[PASS] Assignment Routing: Mode: 'require'. Unassigned policy: 'exclude'. Local identity: 'alice-mac, alice-work' (Git config key 'codex-github-router.identity').
+```
+
 ## Prompt-gated and scheduled automation
 
 By default autonomous activation is `always`: every `UserPromptSubmit` is eligible for routing. To require an exact gate, configure `policies.autonomousActivation` with `mode: "prompt"` and at least one prompt:
