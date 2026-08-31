@@ -231,56 +231,93 @@ public static class WorkerRoutingService
         string? currentModel,
         Func<int, Task<IReadOnlyList<Issue>>> fetchIssues,
         AssignmentIdentity? assignmentIdentity = null,
-        Func<int, Task<IReadOnlyList<Issue>>>? fetchPreferredIssues = null)
+        Func<int, Task<IReadOnlyList<Issue>>>? fetchAssignedToMeIssues = null,
+        Func<int, Task<IReadOnlyList<Issue>>>? fetchUnassignedIssues = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(fetchIssues);
         if (scanLimit <= 0) throw new ArgumentOutOfRangeException(nameof(scanLimit));
 
-        if (fetchPreferredIssues is not null && IsPreferredPhaseActive(configuration, assignmentIdentity))
+        // Tier 1: direct assigned-to-me search (prefer and require)
+        if (fetchAssignedToMeIssues is not null && IsDirectPhaseActive(configuration, assignmentIdentity))
         {
-            var preferredRequestedLimit = scanLimit;
-            var preferredIssues = new Dictionary<int, Issue>();
-            var previousPreferredWindowCount = -1;
+            var requestedLimit = scanLimit;
+            var accumulated = new Dictionary<int, Issue>();
+            var previousWindowCount = -1;
 
             while (true)
             {
-                var preferredWindow = await fetchPreferredIssues(preferredRequestedLimit);
-                foreach (var issue in preferredWindow)
+                var window = await fetchAssignedToMeIssues(requestedLimit);
+                foreach (var issue in window)
                 {
-                    preferredIssues[issue.Number] = issue;
+                    accumulated[issue.Number] = issue;
                 }
 
-                if (preferredIssues.Count == 0)
-                {
-                    break;
-                }
-
-                var preferredFilter = FilterIssues(configuration, preferredIssues.Values.ToList(), currentModel, assignmentIdentity);
-                var hasPreferredCandidate = preferredFilter.EligibleIssues.Any(issue => AssignmentRoutingService.IsPreferredCandidate(configuration, assignmentIdentity, issue));
-                if (hasPreferredCandidate)
-                {
-                    return new WorkerCandidateDiscoveryResult(preferredIssues.Values.ToList(), preferredFilter.IneligibleIssues);
-                }
-
-                var preferredExhausted = preferredWindow.Count < preferredRequestedLimit || preferredWindow.Count <= previousPreferredWindowCount;
-                if (preferredExhausted)
+                if (accumulated.Count == 0)
                 {
                     break;
                 }
 
-                previousPreferredWindowCount = preferredWindow.Count;
-                preferredRequestedLimit = checked(preferredRequestedLimit * 2);
+                var assignedFilter = FilterIssues(configuration, accumulated.Values.ToList(), currentModel, assignmentIdentity);
+                if (assignedFilter.EligibleIssues.Any(issue => AssignmentRoutingService.IsPreferredCandidate(configuration, assignmentIdentity, issue)))
+                {
+                    return new WorkerCandidateDiscoveryResult(accumulated.Values.ToList(), assignedFilter.IneligibleIssues);
+                }
+
+                if (window.Count < requestedLimit || window.Count <= previousWindowCount)
+                {
+                    break;
+                }
+
+                previousWindowCount = window.Count;
+                requestedLimit = checked(requestedLimit * 2);
             }
         }
 
-        var requestedLimit = scanLimit;
+        // Tier 2: unassigned search (when unassigned: allow)
+        if (fetchUnassignedIssues is not null && IsUnassignedPhaseActive(configuration))
+        {
+            var requestedLimit = scanLimit;
+            var accumulated = new Dictionary<int, Issue>();
+            var previousWindowCount = -1;
+
+            while (true)
+            {
+                var window = await fetchUnassignedIssues(requestedLimit);
+                foreach (var issue in window)
+                {
+                    accumulated[issue.Number] = issue;
+                }
+
+                if (accumulated.Count == 0)
+                {
+                    break;
+                }
+
+                var unassignedFilter = FilterIssues(configuration, accumulated.Values.ToList(), currentModel, assignmentIdentity);
+                if (unassignedFilter.EligibleIssues.Count > 0)
+                {
+                    return new WorkerCandidateDiscoveryResult(accumulated.Values.ToList(), unassignedFilter.IneligibleIssues);
+                }
+
+                if (window.Count < requestedLimit || window.Count <= previousWindowCount)
+                {
+                    break;
+                }
+
+                previousWindowCount = window.Count;
+                requestedLimit = checked(requestedLimit * 2);
+            }
+        }
+
+        // Tier 3: generic bounded fallback scan
+        var genericRequestedLimit = scanLimit;
         var issues = new Dictionary<int, Issue>();
-        var previousWindowCount = -1;
+        var previousGenericWindowCount = -1;
 
         while (true)
         {
-            var window = await fetchIssues(requestedLimit);
+            var window = await fetchIssues(genericRequestedLimit);
             foreach (var issue in window)
             {
                 issues[issue.Number] = issue;
@@ -293,14 +330,14 @@ public static class WorkerRoutingService
 
             var current = issues.Values.ToList();
             var eligibleCount = FilterIssues(configuration, current, currentModel, assignmentIdentity).EligibleIssues.Count;
-            var scanExhausted = window.Count < requestedLimit || window.Count <= previousWindowCount || requestedLimit >= MaxDiscoveryScanLimit;
+            var scanExhausted = window.Count < genericRequestedLimit || window.Count <= previousGenericWindowCount || genericRequestedLimit >= MaxDiscoveryScanLimit;
             if (eligibleCount >= scanLimit || scanExhausted)
             {
                 break;
             }
 
-            previousWindowCount = window.Count;
-            requestedLimit = checked(requestedLimit * 2);
+            previousGenericWindowCount = window.Count;
+            genericRequestedLimit = checked(genericRequestedLimit * 2);
         }
 
         var discovered = issues.Values.ToList();
@@ -308,8 +345,12 @@ public static class WorkerRoutingService
         return new WorkerCandidateDiscoveryResult(discovered, filter.IneligibleIssues);
     }
 
-    private static bool IsPreferredPhaseActive(RouterConfiguration configuration, AssignmentIdentity? assignmentIdentity) =>
-        AssignmentRoutingService.IsPreferMode(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 };
+    private static bool IsDirectPhaseActive(RouterConfiguration configuration, AssignmentIdentity? assignmentIdentity) =>
+        AssignmentRoutingService.RequiresLocalIdentity(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 };
+
+    private static bool IsUnassignedPhaseActive(RouterConfiguration configuration) =>
+        AssignmentRoutingService.IsEnabled(configuration) &&
+        string.Equals(AssignmentRoutingService.GetUnassignedMode(configuration), AssignmentRoutingService.UnassignedAllow, StringComparison.Ordinal);
 
     public static WorkflowResponse FilterCodingTasks(
         RouterConfiguration configuration,

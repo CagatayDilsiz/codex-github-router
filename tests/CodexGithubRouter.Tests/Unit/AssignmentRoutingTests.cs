@@ -552,6 +552,81 @@ public sealed class AssignmentRoutingTests
         Assert.DoesNotContain(filtered.EligibleIssues, issue => issue.Number > 0);
     }
 
+    [Fact]
+    public async Task Prefer_allow_queries_unassigned_before_falling_back_to_other_developers()
+    {
+        var configuration = AssignmentConfiguration("prefer", "allow");
+        var identity = Identity("alice");
+        var assignedToMeCalls = 0;
+        var unassignedCalls = 0;
+        var genericCalls = 0;
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            30,
+            null,
+            async limit =>
+            {
+                genericCalls++;
+                await Task.Yield();
+                return Enumerable.Range(1, 30).Select(number => IssueWithAssignee(number, "bob")).ToList();
+            },
+            identity,
+            async limit =>
+            {
+                assignedToMeCalls++;
+                await Task.Yield();
+                return Array.Empty<Issue>();
+            },
+            async limit =>
+            {
+                unassignedCalls++;
+                await Task.Yield();
+                return new[] { IssueWithAssignee(31) };
+            });
+
+        Assert.Equal(1, assignedToMeCalls);
+        Assert.Equal(1, unassignedCalls);
+        Assert.Equal(0, genericCalls);
+        var eligible = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues).EligibleIssues;
+        Assert.Contains(eligible, issue => issue.Number == 31);
+    }
+
+    [Fact]
+    public async Task Require_allow_queries_assigned_to_me_before_falling_back_to_unassigned()
+    {
+        var configuration = AssignmentConfiguration("require", "allow");
+        var identity = Identity("alice");
+        var assignedToMeCalls = 0;
+        var unassignedCalls = 0;
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            30,
+            null,
+            async limit =>
+            {
+                await Task.Yield();
+                return Enumerable.Range(1, 30).Select(number => IssueWithAssignee(number)).ToList();
+            },
+            identity,
+            async limit =>
+            {
+                assignedToMeCalls++;
+                await Task.Yield();
+                return new[] { IssueWithAssignee(31, "alice") };
+            },
+            async limit =>
+            {
+                unassignedCalls++;
+                await Task.Yield();
+                return Enumerable.Range(1, 30).Select(number => IssueWithAssignee(number)).ToList();
+            });
+
+        Assert.Equal(1, assignedToMeCalls);
+        Assert.Equal(0, unassignedCalls);
+        var eligible = AssignmentRoutingService.FilterIssues(configuration, identity, result.Issues).EligibleIssues;
+        Assert.Contains(eligible, issue => issue.Number == 31);
+    }
+
     private static async Task<IReadOnlyList<Issue>> PreferredCandidatesAsync(int limit, IEnumerable<Issue> preferred, IEnumerable<Issue> fallback)
     {
         await Task.Yield();

@@ -889,10 +889,34 @@ public static class WorkflowService
             return MergePreferredIssues(perUsername, filters.SortBy, filters.SortDirection);
         }
 
+        async Task<IReadOnlyList<Issue>> FetchUnassignedIssuesAsync(int requestedLimit)
+        {
+            var unassignedFilters = new IssueFilters
+            {
+                Labels = filters.Labels.ToList(),
+                SearchTerms = filters.SearchTerms.Append("no:assignee").ToList(),
+                Limit = requestedLimit,
+                SortBy = filters.SortBy,
+                SortDirection = filters.SortDirection
+            };
+            return await GitHubCliService.GetIssuesAsync(
+                workingDirectory,
+                unassignedFilters,
+                addLinkedPRToSelection,
+                CancellationToken.None);
+        }
+
         Func<int, Task<IReadOnlyList<Issue>>>? fetchPreferredIssues = null;
-        if (AssignmentRoutingService.IsPreferMode(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 })
+        if (AssignmentRoutingService.RequiresLocalIdentity(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 })
         {
             fetchPreferredIssues = FetchPreferredIssuesAsync;
+        }
+
+        Func<int, Task<IReadOnlyList<Issue>>>? fetchUnassignedIssues = null;
+        if (AssignmentRoutingService.IsEnabled(configuration) &&
+            string.Equals(AssignmentRoutingService.GetUnassignedMode(configuration), AssignmentRoutingService.UnassignedAllow, StringComparison.Ordinal))
+        {
+            fetchUnassignedIssues = FetchUnassignedIssuesAsync;
         }
 
         return WorkerRoutingService.DiscoverCandidatesAsync(
@@ -912,7 +936,8 @@ public static class WorkflowService
                 addLinkedPRToSelection,
                 CancellationToken.None),
             assignmentIdentity,
-            fetchPreferredIssues);
+            fetchPreferredIssues,
+            fetchUnassignedIssues);
     }
 
     public static IReadOnlyList<Issue> MergePreferredIssues(
