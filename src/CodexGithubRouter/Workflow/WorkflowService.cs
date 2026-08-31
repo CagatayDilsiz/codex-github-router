@@ -913,7 +913,7 @@ public static class WorkflowService
         }
 
         Func<int, Task<IReadOnlyList<Issue>>>? fetchUnassignedIssues = null;
-        if (AssignmentRoutingService.IsEnabled(configuration) &&
+        if (AssignmentRoutingService.RequiresLocalIdentity(configuration) &&
             string.Equals(AssignmentRoutingService.GetUnassignedMode(configuration), AssignmentRoutingService.UnassignedAllow, StringComparison.Ordinal))
         {
             fetchUnassignedIssues = FetchUnassignedIssuesAsync;

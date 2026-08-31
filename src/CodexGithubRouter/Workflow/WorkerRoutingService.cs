@@ -349,7 +349,7 @@ public static class WorkerRoutingService
         AssignmentRoutingService.RequiresLocalIdentity(configuration) && assignmentIdentity?.GitHubUsernames is { Count: > 0 };
 
     private static bool IsUnassignedPhaseActive(RouterConfiguration configuration) =>
-        AssignmentRoutingService.IsEnabled(configuration) &&
+        AssignmentRoutingService.RequiresLocalIdentity(configuration) &&
         string.Equals(AssignmentRoutingService.GetUnassignedMode(configuration), AssignmentRoutingService.UnassignedAllow, StringComparison.Ordinal);
 
     public static WorkflowResponse FilterCodingTasks(

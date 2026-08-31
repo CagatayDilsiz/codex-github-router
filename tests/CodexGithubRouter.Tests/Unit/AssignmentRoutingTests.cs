@@ -491,6 +491,44 @@ public sealed class AssignmentRoutingTests
     }
 
     [Fact]
+    public async Task Ignore_mode_never_invokes_the_assignment_tiers_and_preserves_generic_ordering()
+    {
+        var configuration = AssignmentConfiguration("ignore", "allow");
+        var identity = Identity("alice");
+        var assignedToMeCalls = 0;
+        var unassignedCalls = 0;
+        var genericLimit = 0;
+        var result = await WorkerRoutingService.DiscoverCandidatesAsync(
+            configuration,
+            1,
+            null,
+            async limit =>
+            {
+                genericLimit = limit;
+                await Task.Yield();
+                return new[] { IssueWithAssignee(1, "bob"), IssueWithAssignee(2) };
+            },
+            identity,
+            async limit =>
+            {
+                assignedToMeCalls++;
+                await Task.Yield();
+                return new[] { IssueWithAssignee(3, "alice") };
+            },
+            async limit =>
+            {
+                unassignedCalls++;
+                await Task.Yield();
+                return new[] { IssueWithAssignee(4) };
+            });
+
+        Assert.Equal(0, assignedToMeCalls);
+        Assert.Equal(0, unassignedCalls);
+        Assert.Equal(1, genericLimit);
+        Assert.Equal(new[] { 1, 2 }, result.Issues.Select(issue => issue.Number));
+    }
+
+    [Fact]
     public void Preferred_merge_preserves_the_configured_sort_after_deduping_across_usernames()
     {
         var merged = WorkflowService.MergePreferredIssues(
