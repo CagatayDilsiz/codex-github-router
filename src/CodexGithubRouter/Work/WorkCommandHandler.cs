@@ -1,5 +1,7 @@
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Explain;
 using CodexGithubRouter.Git;
+using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Work;
@@ -40,6 +42,8 @@ public static class WorkCommandHandler
                     if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
                     else foreach (var task in gateStatus.Tasks.GroupBy(task => task.IssueNumber).Select(group => group.First()).OrderBy(task => task.IssueNumber)) Console.WriteLine($"Repository workflow gate: issue #{task.IssueNumber}. {task.Status.Message}");
                     return 0;
+                case "list":
+                    return await HandleListAsync(args, workingDirectory, configurationLoader, errorWriter);
                 case "reconcile":
                     var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
                     Console.WriteLine(released ? "Released a passive or terminal work claim." : "Active work claim remains unchanged.");
@@ -64,8 +68,72 @@ public static class WorkCommandHandler
 
     private static int Usage()
     {
-        Console.Error.WriteLine("Usage: cgr work <status|reconcile|release --issue <number>> [working-directory]");
+        Console.Error.WriteLine("Usage: cgr work <status|list|reconcile|release --issue <number>> [working-directory]");
         return 1;
+    }
+
+    private static async Task<int> HandleListAsync(string[] args, string workingDirectory, Func<string, Task<RouterConfiguration>> configurationLoader, TextWriter errorWriter)
+    {
+        try
+        {
+            var configuration = await configurationLoader(workingDirectory);
+            var identity = await ResolveListIdentityAsync(configuration, workingDirectory);
+
+            var filter = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, configuration.DefaultIssueSelection.Limit);
+            var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, filter, false, CancellationToken.None);
+            if (issues.Count == 0)
+            {
+                Console.WriteLine("No workflow issues found.");
+                return 0;
+            }
+
+            var claim = await WorkClaimStore.TryReadAsync(await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory);
+            var explanations = RoutingExplanationService.ExplainAll(configuration, issues, null, identity, claim);
+            Console.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            await errorWriter.WriteLineAsync($"Error: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static async Task<AssignmentIdentity?> ResolveListIdentityAsync(RouterConfiguration configuration, string workingDirectory)
+    {
+        if (!AssignmentRoutingService.RequiresLocalIdentity(configuration))
+        {
+            return null;
+        }
+
+        try
+        {
+            var gitIdentityValue = await GitRepositoryService.GetConfigValueAsync(workingDirectory, AssignmentRoutingService.LocalIdentityConfigKey, CancellationToken.None);
+            var gitUsernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+            if (gitUsernames.Count > 0)
+            {
+                return AssignmentRoutingService.ResolveIdentity(AssignmentRoutingService.Resolve(configuration, gitUsernames));
+            }
+        }
+        catch
+        {
+            // Fall through to GitHub auth
+        }
+
+        try
+        {
+            var authenticatedLogin = await GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(authenticatedLogin))
+            {
+                return AssignmentRoutingService.ResolveIdentity(AssignmentRoutingService.Resolve(configuration, new[] { authenticatedLogin.Trim() }));
+            }
+        }
+        catch
+        {
+            // Identity unavailable
+        }
+
+        return null;
     }
 
     public static string FormatClaimStatus(WorkClaim claim)
