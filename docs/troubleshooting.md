@@ -148,7 +148,7 @@ cgr work status        # shows the claim's issue, pull request, type, worker, an
 
 **Recovery (mutation), in order of preference:**
 
-1. `cgr work reconcile` — removes only claims that GitHub shows as **passive or terminal** (for example a merged pull request). Safe when no session owns active work.
+1. `cgr work reconcile` — removes claims that GitHub shows as **releasable** (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request; for example a merged pull request). Safe when no session owns active work.
 2. `cgr work release --issue <number>` — explicit user recovery; removes the claim **only** for the supplied issue.
 
 ### Autonomous mode disabled or repository state inconsistent
@@ -182,7 +182,7 @@ cgr explain --issue 12    # detailed per-issue decision stages
 cgr explain              # the same list form as `cgr work list`
 ```
 
-This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A passive/terminal claim is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
+This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request) is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
 
 ## Structured hook diagnostics
 

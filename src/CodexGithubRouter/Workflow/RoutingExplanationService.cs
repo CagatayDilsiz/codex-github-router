@@ -428,7 +428,7 @@ public static class RoutingExplanationService
             {
                 Name = "Work Claim",
                 Verdict = RoutingVerdict.Pass,
-                Message = $"The active work claim for issue #{plan.ReleasedClaim.IssueNumber} is passive or terminal and would be released by production reconciliation, so ordinary routing continues. Read-only simulation: the claim file is not modified."
+                Message = $"The active work claim for issue #{plan.ReleasedClaim.IssueNumber} would be released by production reconciliation (its claimed work is passive/terminal, blocked, closed, or no longer resolvable), so ordinary routing continues. Read-only simulation: the claim file is not modified."
             };
         }
 

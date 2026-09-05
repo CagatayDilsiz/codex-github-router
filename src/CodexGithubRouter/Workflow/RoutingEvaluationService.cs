@@ -40,6 +40,9 @@ public sealed class RoutingEvaluationDependencies
     public Func<RouterConfiguration, string, Task<AssignmentIdentityResolution>> ResolveAssignmentIdentityAsync { get; init; }
         = (_, _) => Task.FromResult(AssignmentIdentityResolution.NotEnabled);
 
+    public Func<RouterConfiguration, string, WorkClaim, Task<WorkClaimReconciliationRecommendation>> EvaluateClaimReconciliationAsync { get; init; }
+        = (configuration, workingDirectory, claim) => WorkClaimReconciliationService.DetermineAsync(workingDirectory, claim, configuration);
+
     public RoutingEvaluationDependencies WithIdentityResolver(
         Func<RouterConfiguration, string, Task<AssignmentIdentityResolution>> resolver) => new()
     {
@@ -48,7 +51,8 @@ public sealed class RoutingEvaluationDependencies
         CheckInProgressIssuesAsync = CheckInProgressIssuesAsync,
         CheckNewIssuesAsync = CheckNewIssuesAsync,
         CheckClaimedWorkAsync = CheckClaimedWorkAsync,
-        ResolveAssignmentIdentityAsync = resolver
+        ResolveAssignmentIdentityAsync = resolver,
+        EvaluateClaimReconciliationAsync = EvaluateClaimReconciliationAsync
     };
 }
 
@@ -60,10 +64,12 @@ public sealed class RoutingEvaluationDependencies
 /// the same production code paths used by the hook.
 /// Assignment identity resolution is part of the plan and is only performed on the
 /// ordinary routing path, so an active repository gate never requires developer
-/// identity. When a claim is passive/terminal, production reconciles and releases it
-/// before routing; the plan simulates that release (without mutating the claim file)
-/// and continues through ordinary routing. This service never mutates repository
-/// state: acquiring claims, closing issues and writing claim files remain exclusive
+/// identity. When production reconciliation would release a claim (a blocked,
+/// needs-info, abandoned or closed claimed issue; a missing claimed issue or
+/// pull request; or a passive/terminal claimed pull request), the plan simulates
+/// that release (without mutating the claim file) and continues through ordinary
+/// routing, mirroring the hook. This service never mutates repository state:
+/// acquiring claims, closing issues and writing claim files remain exclusive
 /// to the hook.
 /// </summary>
 public static class RoutingEvaluationService
@@ -231,6 +237,26 @@ public static class RoutingEvaluationService
         WorkClaim activeClaim,
         RoutingEvaluationDependencies dependencies)
     {
+        // Production reconciles the active claim before evaluating or routing claimed work.
+        // The shared reconciliation decision (not claimed-work task types) is the release
+        // source of truth: a blocked/needs-info/abandoned/closed/missing claimed issue or
+        // missing/passive/terminal claimed pull request is released and the same hook
+        // invocation continues through ordinary routing.
+        var reconciliation = await dependencies.EvaluateClaimReconciliationAsync(configuration, workingDirectory, activeClaim);
+        if (reconciliation == WorkClaimReconciliationRecommendation.WouldRelease)
+        {
+            // Read-only simulation of the production release: nothing is mutated. The caller
+            // continues through the ordinary path with the released claim recorded.
+            return null;
+        }
+
+        if (reconciliation == WorkClaimReconciliationRecommendation.UnableToDetermine)
+        {
+            return RoutingEvaluationResult.Failure(
+                $"Active work claim for issue #{activeClaim.IssueNumber} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
+                configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+        }
+
         var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, activeClaim, currentModel);
         if (!claimedWork.IsSuccessful)
         {
@@ -239,11 +265,10 @@ public static class RoutingEvaluationService
 
         if (IsReleaseCandidate(claimedWork))
         {
-            // Production releases a passive/terminal claim before routing and the same
-            // hook invocation continues through ordinary routing. This read-only plan
-            // simulates that release (nothing is mutated) by signalling the caller to
-            // continue through the ordinary path with the released claim recorded.
-            return null;
+            // Production attempts an in-flight release before routing release-candidate
+            // claimed work. Reconciliation keeps the claim, so the hook blocks rather than
+            // replacing the claimed work with unrelated ordinary routing.
+            return RoutingEvaluationResult.Failure(FormatReleaseFailureReason(activeClaim), configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
         }
 
         var actionableTasks = claimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
@@ -267,6 +292,9 @@ public static class RoutingEvaluationService
                 : claimedWork.ConsideredIssues.ToList()
         };
     }
+
+    private static string FormatReleaseFailureReason(WorkClaim claim) =>
+        $"Active work claim for issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)} remains passive or terminal, but could not be released safely. No unrelated work will be routed.";
 
     private static bool IsReleaseCandidate(WorkflowResponse response) =>
         response.Tasks.Count == 1 && response.Tasks[0].Type is

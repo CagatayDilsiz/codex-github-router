@@ -229,6 +229,7 @@ public sealed class RoutingEvaluationTests
         var claimedTask = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 20, PullRequestNumber = 200, SelectionRank = 0 };
         var dependencies = new RoutingEvaluationDependencies
         {
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldKeep),
             CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
             {
                 IsSuccessful = true,
@@ -252,19 +253,14 @@ public sealed class RoutingEvaluationTests
     }
 
     [Fact]
-    public async Task Releasable_passive_claim_continues_ordinary_routing_after_simulated_release()
+    public async Task Reconciled_claim_release_continues_ordinary_routing_after_simulated_release()
     {
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
-        var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9 };
         var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
         var dependencies = new RoutingEvaluationDependencies
         {
-            CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
-            {
-                IsSuccessful = true,
-                Tasks = new List<WorkflowItem> { passiveTask },
-                ConsideredIssues = new List<Issue> { new() { Number = 9 } }
-            }),
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldRelease),
+            CheckClaimedWorkAsync = (_, _, _, _) => { throw new InvalidOperationException("Claimed-work evaluation must not run when reconciliation releases the claim before routing."); },
             CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
             CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
             CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
@@ -281,12 +277,83 @@ public sealed class RoutingEvaluationTests
     }
 
     [Fact]
+    public async Task Blocked_claimed_issue_releases_and_ordinary_routing_continues()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
+        var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var plan = await RoutingEvaluationService.EvaluateAsync(
+            new RouterConfiguration(),
+            "wd",
+            activeClaim: claim,
+            dependencies: new RoutingEvaluationDependencies
+            {
+                EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldRelease),
+                CheckClaimedWorkAsync = (_, _, _, _) => { throw new InvalidOperationException("A blocked claimed issue is released by reconciliation before claimed-work evaluation."); },
+                CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+                CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+                CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+                CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(newIssue))
+            });
+
+        Assert.True(plan.IsSuccessful);
+        Assert.Equal(claim.IssueNumber, plan.ReleasedClaim!.IssueNumber);
+        Assert.Null(plan.ActiveClaim);
+        Assert.Equal(newIssue.IssueNumber, plan.Decision!.SelectedTask!.IssueNumber);
+    }
+
+    [Fact]
+    public async Task Would_keep_release_candidate_claim_blocks_instead_of_rerouting()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
+        var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldKeep),
+            CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem> { passiveTask },
+                ConsideredIssues = new List<Issue> { new() { Number = 9 } }
+            }),
+            CheckRepositoryGateAsync = (_, _) => { throw new InvalidOperationException("A kept release-candidate claim must not continue ordinary routing."); },
+            CheckCompletedIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("A kept release-candidate claim must not continue ordinary routing."); },
+            CheckInProgressIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("A kept release-candidate claim must not continue ordinary routing."); },
+            CheckNewIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("A kept release-candidate claim must not continue ordinary routing."); }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", activeClaim: claim, dependencies: dependencies);
+
+        Assert.False(plan.IsSuccessful);
+        Assert.Null(plan.ReleasedClaim);
+        Assert.Contains("could not be released safely", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Unable_to_determine_reconciliation_fails_closed()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.UnableToDetermine),
+            CheckClaimedWorkAsync = (_, _, _, _) => { throw new InvalidOperationException("Claimed-work evaluation must not run when reconciliation cannot be determined."); },
+            CheckRepositoryGateAsync = (_, _) => { throw new InvalidOperationException("Ordinary routing must not run when reconciliation cannot be determined."); }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", activeClaim: claim, dependencies: dependencies);
+
+        Assert.False(plan.IsSuccessful);
+        Assert.Null(plan.ReleasedClaim);
+        Assert.Contains("could not be reconciled", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Claim_path_guarantees_claimed_issue_in_candidate_universe()
     {
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 8, WorkType = WorkClaimType.Implementation };
         var claimedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 8, SelectionRank = 0 };
         var dependencies = new RoutingEvaluationDependencies
         {
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldKeep),
             CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
             {
                 IsSuccessful = true,
