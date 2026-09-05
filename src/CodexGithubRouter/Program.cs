@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Doctor;
+using CodexGithubRouter.Explain;
 using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Helpers;
@@ -27,6 +28,7 @@ return args[0].ToLowerInvariant() switch
     "auto" => await AutonomousCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "issue" => await IssuesCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "work" => await WorkCommandHandler.HandleAsync(args.Skip(1).ToArray()),
+    "explain" => await ExplainCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "init" => await ConfigurationInitializer.InitAsync(args.Skip(1).ToArray()),
     "config" => await ConfigCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "doctor" => await DoctorCommandHandler.HandleAsync(args.Skip(1).ToArray()),
@@ -53,7 +55,8 @@ static int PrintHelp()
           cgr hook uninstall
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
-          cgr work <status|reconcile|release> [working-directory]
+          cgr work <status|list|reconcile|release> [working-directory]
+          cgr explain [--issue <number>] [--model <model>] [working-directory]
           cgr config path [working-directory]
           cgr config show [--effective [working-directory]]
           cgr config validate [working-directory]
@@ -67,6 +70,7 @@ static int PrintHelp()
           auto        Manage autonomous mode for the repository.
           issue       Manage issues in the repository.
           work        Inspect, reconcile, or explicitly release repository work claims.
+          explain     Explain routing decisions for one or all workflow issues.
           config      Inspect and validate configuration (path, show, validate).
           doctor      Run read-only diagnostics for the environment and repository.
           init        Initialize the configuration for the Codex Github Router.
