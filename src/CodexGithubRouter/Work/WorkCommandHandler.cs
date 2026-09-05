@@ -24,7 +24,7 @@ public static class WorkCommandHandler
         repositoryGateChecker ??= (configuration, workingDirectory) => WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (args.Length == 0) return Usage();
         var command = args[0].ToLowerInvariant();
-        var workingDirectory = args.LastOrDefault(value => !value.StartsWith("--", StringComparison.Ordinal) && !string.Equals(value, command, StringComparison.OrdinalIgnoreCase) && !int.TryParse(value, out _)) ?? Environment.CurrentDirectory;
+        var workingDirectory = ResolveWorkingDirectory(args, command) ?? Environment.CurrentDirectory;
         Func<string, Task<string?>> resolveCommonDirectory = commonDirectoryResolver ?? (workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory));
         var commonDirectory = await resolveCommonDirectory(workingDirectory);
         if (commonDirectory is null) { await errorWriter.WriteLineAsync("Not a valid Git repository."); return 1; }
@@ -68,25 +68,69 @@ public static class WorkCommandHandler
 
     private static int Usage()
     {
-        Console.Error.WriteLine("Usage: cgr work <status|list|reconcile|release --issue <number>> [working-directory]");
+        Console.Error.WriteLine("Usage: cgr work <status|list [--model <model>]|reconcile|release --issue <number>> [working-directory]");
         return 1;
+    }
+
+    private static string? ResolveWorkingDirectory(string[] args, string command)
+    {
+        string? workingDirectory = null;
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (string.Equals(argument, command, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(argument, "--model", StringComparison.OrdinalIgnoreCase))
+            {
+                index++;
+                continue;
+            }
+
+            if (argument.StartsWith("--", StringComparison.Ordinal) || int.TryParse(argument, out _))
+            {
+                continue;
+            }
+
+            workingDirectory = argument;
+        }
+
+        return workingDirectory;
+    }
+
+    private static string? ParseModel(string[] args)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (string.Equals(args[index], "--model", StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+            {
+                return args[index + 1];
+            }
+        }
+
+        return null;
     }
 
     private static async Task<int> HandleListAsync(string[] args, string workingDirectory, Func<string, Task<RouterConfiguration>> configurationLoader, TextWriter errorWriter)
     {
         try
         {
+            var model = ParseModel(args);
             var configuration = await configurationLoader(workingDirectory);
-            var identity = await ResolveListIdentityAsync(configuration, workingDirectory);
             var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
             var claim = await WorkClaimStore.TryReadAsync(commonDirectory);
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
-                currentModel: null,
-                assignmentIdentity: identity,
-                activeClaim: claim);
+                currentModel: model,
+                activeClaim: claim,
+                dependencies: new RoutingEvaluationDependencies
+                {
+                    ResolveAssignmentIdentityAsync = (config, wd) => ResolveIdentityAsync(config, wd)
+                });
 
             if (!plan.IsSuccessful)
             {
@@ -111,41 +155,35 @@ public static class WorkCommandHandler
         }
     }
 
-    private static async Task<AssignmentIdentity?> ResolveListIdentityAsync(RouterConfiguration configuration, string workingDirectory)
+    private static async Task<AssignmentIdentityResolution> ResolveIdentityAsync(RouterConfiguration configuration, string workingDirectory)
     {
         if (!AssignmentRoutingService.RequiresLocalIdentity(configuration))
         {
-            return null;
+            return AssignmentIdentityResolution.NotEnabled;
         }
 
-        try
+        var gitIdentityValue = await GitRepositoryService.GetConfigValueAsync(workingDirectory, AssignmentRoutingService.LocalIdentityConfigKey, CancellationToken.None);
+        var usernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+        if (usernames.Count == 0)
         {
-            var gitIdentityValue = await GitRepositoryService.GetConfigValueAsync(workingDirectory, AssignmentRoutingService.LocalIdentityConfigKey, CancellationToken.None);
-            var gitUsernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
-            if (gitUsernames.Count > 0)
+            string? authenticatedLogin = null;
+            try
             {
-                return AssignmentRoutingService.ResolveIdentity(AssignmentRoutingService.Resolve(configuration, gitUsernames));
+                authenticatedLogin = await GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, CancellationToken.None);
             }
-        }
-        catch
-        {
-            // Fall through to GitHub auth
-        }
+            catch
+            {
+                // A missing or failing GitHub CLI must not crash the diagnostic; identity
+                // resolution fails closed below when no CGR Git identity is configured.
+            }
 
-        try
-        {
-            var authenticatedLogin = await GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, CancellationToken.None);
             if (!string.IsNullOrWhiteSpace(authenticatedLogin))
             {
-                return AssignmentRoutingService.ResolveIdentity(AssignmentRoutingService.Resolve(configuration, new[] { authenticatedLogin.Trim() }));
+                usernames = new[] { authenticatedLogin.Trim() };
             }
         }
-        catch
-        {
-            // Identity unavailable
-        }
 
-        return null;
+        return AssignmentRoutingService.Resolve(configuration, usernames);
     }
 
     public static string FormatClaimStatus(WorkClaim claim)

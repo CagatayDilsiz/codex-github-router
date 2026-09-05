@@ -218,6 +218,23 @@ public sealed class ExplainCommandTests
         Assert.Contains("Routing evaluation failed", error.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Explain_fails_closed_when_assignment_identity_cannot_be_resolved()
+    {
+        using var sandbox = new TestSandbox();
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var deps = Dependencies(sandbox, output, error,
+            configuration: AssignmentConfiguration("require", "allow"),
+            issues: new List<Issue> { ReadyIssue(1) });
+
+        var result = await ExplainCommandHandler.HandleAsync(Array.Empty<string>(), deps);
+
+        Assert.Equal(1, result);
+        Assert.Contains("could not be resolved", error.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("ELIGIBLE", output.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static ExplainCommandDependencies Dependencies(
         TestSandbox sandbox,
         TextWriter output,

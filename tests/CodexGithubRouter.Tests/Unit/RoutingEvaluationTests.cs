@@ -252,10 +252,11 @@ public sealed class RoutingEvaluationTests
     }
 
     [Fact]
-    public async Task Active_claim_in_passive_state_blocks_routing()
+    public async Task Releasable_passive_claim_continues_ordinary_routing_after_simulated_release()
     {
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
         var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9 };
+        var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
         var dependencies = new RoutingEvaluationDependencies
         {
             CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
@@ -264,13 +265,19 @@ public sealed class RoutingEvaluationTests
                 Tasks = new List<WorkflowItem> { passiveTask },
                 ConsideredIssues = new List<Issue> { new() { Number = 9 } }
             }),
-            CheckRepositoryGateAsync = (_, _) => { throw new InvalidOperationException("The repository gate must not run while a work claim is active."); }
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(newIssue))
         };
 
         var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", activeClaim: claim, dependencies: dependencies);
 
-        Assert.True(plan.ClaimRoutingActive);
-        Assert.Contains("no actionable matching task", plan.BlockReason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(plan.IsSuccessful);
+        Assert.False(plan.ClaimRoutingActive);
+        Assert.Null(plan.ActiveClaim);
+        Assert.Equal(claim.IssueNumber, plan.ReleasedClaim!.IssueNumber);
+        Assert.Equal(newIssue.IssueNumber, plan.Decision!.SelectedTask!.IssueNumber);
     }
 
     [Fact]

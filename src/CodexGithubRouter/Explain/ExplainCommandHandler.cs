@@ -28,16 +28,15 @@ public static class ExplainCommandHandler
             }
 
             var configuration = await dependencies.LoadEffectiveConfigurationAsync(workingDirectory, cancellationToken);
-            var identity = await ResolveIdentityAsync(configuration, workingDirectory, dependencies, cancellationToken);
             var activeClaim = await dependencies.ReadWorkClaimAsync(commonDirectory, cancellationToken);
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
                 currentModel: model,
-                assignmentIdentity: identity,
                 activeClaim: activeClaim,
-                dependencies: dependencies.RoutingEvaluation);
+                dependencies: dependencies.RoutingEvaluation.WithIdentityResolver(
+                    (_, _) => ResolveIdentityAsync(configuration, workingDirectory, dependencies, cancellationToken)));
 
             if (!plan.IsSuccessful)
             {
@@ -96,7 +95,7 @@ public static class ExplainCommandHandler
         return Task.FromResult(0);
     }
 
-    private static async Task<AssignmentIdentity?> ResolveIdentityAsync(
+    private static async Task<AssignmentIdentityResolution> ResolveIdentityAsync(
         RouterConfiguration configuration,
         string workingDirectory,
         ExplainCommandDependencies dependencies,
@@ -104,32 +103,31 @@ public static class ExplainCommandHandler
     {
         if (!AssignmentRoutingService.RequiresLocalIdentity(configuration))
         {
-            return null;
+            return AssignmentIdentityResolution.NotEnabled;
         }
 
         var gitIdentityValue = await dependencies.ResolveLocalIdentityAsync(workingDirectory, cancellationToken);
-        var gitUsernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
-        if (gitUsernames.Count > 0)
+        var usernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+        if (usernames.Count == 0)
         {
-            var resolution = AssignmentRoutingService.Resolve(configuration, gitUsernames);
-            return AssignmentRoutingService.ResolveIdentity(resolution);
-        }
+            string? authenticatedLogin = null;
+            try
+            {
+                authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(workingDirectory, cancellationToken);
+            }
+            catch
+            {
+                // A missing or failing GitHub CLI must not crash the diagnostic; identity
+                // resolution fails closed below when no CGR Git identity is configured.
+            }
 
-        try
-        {
-            var authenticatedLogin = await dependencies.ResolveAuthenticatedGitHubLoginAsync(workingDirectory, cancellationToken);
             if (!string.IsNullOrWhiteSpace(authenticatedLogin))
             {
-                var resolution = AssignmentRoutingService.Resolve(configuration, new[] { authenticatedLogin.Trim() });
-                return AssignmentRoutingService.ResolveIdentity(resolution);
+                usernames = new[] { authenticatedLogin.Trim() };
             }
         }
-        catch
-        {
-            // Identity resolution failure is not fatal for explanation; results will show the identity issue.
-        }
 
-        return null;
+        return AssignmentRoutingService.Resolve(configuration, usernames);
     }
 
     private static bool TryParseArguments(string[] args, out int? issueNumber, out string workingDirectory, out string? model, out string error)

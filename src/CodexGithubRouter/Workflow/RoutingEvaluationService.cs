@@ -39,17 +39,32 @@ public sealed class RoutingEvaluationDependencies
 
     public Func<RouterConfiguration, string, Task<AssignmentIdentityResolution>> ResolveAssignmentIdentityAsync { get; init; }
         = (_, _) => Task.FromResult(AssignmentIdentityResolution.NotEnabled);
+
+    public RoutingEvaluationDependencies WithIdentityResolver(
+        Func<RouterConfiguration, string, Task<AssignmentIdentityResolution>> resolver) => new()
+    {
+        CheckRepositoryGateAsync = CheckRepositoryGateAsync,
+        CheckCompletedIssuesAsync = CheckCompletedIssuesAsync,
+        CheckInProgressIssuesAsync = CheckInProgressIssuesAsync,
+        CheckNewIssuesAsync = CheckNewIssuesAsync,
+        CheckClaimedWorkAsync = CheckClaimedWorkAsync,
+        ResolveAssignmentIdentityAsync = resolver
+    };
 }
 
 /// <summary>
 /// Produces the read-only production routing plan that the hook and the diagnostic
-/// commands share. Every stage (repository gate, active-claim routing, discovery,
-/// worker/assignment exclusion, generated workflow items and the final routing
-/// decision) is evaluated through the same production code paths used by the hook.
+/// commands share. Every stage (repository gate, active-claim routing and its
+/// release/reconciliation simulation, discovery, worker/assignment exclusion,
+/// generated workflow items and the final routing decision) is evaluated through
+/// the same production code paths used by the hook.
 /// Assignment identity resolution is part of the plan and is only performed on the
 /// ordinary routing path, so an active repository gate never requires developer
-/// identity. This service never mutates repository state: acquiring claims, closing
-/// issues and writing claim files remain exclusive to the hook.
+/// identity. When a claim is passive/terminal, production reconciles and releases it
+/// before routing; the plan simulates that release (without mutating the claim file)
+/// and continues through ordinary routing. This service never mutates repository
+/// state: acquiring claims, closing issues and writing claim files remain exclusive
+/// to the hook.
 /// </summary>
 public static class RoutingEvaluationService
 {
@@ -66,16 +81,27 @@ public static class RoutingEvaluationService
 
         dependencies ??= new RoutingEvaluationDependencies();
 
+        WorkClaim? releasedClaim = null;
         if (activeClaim is not null)
         {
-            return await EvaluateClaimedAsync(configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, dependencies);
+            var claimedResult = await EvaluateClaimedAsync(configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, dependencies);
+            if (claimedResult is not null)
+            {
+                return claimedResult;
+            }
+
+            // Production reconciliation released the passive/terminal claim; ordinary
+            // routing continues in this same invocation. Read-only simulation: the plan
+            // proceeds through the ordinary path while recording the released claim.
+            releasedClaim = activeClaim;
         }
 
+        var activeClaimNow = releasedClaim is null ? activeClaim : null;
         var identityResolution = AssignmentIdentityResolution.NotEnabled;
         var repositoryGateTasks = await dependencies.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (!repositoryGateTasks.IsSuccessful)
         {
-            return RoutingEvaluationResult.Failure(repositoryGateTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+            return RoutingEvaluationResult.Failure(repositoryGateTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, releasedClaim: releasedClaim);
         }
 
         IReadOnlyList<WorkflowItem> workflowTasks;
@@ -93,7 +119,7 @@ public static class RoutingEvaluationService
                 identityResolution = await dependencies.ResolveAssignmentIdentityAsync(configuration, workingDirectory);
                 if (identityResolution.IsEnabled && !identityResolution.IsResolved)
                 {
-                    return RoutingEvaluationResult.Failure(identityResolution.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
+                    return RoutingEvaluationResult.Failure(identityResolution.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
                 }
 
                 if (identityResolution.IsEnabled && identityResolution.IsResolved)
@@ -105,19 +131,19 @@ public static class RoutingEvaluationService
             var completedIssueTasks = await dependencies.CheckCompletedIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!completedIssueTasks.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(completedIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
+                return RoutingEvaluationResult.Failure(completedIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
             }
 
             var inProgressIssueTasks = await dependencies.CheckInProgressIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!inProgressIssueTasks.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(inProgressIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
+                return RoutingEvaluationResult.Failure(inProgressIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
             }
 
             var newIssueTask = await dependencies.CheckNewIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!newIssueTask.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(newIssueTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
+                return RoutingEvaluationResult.Failure(newIssueTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
             }
 
             var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask };
@@ -182,7 +208,8 @@ public static class RoutingEvaluationService
             WorkingDirectory = workingDirectory,
             CurrentModel = currentModel,
             AssignmentIdentity = assignmentIdentity,
-            ActiveClaim = activeClaim,
+            ActiveClaim = activeClaimNow,
+            ReleasedClaim = releasedClaim,
             IsSuccessful = true,
             IdentityResolution = identityResolution,
             RepositoryGateTasks = repositoryGateTasks.Tasks,
@@ -196,7 +223,7 @@ public static class RoutingEvaluationService
         };
     }
 
-    private static async Task<RoutingEvaluationResult> EvaluateClaimedAsync(
+    private static async Task<RoutingEvaluationResult?> EvaluateClaimedAsync(
         RouterConfiguration configuration,
         string workingDirectory,
         string? currentModel,
@@ -210,30 +237,17 @@ public static class RoutingEvaluationService
             return RoutingEvaluationResult.Failure(claimedWork.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
         }
 
-        var workflowTasks = claimedWork.Tasks.ToList();
-        var actionableTasks = workflowTasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
+        if (IsReleaseCandidate(claimedWork))
+        {
+            // Production releases a passive/terminal claim before routing and the same
+            // hook invocation continues through ordinary routing. This read-only plan
+            // simulates that release (nothing is mutated) by signalling the caller to
+            // continue through the ordinary path with the released claim recorded.
+            return null;
+        }
 
-        var consideredIssues = claimedWork.ConsideredIssues.Count == 0
-            ? new List<Issue> { new() { Number = activeClaim.IssueNumber } }
-            : claimedWork.ConsideredIssues.ToList();
-
-        string? blockReason;
-        HookTaskDecision? decision = null;
-        if (workflowTasks.Count == 0)
-        {
-            blockReason = $"Active work claim for issue #{activeClaim.IssueNumber}{FormatPullRequest(activeClaim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed.";
-        }
-        else if (actionableTasks.Count == 0)
-        {
-            blockReason = "All workflow tasks are deferred. No action is required at this time.";
-        }
-        else
-        {
-            decision = HookTaskRouter.Route(actionableTasks);
-            blockReason = string.Equals(decision.BlockReason, "No actionable workflow tasks found.", StringComparison.Ordinal)
-                ? $"Active work claim for issue #{activeClaim.IssueNumber}{FormatPullRequest(activeClaim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed."
-                : decision.BlockReason;
-        }
+        var actionableTasks = claimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
+        var decision = HookTaskRouter.RouteClaimedWork(activeClaim, activeClaim.OwnerSessionId, actionableTasks);
 
         return new RoutingEvaluationResult
         {
@@ -244,16 +258,23 @@ public static class RoutingEvaluationService
             ActiveClaim = activeClaim,
             IsSuccessful = true,
             ClaimRoutingActive = true,
-            WorkflowTasks = workflowTasks,
+            WorkflowTasks = claimedWork.Tasks,
             ActionableTasks = actionableTasks,
             Decision = decision,
-            BlockReason = blockReason,
-            ConsideredIssues = consideredIssues
+            BlockReason = decision.BlockReason,
+            ConsideredIssues = claimedWork.ConsideredIssues.Count == 0
+                ? new List<Issue> { new() { Number = activeClaim.IssueNumber } }
+                : claimedWork.ConsideredIssues.ToList()
         };
     }
 
-    private static string FormatPullRequest(int? pullRequestNumber) =>
-        pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
+    private static bool IsReleaseCandidate(WorkflowResponse response) =>
+        response.Tasks.Count == 1 && response.Tasks[0].Type is
+            WorkflowItemType.AwaitingReview or
+            WorkflowItemType.AwaitingMerge or
+            WorkflowItemType.Deferred or
+            WorkflowItemType.CloseIssue or
+            WorkflowItemType.ClosedWithoutMerge;
 
     private static IReadOnlyList<Issue> MergeConsideredIssues(IReadOnlyList<WorkflowResponse> responses)
     {
@@ -281,13 +302,15 @@ public sealed class RoutingEvaluationResult
         string? currentModel,
         AssignmentIdentity? assignmentIdentity,
         WorkClaim? activeClaim,
-        AssignmentIdentityResolution? identityResolution = null) => new()
+        AssignmentIdentityResolution? identityResolution = null,
+        WorkClaim? releasedClaim = null) => new()
         {
             Configuration = configuration,
             WorkingDirectory = workingDirectory,
             CurrentModel = currentModel,
             AssignmentIdentity = assignmentIdentity,
             ActiveClaim = activeClaim,
+            ReleasedClaim = releasedClaim,
             IsSuccessful = false,
             IdentityResolution = identityResolution ?? AssignmentIdentityResolution.NotEnabled,
             DiscoveryFailureMessage = message
@@ -302,6 +325,8 @@ public sealed class RoutingEvaluationResult
     public AssignmentIdentity? AssignmentIdentity { get; init; }
 
     public WorkClaim? ActiveClaim { get; init; }
+
+    public WorkClaim? ReleasedClaim { get; init; }
 
     public bool IsSuccessful { get; init; } = true;
 

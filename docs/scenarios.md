@@ -183,12 +183,15 @@ cgr work status        # reports repository gates separately from the active cla
 
 ```bash
 cgr work list                  # all rules and their verdicts, ordered like the hook would route
+cgr work list --model gpt-5-codex   # same list for a specific model (like `cgr explain --model`)
 cgr explain --issue 12         # detailed per-issue explanation
 cgr explain                    # the same list form as `cgr work list`
 cgr explain --issue 12 --model gpt-5-codex
 ```
 
-The per-issue explanation covers the identical stages the hook uses to route: Workflow State, Candidate Discovery, Worker Routing, Assignment Routing, Repository Gate, Work Claim, and Routing Outcome (which shows the actual production winner, a production-wide block, or why a competing issue won). Hard ineligibility (for example an active claim on another issue, a worker/model mismatch under `require`, or a blocked/needs-info repository gate) marks the issue ineligible; soft verdicts show an issue that is eligible but ranked or routed behind the production selection.
+The per-issue explanation covers the identical stages the hook uses to route: Workflow State, Candidate Discovery, Worker Routing, Assignment Routing, Repository Gate, Work Claim, and Routing Outcome (which shows the actual production winner, a production-wide block, or why a competing issue won). Hard ineligibility (for example a worker/model mismatch under `require`, or a blocked/needs-info repository gate) marks the issue ineligible; soft verdicts show an issue that is eligible but ranked or routed behind the production selection.
+
+Diagnostics resolve assignment identity through the same fail-closed plan stage the hook uses: when assignment routing requires an identity and neither the CGR Git identity nor the authenticated GitHub account resolves one, the command fails with the same message the hook would block on instead of reporting assignment-ineligible issues. An active claim in a passive/terminal state (awaiting review/merge, deferred, close, or closed-without-merge) is reported as "would be released by production reconciliation; ordinary routing continues" — a read-only simulation that never touches the claim file.
 
 Example:
 

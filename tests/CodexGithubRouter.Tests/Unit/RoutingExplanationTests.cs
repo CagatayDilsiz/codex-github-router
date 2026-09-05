@@ -700,6 +700,30 @@ public sealed class RoutingExplanationTests
         Assert.True(otherExplanation.IsSelected == false);
     }
 
+    [Fact]
+    public void Claim_release_plan_continues_ordinary_routing_in_explanation()
+    {
+        var issue = ReadyIssue(5);
+        var candidate = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var plan = new RoutingEvaluationResult
+        {
+            Configuration = new RouterConfiguration(),
+            ReleasedClaim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation },
+            ConsideredIssues = new[] { issue },
+            WorkflowTasks = new[] { candidate },
+            ActionableTasks = new[] { candidate },
+            Decision = new HookTaskDecision { SelectedTask = candidate, AdditionalContext = "next" }
+        };
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.True(explanation.IsEligible);
+        Assert.True(explanation.IsSelected);
+        var claimStage = Assert.Single(explanation.Stages, s => s.Name == "Work Claim");
+        Assert.Equal(RoutingVerdict.Pass, claimStage.Verdict);
+        Assert.Contains("released", claimStage.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static RoutingEvaluationResult Plan(
         RouterConfiguration? configuration = null,
         string? currentModel = null,

@@ -60,7 +60,7 @@ public static class RoutingExplanationService
         stages.Add(gateStage);
         isEligible &= gateStage.Verdict != RoutingVerdict.HardIneligible;
 
-        var claimStage = ExplainClaimStatus(issue, plan.ActiveClaim);
+        var claimStage = ExplainClaimStatus(plan, issue);
         stages.Add(claimStage);
         isEligible &= claimStage.Verdict != RoutingVerdict.HardIneligible;
 
@@ -420,8 +420,19 @@ public static class RoutingExplanationService
         };
     }
 
-    private static RoutingStage ExplainClaimStatus(Issue issue, WorkClaim? activeClaim)
+    private static RoutingStage ExplainClaimStatus(RoutingEvaluationResult plan, Issue issue)
     {
+        if (plan.ReleasedClaim is not null)
+        {
+            return new RoutingStage
+            {
+                Name = "Work Claim",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"The active work claim for issue #{plan.ReleasedClaim.IssueNumber} is passive or terminal and would be released by production reconciliation, so ordinary routing continues. Read-only simulation: the claim file is not modified."
+            };
+        }
+
+        var activeClaim = plan.ActiveClaim;
         if (activeClaim is null)
         {
             return new RoutingStage

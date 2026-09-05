@@ -177,11 +177,12 @@ The hook and the read-only diagnostic commands share the same routing plan. When
 
 ```bash
 cgr work list             # every candidate and why it was eligible, blocked, or selected
+cgr work list --model gpt-5-codex   # same list for a specific model
 cgr explain --issue 12    # detailed per-issue decision stages
 cgr explain              # the same list form as `cgr work list`
 ```
 
-This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason.
+This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A passive/terminal claim is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
 
 ## Structured hook diagnostics
 
