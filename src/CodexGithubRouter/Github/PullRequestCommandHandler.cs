@@ -84,6 +84,14 @@ public static class PullRequestCommandHandler
                 return 1;
             }
 
+            var worktreeId = await dependencies.ResolveWorktreeIdAsync(workingDirectory);
+
+            if (worktreeId is null)
+            {
+                Console.Error.WriteLine("Not a valid Git repository.");
+                return 1;
+            }
+
             var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
 
             var pullRequestSelection = new PullRequestSelection()
@@ -98,14 +106,14 @@ public static class PullRequestCommandHandler
             var pullRequestToTransition = await dependencies.GetPullRequestAsync(workingDirectory, pullRequestNumber, pullRequestSelection);
           
             var pullRequestTransition = PullRequestTransitionPlanner.Plan(pullRequestToTransition, targetState, routerConfig);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir, worktreeId);
             var isCurrentImplementationClaim = await IsCurrentImplementationClaimAsync(workingDirectory, activeClaim, pullRequestToTransition);
 
             if (pullRequestTransition.LabelsToAdd.Count == 0 && pullRequestTransition.LabelsToRemove.Count == 0)
             {
                 if (activeClaim is not null)
                 {
-                    await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
+                    await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, worktreeId, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
                 }
                 Console.WriteLine($"Pull request #{pullRequestNumber} is already in state '{targetState}'.");
                 return 0;
@@ -114,7 +122,7 @@ public static class PullRequestCommandHandler
             await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
             if (activeClaim is not null)
             {
-                await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
+                await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, worktreeId, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
             }
             Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
         }
@@ -220,6 +228,8 @@ public static class PullRequestCommandHandler
 public sealed class PullRequestCommandDependencies
 {
     public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+
+    public Func<string, Task<string?>> ResolveWorktreeIdAsync { get; init; } = workingDirectory => GitRepositoryService.GetWorktreeIdAsync(workingDirectory);
 
     public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 

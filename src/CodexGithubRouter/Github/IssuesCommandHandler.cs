@@ -66,19 +66,27 @@ public static class IssuesCommandHandler
                 return 1;
             }
 
+            var worktreeId = await GitRepositoryService.GetWorktreeIdAsync(workingDirectory);
+
+            if (worktreeId is null)
+            {
+                Console.Error.WriteLine("Not a valid Git repository.");
+                return 1;
+            }
+
             var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
 
 
             var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
           
             var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir, worktreeId);
 
             if (issueTransition.LabelsToAdd.Count == 0 && issueTransition.LabelsToRemove.Count == 0)
             {
                 if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
                 {
-                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, worktreeId, activeClaim!);
                 }
                 Console.WriteLine($"Issue #{issueNumber} is already in state '{targetState}'.");
                 return 0;
@@ -87,7 +95,7 @@ public static class IssuesCommandHandler
             await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
             if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
             {
-                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, worktreeId, activeClaim!);
             }
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }

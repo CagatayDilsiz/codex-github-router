@@ -4,20 +4,65 @@ namespace CodexGithubRouter.Work;
 
 public static class WorkClaimStore
 {
-    private const string ClaimFileName = "codex-github-router.work.json";
+    public const string ClaimFileName = "codex-github-router.work.json";
     private const string LockFileName = "codex-github-router.work.lock";
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static Task<WorkClaim?> ReadAsync(string gitCommonDirectory, CancellationToken cancellationToken = default) =>
-        WithLockAsync(gitCommonDirectory, () => ReadUnsafeAsync(gitCommonDirectory, cancellationToken), cancellationToken);
-
-    public static Task<WorkClaim?> TryReadAsync(string gitCommonDirectory, CancellationToken cancellationToken = default) =>
-        ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-
-    public static Task<WorkClaimAcquisitionResult> TryAcquireAsync(string gitCommonDirectory, WorkClaim requested, CancellationToken cancellationToken = default) =>
+    /// <summary>
+    /// Reads the active claim owned by the given worktree. Legacy single-claim files are
+    /// migrated to the worktree-scoped format under the lock and the current claim is
+    /// returned for the supplied worktree identity.
+    /// </summary>
+    public static Task<WorkClaim?> ReadAsync(string gitCommonDirectory, string worktreeId, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
-            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            return FindClaim(set, worktreeId);
+        }, cancellationToken);
+
+    public static async Task<WorkClaim?> TryReadAsync(string gitCommonDirectory, string worktreeId, CancellationToken cancellationToken = default)
+    {
+        var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: false, cancellationToken);
+        return FindClaim(set, worktreeId);
+    }
+
+    /// <summary>
+    /// Reads the complete repository-wide claim set so every worktree observes all active
+    /// claims. Mutates the store only to persist a one-time legacy-format migration.
+    /// </summary>
+    public static Task<IReadOnlyList<WorkClaim>> ReadAllAsync(string gitCommonDirectory, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            return (IReadOnlyList<WorkClaim>)set.Claims;
+        }, cancellationToken);
+
+    public static async Task<IReadOnlyList<WorkClaim>> TryReadAllAsync(string gitCommonDirectory, CancellationToken cancellationToken = default)
+    {
+        var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: false, cancellationToken);
+        return set.Claims;
+    }
+
+    public static Task<WorkClaimAcquisitionResult> TryAcquireAsync(string gitCommonDirectory, string worktreeId, WorkClaim requested, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var worktreeKey = NormalizeWorktreeId(worktreeId);
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claims = set.Claims;
+
+            var otherWorktreeClaim = claims.FirstOrDefault(candidate =>
+                !string.Equals(candidate.WorktreeId, worktreeKey, StringComparison.Ordinal) &&
+                SameWork(candidate, requested));
+            if (otherWorktreeClaim is not null)
+            {
+                return new WorkClaimAcquisitionResult
+                {
+                    Claim = otherWorktreeClaim,
+                    BlockReason = $"Active work claim for issue #{otherWorktreeClaim.IssueNumber}{FormatPullRequest(otherWorktreeClaim.PullRequestNumber)} is owned by another Git worktree."
+                };
+            }
+
+            var existing = claims.FirstOrDefault(candidate => string.Equals(candidate.WorktreeId, worktreeKey, StringComparison.Ordinal));
             if (existing is not null && !string.Equals(existing.OwnerSessionId, requested.OwnerSessionId, StringComparison.Ordinal))
             {
                 return new WorkClaimAcquisitionResult
@@ -32,7 +77,7 @@ public static class WorkClaimStore
                 return new WorkClaimAcquisitionResult
                 {
                     Claim = existing,
-                    BlockReason = $"Active work claim is already held for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)} and cannot be replaced by a different work identity."
+                    BlockReason = $"This worktree already owns an active work claim for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)}; a worktree can hold only one active work item. Release it before claiming issue #{requested.IssueNumber}."
                 };
             }
 
@@ -41,6 +86,7 @@ public static class WorkClaimStore
             {
                 ClaimId = existing is not null && existing.ClaimId != Guid.Empty ? existing.ClaimId : Guid.NewGuid(),
                 Version = (existing?.Version ?? 0) + 1,
+                WorktreeId = worktreeKey,
                 OwnerSessionId = requested.OwnerSessionId,
                 IssueNumber = requested.IssueNumber,
                 PullRequestNumber = requested.PullRequestNumber ?? existing?.PullRequestNumber,
@@ -53,88 +99,186 @@ public static class WorkClaimStore
                 ClaimedAt = existing?.ClaimedAt ?? now,
                 LastUpdatedAt = now
             };
-            await WriteUnsafeAsync(gitCommonDirectory, claim, cancellationToken);
+
+            if (existing is not null)
+            {
+                claims.Remove(existing);
+            }
+
+            claims.Add(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
             return new WorkClaimAcquisitionResult { Acquired = true, Claim = claim };
         }, cancellationToken);
 
-    public static Task<bool> ReleaseForIssueAsync(string gitCommonDirectory, int issueNumber, CancellationToken cancellationToken = default) =>
+    public static Task<bool> ReleaseForIssueAsync(string gitCommonDirectory, string worktreeId, int issueNumber, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
-            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (existing?.IssueNumber != issueNumber) return false;
-            DeleteUnsafe(gitCommonDirectory);
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claim = FindClaim(set, worktreeId);
+            if (claim?.IssueNumber != issueNumber) return false;
+            set.Claims.Remove(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
             return true;
         }, cancellationToken);
 
-    public static Task<bool> ReleaseIfMatchesAsync(string gitCommonDirectory, WorkClaim expected, CancellationToken cancellationToken = default) =>
+    public static Task<bool> ReleaseIfMatchesAsync(string gitCommonDirectory, string worktreeId, WorkClaim expected, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
-            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (existing is null || existing.ClaimId != expected.ClaimId || existing.Version != expected.Version) return false;
-            DeleteUnsafe(gitCommonDirectory);
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claim = FindClaim(set, worktreeId);
+            if (claim is null || claim.ClaimId != expected.ClaimId || claim.Version != expected.Version) return false;
+            set.Claims.Remove(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
             return true;
         }, cancellationToken);
 
-    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, CancellationToken cancellationToken = default) =>
-        ReleaseForPullRequestTransitionAsync(gitCommonDirectory, expected, pullRequestNumber, closingIssueNumbers, isPassiveTarget, false, cancellationToken);
+    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, string worktreeId, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, CancellationToken cancellationToken = default) =>
+        ReleaseForPullRequestTransitionAsync(gitCommonDirectory, worktreeId, expected, pullRequestNumber, closingIssueNumbers, isPassiveTarget, false, cancellationToken);
 
-    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, bool isCurrentClaimPullRequest, CancellationToken cancellationToken = default) =>
+    public static Task<bool> ReleaseForPullRequestTransitionAsync(string gitCommonDirectory, string worktreeId, WorkClaim expected, int pullRequestNumber, IReadOnlyCollection<int> closingIssueNumbers, bool isPassiveTarget, bool isCurrentClaimPullRequest, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
-            var existing = await ReadUnsafeAsync(gitCommonDirectory, cancellationToken);
-            if (!isPassiveTarget || existing is null || existing.ClaimId != expected.ClaimId || existing.Version != expected.Version) return false;
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claim = FindClaim(set, worktreeId);
+            if (!isPassiveTarget || claim is null || claim.ClaimId != expected.ClaimId || claim.Version != expected.Version) return false;
 
-            var matchesClaimedPullRequest = existing.PullRequestNumber == pullRequestNumber;
-            var matchesInitialImplementation = existing.PullRequestNumber is null &&
-                existing.WorkType == WorkClaimType.Implementation &&
-                closingIssueNumbers.Contains(existing.IssueNumber) &&
+            var matchesClaimedPullRequest = claim.PullRequestNumber == pullRequestNumber;
+            var matchesInitialImplementation = claim.PullRequestNumber is null &&
+                claim.WorkType == WorkClaimType.Implementation &&
+                closingIssueNumbers.Contains(claim.IssueNumber) &&
                 isCurrentClaimPullRequest;
             if (!matchesClaimedPullRequest && !matchesInitialImplementation) return false;
 
-            DeleteUnsafe(gitCommonDirectory);
+            set.Claims.Remove(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
             return true;
         }, cancellationToken);
 
-    private static async Task<WorkClaim?> ReadUnsafeAsync(string gitCommonDirectory, CancellationToken cancellationToken)
+    /// <summary>
+    /// Removes claims owned by worktrees that no longer exist. The caller supplies the
+    /// existence predicate (for example <c>Directory.Exists</c> over each claim's git-dir),
+    /// so the store stays free of filesystem assumptions. Returns the number of claims pruned.
+    /// </summary>
+    public static Task<int> PruneStaleWorktreesAsync(string gitCommonDirectory, Func<string, bool> worktreeExists, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var before = set.Claims.Count;
+            set.Claims.RemoveAll(claim => !worktreeExists(claim.WorktreeId));
+            var removed = before - set.Claims.Count;
+            if (removed > 0)
+            {
+                await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
+            }
+
+            return removed;
+        }, cancellationToken);
+
+    private static WorkClaim? FindClaim(WorkClaimSet set, string worktreeId)
     {
-        var path = Path.Combine(gitCommonDirectory, ClaimFileName);
-        if (!File.Exists(path)) return null;
-        await using var stream = File.OpenRead(path);
-        WorkClaim? claim;
+        var worktreeKey = NormalizeWorktreeId(worktreeId);
+        return set.Claims.FirstOrDefault(claim => string.Equals(claim.WorktreeId, worktreeKey, StringComparison.Ordinal));
+    }
+
+    private static WorkClaimSet ReadSetUnsafeRaw(string gitCommonDirectory, string content)
+    {
+        JsonDocument document;
         try
         {
-            claim = await JsonSerializer.DeserializeAsync<WorkClaim>(stream, JsonOptions, cancellationToken);
+            document = JsonDocument.Parse(content);
         }
         catch (JsonException exception)
         {
             throw new WorkClaimFileException("The repository work-claim file is not valid claim JSON.", exception);
         }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Null || root.ValueKind == JsonValueKind.Undefined)
+            {
+                throw new WorkClaimFileException("The work-claim file contains an invalid claim.");
+            }
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("Claims", out _))
+            {
+                var set = JsonSerializer.Deserialize<WorkClaimSet>(content, JsonOptions);
+                if (set is null || set.Claims is null)
+                {
+                    throw new WorkClaimFileException("The work-claim file contains an invalid claim set.");
+                }
+
+                foreach (var claim in set.Claims)
+                {
+                    ValidateClaim(claim);
+                }
+
+                return set;
+            }
+
+            var legacyClaim = JsonSerializer.Deserialize<WorkClaim>(content, JsonOptions);
+            if (legacyClaim is null)
+            {
+                throw new WorkClaimFileException("The work-claim file contains an invalid claim.");
+            }
+
+            var mainWorktreeId = NormalizeWorktreeId(gitCommonDirectory);
+            var migratedClaim = WithWorktree(legacyClaim, mainWorktreeId);
+            ValidateClaim(migratedClaim);
+
+            return new WorkClaimSet
+            {
+                Claims = new List<WorkClaim>
+                {
+                    migratedClaim
+                }
+            };
+        }
+    }
+
+    private static async Task<WorkClaimSet> ReadSetUnsafeAsync(string gitCommonDirectory, bool persistLegacyMigration, CancellationToken cancellationToken)
+    {
+        var path = Path.Combine(gitCommonDirectory, ClaimFileName);
+        if (!File.Exists(path)) return new WorkClaimSet();
+        var content = await File.ReadAllTextAsync(path, cancellationToken);
+        if (string.IsNullOrWhiteSpace(content)) throw new WorkClaimFileException("The work-claim file is empty or contains no claim set.");
+        var set = ReadSetUnsafeRaw(gitCommonDirectory, content);
+
+        if (persistLegacyMigration && !IsSetFormat(content))
+        {
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
+        }
+
+        return set;
+    }
+
+    private static bool IsSetFormat(string content)
+    {
+        using var document = JsonDocument.Parse(content);
+        return document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.TryGetProperty("Claims", out _);
+    }
+
+    private static void ValidateClaim(WorkClaim? claim)
+    {
         if (claim is null || claim.ClaimId == Guid.Empty || claim.Version <= 0 ||
-            string.IsNullOrWhiteSpace(claim.OwnerSessionId) || claim.IssueNumber <= 0 ||
+            string.IsNullOrWhiteSpace(claim.WorktreeId) || string.IsNullOrWhiteSpace(claim.OwnerSessionId) ||
+            claim.IssueNumber <= 0 ||
             !Enum.IsDefined(claim.WorkType) ||
             claim.ClaimedAt == default || claim.LastUpdatedAt == default)
         {
             throw new WorkClaimFileException("The work-claim file contains an invalid claim.");
         }
-
-        return claim;
     }
 
-    private static async Task WriteUnsafeAsync(string gitCommonDirectory, WorkClaim claim, CancellationToken cancellationToken)
+    private static async Task WriteSetUnsafeAsync(string gitCommonDirectory, WorkClaimSet set, CancellationToken cancellationToken)
     {
         var path = Path.Combine(gitCommonDirectory, ClaimFileName);
         var temporaryPath = path + ".tmp";
         await using (var stream = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            await JsonSerializer.SerializeAsync(stream, claim, JsonOptions, cancellationToken);
+            await JsonSerializer.SerializeAsync(stream, set, JsonOptions, cancellationToken);
         }
         File.Move(temporaryPath, path, true);
-    }
-
-    private static void DeleteUnsafe(string gitCommonDirectory)
-    {
-        var path = Path.Combine(gitCommonDirectory, ClaimFileName);
-        if (File.Exists(path)) File.Delete(path);
     }
 
     private static async Task<T> WithLockAsync<T>(string gitCommonDirectory, Func<Task<T>> action, CancellationToken cancellationToken)
@@ -150,6 +294,24 @@ public static class WorkClaimStore
         if (lockStream is null) throw new IOException("Could not acquire the repository work-claim lock.");
         await using (lockStream) return await action();
     }
+
+    internal static string NormalizeWorktreeId(string worktreeId) => Path.GetFullPath(worktreeId.Trim());
+
+    private static WorkClaim WithWorktree(WorkClaim claim, string worktreeId) => new()
+    {
+        ClaimId = claim.ClaimId,
+        Version = claim.Version,
+        WorktreeId = worktreeId,
+        OwnerSessionId = claim.OwnerSessionId,
+        IssueNumber = claim.IssueNumber,
+        PullRequestNumber = claim.PullRequestNumber,
+        WorkType = claim.WorkType,
+        WorkerProfile = claim.WorkerProfile,
+        Model = claim.Model,
+        ClaimedIssueUpdatedAt = claim.ClaimedIssueUpdatedAt,
+        ClaimedAt = claim.ClaimedAt,
+        LastUpdatedAt = claim.LastUpdatedAt
+    };
 
     private static bool SameWork(WorkClaim left, WorkClaim right) =>
         left.IssueNumber == right.IssueNumber && left.PullRequestNumber == right.PullRequestNumber;

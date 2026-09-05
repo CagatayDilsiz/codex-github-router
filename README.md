@@ -5,7 +5,7 @@
 
 Codex GitHub Router (`cgr`) is a small .NET CLI that connects [Codex](https://openai.com/index/introducing-codex/) sessions with GitHub Issues and Pull Requests. It installs a Codex `UserPromptSubmit` hook, finds the next actionable workflow item, prioritizes existing review or change-request work, and can prevent new work from starting while an earlier item still requires attention.
 
-CGR turns a labeled GitHub workflow (ready → working → done) into router decisions. When you ask Codex to "work on the next task", the hook checks the repository state and delivers the additional context Codex needs: which issue to take, whether an in-progress issue must be resumed, whether a pull request is waiting on a change request, and so on. It intentionally keeps at most one active coding claim per repository so multiple sessions and worktrees agree on who owns the work.
+CGR turns a labeled GitHub workflow (ready → working → done) into router decisions. When you ask Codex to "work on the next task", the hook checks the repository state and delivers the additional context Codex needs: which issue to take, whether an in-progress issue must be resumed, whether a pull request is waiting on a change request, and so on. It keeps a repository-wide claim set with at most one active coding claim per worktree, so parallel work can proceed across Git worktrees while sessions agree on who owns which issue.
 
 ## Requirements
 
@@ -96,8 +96,8 @@ Workflow and pull-request labels, worker routing, assignee-aware routing, reposi
 
 ## Current scope and limitations
 
-- At most **one active coding claim** per repository, shared across worktrees.
-- CGR never starts a second issue, branch, or pull request while work is active.
+- At most **one active coding claim per worktree**, with the full repository claim set shared across worktrees.
+- CGR never starts a second issue, branch, or pull request in a worktree while that worktree has an active claim; different worktrees claim different work items.
 - Autonomous mode is repository-specific and stored in the shared Git common directory.
 - The router relies on GitHub labels to model state; conflicting labels are treated as an ambiguous state and block the hook.
 - PR review itself is not a claimable work type yet; change requests on linked pull requests are.

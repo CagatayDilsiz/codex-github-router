@@ -23,6 +23,27 @@ public static class GitRepositoryService
         return Path.GetFullPath(output);
     }
 
+    public static async Task<string?> GetWorktreeIdAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(workingDirectory, "git", new[] { "rev-parse", "--absolute-git-dir" }, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            await Console.Error.WriteLineAsync($"Git command failed with exit code {process.ExitCode}: {process.Error}");
+            return null;
+        }
+
+        var output = process.Output.Trim();
+
+        if (string.IsNullOrWhiteSpace(output))
+        {
+            await Console.Error.WriteLineAsync("Git command returned empty output for the worktree git directory.");
+            return null;
+        }
+
+        return Path.GetFullPath(output);
+    }
+
     public static async Task<string?> GetCommonDirectoryAsync(string workingDirectory, CancellationToken cancellationToken = default)
     {
         var arguments = new string[] { "rev-parse", "--git-common-dir" };

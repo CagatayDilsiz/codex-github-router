@@ -10,6 +10,7 @@ public sealed class WorkClaim
 {
     public Guid ClaimId { get; init; }
     public long Version { get; init; }
+    public string WorktreeId { get; init; } = string.Empty;
     public string OwnerSessionId { get; init; } = string.Empty;
     public int IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
@@ -26,4 +27,9 @@ public sealed class WorkClaimAcquisitionResult
     public bool Acquired { get; init; }
     public WorkClaim? Claim { get; init; }
     public string? BlockReason { get; init; }
+}
+
+public sealed class WorkClaimSet
+{
+    public List<WorkClaim> Claims { get; init; } = new();
 }

@@ -12,7 +12,7 @@ public sealed class WorkCommandTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "{}");
         using var error = new StringWriter();
-        var result = await WorkCommandHandler.HandleAsync(new[] { "status", sandbox.RepositoryDirectory }, _ => Task.FromResult<string?>(sandbox.GitCommonDirectory), error);
+        var result = await WorkCommandHandler.HandleAsync(new[] { "status", sandbox.RepositoryDirectory }, _ => Task.FromResult<string?>(sandbox.GitCommonDirectory), error, worktreeIdResolver: _ => Task.FromResult<string?>(sandbox.MainWorktreeId));
         Assert.Equal(1, result);
 
         Assert.Contains("Invalid work-claim file", error.ToString());

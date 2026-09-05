@@ -207,15 +207,16 @@ Example:
     [*] Routing Outcome: Selected: production selected issue #12 as the next work item (task: NewIssue).
 ```
 
-## Worktrees and the single-active-claim limitation
+## Worktrees and per-worktree coding claims
 
-CGR keeps **at most one active coding claim** in the repository's shared Git common directory, so every worktree observes the same owner. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree.
+CGR keeps a **repository-wide claim set** in the repository's shared Git common directory, with **at most one active coding claim per worktree**. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree. A worktree is identified by its Git directory (`git rev-parse --absolute-git-dir`): the main worktree's Git directory equals the common directory, and each linked worktree has its own Git directory under `<common>/.git/worktrees/<name>`.
 
 Consequences:
 
-- A prompt from any worktree sees the same active claim. If another Codex session owns it, the hook blocks with a diagnostic rather than starting parallel work.
-- CGR never starts a second issue, branch, or pull request while a claim is active.
-- **Parallel work across multiple worktrees is not supported yet.** This is the single-active-claim limitation; see [roadmap.md](roadmap.md).
+- Every worktree observes the full claim set. A worktree sees its own active claim when routing, so parallel work can proceed: different worktrees can claim different issues independently.
+- A worktree cannot claim work already owned by another worktree, and cannot start a second issue, branch, or pull request while it already owns an active claim.
+- If a worktree is deleted (e.g. `git worktree remove`), its claims are released by `cgr work reconcile`, which prunes claims whose worktree's Git directory no longer exists.
+- Legacy claim files (single-claim format) migrate automatically to the worktree-scoped claim set, assigned to the main worktree.
 
 If you need to understand what the current claim is, inspect before mutating:
 

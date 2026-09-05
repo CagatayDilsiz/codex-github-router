@@ -20,7 +20,7 @@ public sealed class HookActivationTests
     public async Task Non_matching_prompt_bypasses_another_sessions_active_claim_without_output(string? prompt)
     {
         using var sandbox = new TestSandbox();
-        var claim = (await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim
+        var claim = (await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
         {
             OwnerSessionId = "other-session",
             IssueNumber = 22,
@@ -84,7 +84,7 @@ public sealed class HookActivationTests
             Console.SetOut(originalOut);
         }
 
-        var unchangedClaim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+        var unchangedClaim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
         Assert.NotNull(unchangedClaim);
         Assert.Equal(claim.ClaimId, unchangedClaim!.ClaimId);
         Assert.Equal(claim.Version, unchangedClaim.Version);

@@ -15,7 +15,7 @@ public sealed class WorkClaimPersistenceTests
         var claimPath = Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json");
         await File.WriteAllTextAsync(claimPath, "{\"ClaimId\":");
 
-        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
     }
 
     [Fact]
@@ -24,7 +24,7 @@ public sealed class WorkClaimPersistenceTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "null");
 
-        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
     }
 
     [Fact]
@@ -33,21 +33,21 @@ public sealed class WorkClaimPersistenceTests
         using var sandbox = new TestSandbox();
         await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), "{}");
 
-        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        await Assert.ThrowsAsync<WorkClaimFileException>(() => WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
     }
 
     [Fact]
     public async Task Valid_claim_round_trips_through_the_filesystem()
     {
         using var sandbox = new TestSandbox();
-        var acquired = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim
+        var acquired = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
         {
             OwnerSessionId = "session-a",
             IssueNumber = 21,
             WorkType = WorkClaimType.Implementation
         });
 
-        var read = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+        var read = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
 
         Assert.True(acquired.Acquired);
         Assert.NotNull(read);
@@ -59,7 +59,7 @@ public sealed class WorkClaimPersistenceTests
     public async Task Worker_metadata_round_trips_through_the_filesystem()
     {
         using var sandbox = new TestSandbox();
-        var acquired = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim
+        var acquired = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
         {
             OwnerSessionId = "session-a",
             IssueNumber = 21,
@@ -68,7 +68,7 @@ public sealed class WorkClaimPersistenceTests
             Model = "gpt-5-codex"
         });
 
-        var read = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+        var read = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
 
         Assert.True(acquired.Acquired);
         Assert.Equal("terra", read!.WorkerProfile);
@@ -92,7 +92,7 @@ public sealed class WorkClaimPersistenceTests
         }
         """);
 
-        var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory);
+        var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
         var issue = new Issue { Number = 4 };
         var pullRequest = new PullRequest
         {
@@ -104,6 +104,6 @@ public sealed class WorkClaimPersistenceTests
 
         Assert.NotNull(claim);
         Assert.False(WorkflowService.IsCurrentClaimPullRequest(claim!, issue, pullRequest));
-        Assert.NotNull(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory));
+        Assert.NotNull(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
     }
 }

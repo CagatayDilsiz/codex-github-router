@@ -63,7 +63,8 @@ public sealed class CommandConfigurationDependencyTests
             _ => Task.FromResult<string?>(sandbox.GitCommonDirectory),
             TextWriter.Null,
             _ => WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(sandbox.RepositoryDirectory, sandbox.Paths),
-            (_, _) => Task.FromResult(new WorkflowResponse()));
+            (_, _) => Task.FromResult(new WorkflowResponse()),
+            _ => Task.FromResult<string?>(sandbox.MainWorktreeId));
 
         Assert.Equal(0, result);
         Assert.False(File.Exists(sandbox.Paths.WorkflowFile));

@@ -4,7 +4,7 @@ This page records intended capabilities at a high level. It deliberately does no
 
 ## Parallel work across multiple worktrees
 
-CGR currently keeps a single active coding claim per repository, shared across worktrees. A future capability is parallel work where multiple issues can be worked on concurrently — for example one issue per worktree — with the router coordinating which session owns which issue and branch.
+CGR keeps a repository-wide claim set with one active coding claim per worktree, so multiple issues can be worked on concurrently — one issue per worktree — with the router coordinating which session owns which issue and branch within each worktree, and blocking worktree duplication across the repository. Remaining gaps are cross-machine coordination (see the multi-developer routing section below) and surfacing the full claim set in more surfaces.
 
 ## Multi-developer routing with shared coordination
 

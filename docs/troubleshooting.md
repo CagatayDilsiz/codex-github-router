@@ -143,13 +143,13 @@ cgr doctor
 **Inspection (read-only):**
 
 ```bash
-cgr work status        # shows the claim's issue, pull request, type, worker, and model
+cgr work status        # shows every worktree's claim: issue, pull request, type, worker, model, and worktree
 ```
 
 **Recovery (mutation), in order of preference:**
 
-1. `cgr work reconcile` — removes claims that GitHub shows as **releasable** (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request; for example a merged pull request). Safe when no session owns active work.
-2. `cgr work release --issue <number>` — explicit user recovery; removes the claim **only** for the supplied issue.
+1. `cgr work reconcile` — prunes claims owned by deleted worktrees, then removes claims that GitHub shows as **releasable** (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request; for example a merged pull request). Release and prune are scoped: each mutation targets the current worktree's claim or a worktree whose Git directory no longer exists. Safe when no session owns active work.
+2. `cgr work release --issue <number>` — explicit user recovery; removes the current worktree's claim **only** for the supplied issue.
 
 ### Autonomous mode disabled or repository state inconsistent
 

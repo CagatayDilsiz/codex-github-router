@@ -456,7 +456,7 @@ public sealed class DoctorCommandTests
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
-            ReadWorkClaimAsync = deps.ReadWorkClaimAsync,
+            ReadWorkClaimsAsync = deps.ReadWorkClaimsAsync,
             GetRepositoryLabelNamesAsync = deps.GetRepositoryLabelNamesAsync
         };
         return deps;
@@ -476,7 +476,7 @@ public sealed class DoctorCommandTests
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
-            ReadWorkClaimAsync = deps.ReadWorkClaimAsync,
+            ReadWorkClaimsAsync = deps.ReadWorkClaimsAsync,
             GetRepositoryLabelNamesAsync = deps.GetRepositoryLabelNamesAsync
         };
         return deps;
@@ -496,7 +496,7 @@ public sealed class DoctorCommandTests
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
-            ReadWorkClaimAsync = deps.ReadWorkClaimAsync,
+            ReadWorkClaimsAsync = deps.ReadWorkClaimsAsync,
             GetRepositoryLabelNamesAsync = (_, _) => Task.FromResult(labels)
         };
         return deps;
@@ -516,7 +516,7 @@ public sealed class DoctorCommandTests
             RunGitHubAuthStatusProcessAsync = deps.RunGitHubAuthStatusProcessAsync,
             LoadGlobalConfigurationAsync = deps.LoadGlobalConfigurationAsync,
             LoadEffectiveConfigurationAsync = deps.LoadEffectiveConfigurationAsync,
-            ReadWorkClaimAsync = deps.ReadWorkClaimAsync,
+            ReadWorkClaimsAsync = deps.ReadWorkClaimsAsync,
             GetRepositoryLabelNamesAsync = deps.GetRepositoryLabelNamesAsync
         };
         return deps;

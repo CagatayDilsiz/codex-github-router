@@ -40,13 +40,14 @@ public sealed class ActiveClaimRouteService
     public static ActiveClaimRouteService Create(
         string workingDirectory,
         string gitCommonDirectory,
+        string worktreeId,
         RouterConfiguration configuration)
     {
         return new ActiveClaimRouteService(
             (claim, model) => WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, claim, model),
-            () => WorkClaimStore.ReadAsync(gitCommonDirectory),
-            requested => WorkClaimStore.TryAcquireAsync(gitCommonDirectory, requested),
-            () => WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, configuration));
+            () => WorkClaimStore.ReadAsync(gitCommonDirectory, worktreeId),
+            requested => WorkClaimStore.TryAcquireAsync(gitCommonDirectory, worktreeId, requested),
+            () => WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, worktreeId, configuration));
     }
 
     public async Task<HookTaskDecision?> RouteAsync(WorkClaim activeClaim, string? sessionId, string? currentModel = null)

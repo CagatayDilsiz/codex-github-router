@@ -37,9 +37,13 @@ public static class WorkClaimReconciliationService
             ? linkedPullRequests.SingleOrDefault(pullRequest => pullRequest.Number == claim.PullRequestNumber.Value)
             : null;
 
-    public static async Task<bool> ReconcileAsync(string workingDirectory, string gitCommonDirectory, RouterConfiguration configuration, CancellationToken cancellationToken = default)
+    public static async Task<bool> ReconcileAsync(string workingDirectory, string gitCommonDirectory, string worktreeId, RouterConfiguration configuration, CancellationToken cancellationToken = default)
     {
-        var claim = await WorkClaimStore.ReadAsync(gitCommonDirectory, cancellationToken);
+        // Stale recovery is repository-wide: a claim owned by a worktree whose git-dir
+        // no longer exists is released before the current worktree's claim is evaluated.
+        await WorkClaimStore.PruneStaleWorktreesAsync(gitCommonDirectory, Directory.Exists, cancellationToken);
+
+        var claim = await WorkClaimStore.ReadAsync(gitCommonDirectory, worktreeId, cancellationToken);
         if (claim is null) return false;
 
         var recommendation = await DetermineAsync(workingDirectory, claim, configuration, cancellationToken: cancellationToken);
@@ -51,7 +55,7 @@ public static class WorkClaimReconciliationService
         }
 
         return recommendation == WorkClaimReconciliationRecommendation.WouldRelease
-            && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
+            && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, worktreeId, claim, cancellationToken);
     }
 
     /// <summary>

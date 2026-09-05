@@ -13,12 +13,26 @@ public sealed class TestSandbox : IDisposable
         GitCommonDirectory = Path.Combine(Root, "git-common");
         Directory.CreateDirectory(RepositoryDirectory);
         Directory.CreateDirectory(GitCommonDirectory);
+        MainWorktreeId = GitCommonDirectory;
     }
 
     public string Root { get; }
     public ConfigurationPathSet Paths { get; }
     public string RepositoryDirectory { get; }
     public string GitCommonDirectory { get; }
+
+    /// <summary>
+    /// The main worktree's git-dir, which for the main worktree is identical to the
+    /// Git common directory, used as its worktree identity.
+    /// </summary>
+    public string MainWorktreeId { get; }
+
+    public string CreateLinkedWorktree(string name)
+    {
+        var gitDir = Path.Combine(GitCommonDirectory, "worktrees", name);
+        Directory.CreateDirectory(gitDir);
+        return gitDir;
+    }
 
     public void Dispose()
     {

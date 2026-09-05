@@ -248,6 +248,7 @@ public sealed class ExplainCommandTests
         Output = output,
         Error = error,
         GetGitCommonDirectoryAsync = (_, _) => Task.FromResult<string?>(sandbox.GitCommonDirectory),
+        GetWorktreeIdAsync = (_, _) => Task.FromResult<string?>(sandbox.MainWorktreeId),
         LoadEffectiveConfigurationAsync = (_, _) => Task.FromResult(configuration ?? new RouterConfiguration()),
         GetIssueByNumberAsync = (_, number, _) => Task.FromResult(issueByNumber?.Invoke(number)),
         RoutingEvaluation = new RoutingEvaluationDependencies
@@ -259,7 +260,7 @@ public sealed class ExplainCommandTests
             CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
             CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(issues ?? new List<Issue>()))
         },
-        ReadWorkClaimAsync = (_, _) => Task.FromResult<WorkClaim?>(null),
+        ReadWorkClaimAsync = (_, _, _) => Task.FromResult<WorkClaim?>(null),
         ResolveLocalIdentityAsync = (_, _) => Task.FromResult(gitIdentity),
         ResolveAuthenticatedGitHubLoginAsync = (_, _) => Task.FromResult<string?>(null)
     };
