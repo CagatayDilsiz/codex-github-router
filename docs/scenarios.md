@@ -177,6 +177,33 @@ A critical issue or pull-request workstream can block unrelated work with `polic
 cgr work status        # reports repository gates separately from the active claim
 ```
 
+## Explaining routing decisions
+
+`cgr work list` and `cgr explain` are strictly read-only. They produce the same routing plan the hook evaluates — repository gate, then completed, in-progress, and ready discovery — and explain each issue stage by stage:
+
+```bash
+cgr work list                  # all rules and their verdicts, ordered like the hook would route
+cgr explain --issue 12         # detailed per-issue explanation
+cgr explain                    # the same list form as `cgr work list`
+cgr explain --issue 12 --model gpt-5-codex
+```
+
+The per-issue explanation covers the identical stages the hook uses to route: Workflow State, Candidate Discovery, Worker Routing, Assignment Routing, Repository Gate, Work Claim, and Routing Outcome (which shows the actual production winner, a production-wide block, or why a competing issue won). Hard ineligibility (for example an active claim on another issue, a worker/model mismatch under `require`, or a blocked/needs-info repository gate) marks the issue ineligible; soft verdicts show an issue that is eligible but ranked or routed behind the production selection.
+
+Example:
+
+```text
+  #12 (Fix signup bug) - ELIGIBLE
+    Selection rank: 0
+    Task: NewIssue
+    [+] Workflow State: Issue #12 is Ready (labels: codex:ready).
+    [+] Candidate Discovery: Issue #12 was discovered by the production routing scan.
+    [*] Assignment Routing: Issue #12 is assigned to current identity (alice). Rank: highest priority.
+    [+] Repository Gate: Issue #12 is not gated.
+    [+] Work Claim: No active work claim.
+    [*] Routing Outcome: Selected: production selected issue #12 as the next work item (task: NewIssue).
+```
+
 ## Worktrees and the single-active-claim limitation
 
 CGR keeps **at most one active coding claim** in the repository's shared Git common directory, so every worktree observes the same owner. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree.

@@ -456,7 +456,8 @@ public static class WorkflowService
         {
             IsSuccessful = true,
             Tasks = tasks,
-            Message = tasks.Count == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed."
+            Message = tasks.Count == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed.",
+            ConsideredIssues = gatedIssues.ToList()
         };
     }
 

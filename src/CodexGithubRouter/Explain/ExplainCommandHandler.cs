@@ -31,12 +31,26 @@ public static class ExplainCommandHandler
             var identity = await ResolveIdentityAsync(configuration, workingDirectory, dependencies, cancellationToken);
             var activeClaim = await dependencies.ReadWorkClaimAsync(commonDirectory, cancellationToken);
 
-            if (issueNumber.HasValue)
+            var plan = await RoutingEvaluationService.EvaluateAsync(
+                configuration,
+                workingDirectory,
+                currentModel: model,
+                assignmentIdentity: identity,
+                activeClaim: activeClaim,
+                dependencies: dependencies.RoutingEvaluation);
+
+            if (!plan.IsSuccessful)
             {
-                return await ExplainSingleIssueAsync(issueNumber.Value, configuration, workingDirectory, model, identity, activeClaim, dependencies, cancellationToken);
+                dependencies.Error.WriteLine($"Routing evaluation failed: {plan.DiscoveryFailureMessage}");
+                return 1;
             }
 
-            return await ExplainAllIssuesAsync(configuration, workingDirectory, model, identity, activeClaim, dependencies, cancellationToken);
+            if (issueNumber.HasValue)
+            {
+                return await ExplainSingleIssueAsync(issueNumber.Value, plan, workingDirectory, dependencies, cancellationToken);
+            }
+
+            return await ExplainAllIssuesAsync(plan, dependencies);
         }
         catch (Exception exception)
         {
@@ -47,52 +61,39 @@ public static class ExplainCommandHandler
 
     private static async Task<int> ExplainSingleIssueAsync(
         int issueNumber,
-        RouterConfiguration configuration,
+        RoutingEvaluationResult plan,
         string workingDirectory,
-        string? model,
-        AssignmentIdentity? identity,
-        WorkClaim? activeClaim,
         ExplainCommandDependencies dependencies,
         CancellationToken cancellationToken)
     {
-        var issue = await dependencies.GetIssueByNumberAsync(workingDirectory, issueNumber, cancellationToken);
+        var issue = plan.ConsideredIssues.FirstOrDefault(candidate => candidate.Number == issueNumber);
+        if (issue is null)
+        {
+            issue = await dependencies.GetIssueByNumberAsync(workingDirectory, issueNumber, cancellationToken);
+        }
+
         if (issue is null)
         {
             dependencies.Error.WriteLine($"Issue #{issueNumber} not found.");
             return 1;
         }
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue, model, identity, activeClaim);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
         dependencies.Output.WriteLine(RoutingExplanationService.FormatSingleExplanation(explanation));
         return 0;
     }
 
-    private static async Task<int> ExplainAllIssuesAsync(
-        RouterConfiguration configuration,
-        string workingDirectory,
-        string? model,
-        AssignmentIdentity? identity,
-        WorkClaim? activeClaim,
-        ExplainCommandDependencies dependencies,
-        CancellationToken cancellationToken)
+    private static Task<int> ExplainAllIssuesAsync(RoutingEvaluationResult plan, ExplainCommandDependencies dependencies)
     {
-        var filter = dependencies.ResolveIssueFilters(configuration);
-        if (filter is null)
-        {
-            dependencies.Error.WriteLine("Could not resolve issue filters from workflow configuration.");
-            return 1;
-        }
-
-        var issues = await dependencies.GetIssuesAsync(workingDirectory, filter, false, cancellationToken);
-        if (issues.Count == 0)
+        var explanations = RoutingExplanationService.ExplainAll(plan);
+        if (explanations.Count == 0)
         {
             dependencies.Output.WriteLine("No issues found matching the workflow configuration.");
-            return 0;
+            return Task.FromResult(0);
         }
 
-        var explanations = RoutingExplanationService.ExplainAll(configuration, issues, model, identity, activeClaim);
         dependencies.Output.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
-        return 0;
+        return Task.FromResult(0);
     }
 
     private static async Task<AssignmentIdentity?> ResolveIdentityAsync(
@@ -216,22 +217,7 @@ public sealed class ExplainCommandDependencies
             }
         };
 
-    public Func<string, IssueFilters, bool, CancellationToken, Task<List<Issue>>> GetIssuesAsync { get; init; }
-        = (workingDirectory, filters, addLinkedPr, cancellationToken) =>
-            GitHubCliService.GetIssuesAsync(workingDirectory, filters, addLinkedPr, cancellationToken);
-
-    public Func<RouterConfiguration, IssueFilters?> ResolveIssueFilters { get; init; }
-        = configuration =>
-        {
-            try
-            {
-                return IssueFilterResolver.ByState(configuration, WorkflowState.Ready, configuration.DefaultIssueSelection.Limit);
-            }
-            catch
-            {
-                return null;
-            }
-        };
+    public RoutingEvaluationDependencies RoutingEvaluation { get; init; } = new();
 
     public Func<string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
         = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, cancellationToken);

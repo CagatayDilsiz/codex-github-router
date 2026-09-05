@@ -120,7 +120,7 @@ cgr work status
 
 **Symptom:** `[FAIL] Active Work Claim`, or `cgr work` commands failing with `Invalid work-claim file: ...`.
 
-Because the claim file cannot be parsed, **every claim command fails until it is repaired**: `cgr work status`, `cgr work reconcile`, and `cgr work release --issue <number>` all read (and validate) the claim file first, so they cannot be used to recover a structurally invalid file.
+Because the claim file cannot be parsed, **every claim command fails until it is repaired**: `cgr work status`, `cgr work list`, `cgr work reconcile`, `cgr work release --issue <number>`, and `cgr explain` all read (and validate) the claim file first, so they cannot be used to recover a structurally invalid file.
 
 **Inspection (read-only):**
 
@@ -170,6 +170,18 @@ cgr auto on          # enable and provision missing labels
 ```
 
 If multiple issues are marked `working`, that is an ambiguous workflow state and blocks the hook. Resolve the labels (move extra issues back to `ready`/`done`) rather than deleting state. See [scenarios.md](scenarios.md).
+
+### Understanding why CGR routes (or blocks) the way it does
+
+The hook and the read-only diagnostic commands share the same routing plan. When a prompt was routed, an expected issue was skipped, or the hook blocked, explain why:
+
+```bash
+cgr work list             # every candidate and why it was eligible, blocked, or selected
+cgr explain --issue 12    # detailed per-issue decision stages
+cgr explain              # the same list form as `cgr work list`
+```
+
+This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason.
 
 ## Structured hook diagnostics
 

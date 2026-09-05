@@ -24,7 +24,7 @@ The current stable surface is read-only inspection (`cgr config path/show/valida
 
 ## Broader status / explain diagnostics
 
-Beyond `cgr doctor` and structured hook diagnostics: richer status and explain commands that describe *why* a decision was made, including workflow state resolution, routing decisions, and claim history.
+`cgr work list` and `cgr explain` already describe *why* a decision was made from the same plan the hook evaluates: workflow state resolution, candidate discovery order, worker and assignment routing, repository gates, the active claim, and the final production routing decision. Future work could add claim history and a machine-readable plan output.
 
 ## Daemon / service mode
 

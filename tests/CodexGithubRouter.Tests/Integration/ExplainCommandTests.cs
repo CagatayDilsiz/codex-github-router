@@ -204,6 +204,20 @@ public sealed class ExplainCommandTests
         Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.lock")));
     }
 
+    [Fact]
+    public async Task Explain_reports_routing_evaluation_failure()
+    {
+        using var sandbox = new TestSandbox();
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var deps = Dependencies(sandbox, output, error, evaluationFails: true);
+
+        var result = await ExplainCommandHandler.HandleAsync(Array.Empty<string>(), deps);
+
+        Assert.Equal(1, result);
+        Assert.Contains("Routing evaluation failed", error.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
     private static ExplainCommandDependencies Dependencies(
         TestSandbox sandbox,
         TextWriter output,
@@ -211,22 +225,42 @@ public sealed class ExplainCommandTests
         RouterConfiguration? configuration = null,
         IReadOnlyList<Issue>? issues = null,
         Func<int, Issue?>? issueByNumber = null,
-        string? gitIdentity = null) => new()
+        string? gitIdentity = null,
+        bool evaluationFails = false) => new()
     {
         Output = output,
         Error = error,
         GetGitCommonDirectoryAsync = (_, _) => Task.FromResult<string?>(sandbox.GitCommonDirectory),
         LoadEffectiveConfigurationAsync = (_, _) => Task.FromResult(configuration ?? new RouterConfiguration()),
         GetIssueByNumberAsync = (_, number, _) => Task.FromResult(issueByNumber?.Invoke(number)),
-        GetIssuesAsync = (_, _, _, _) => Task.FromResult(issues?.ToList() ?? new List<Issue>()),
-        ResolveIssueFilters = _ =>
+        RoutingEvaluation = new RoutingEvaluationDependencies
         {
-            try { return IssueFilterResolver.ByState(configuration ?? new RouterConfiguration(), WorkflowState.Ready, 30); }
-            catch { return null; }
+            CheckRepositoryGateAsync = (_, _) => evaluationFails
+                ? Task.FromResult(new WorkflowResponse { IsSuccessful = false, Message = "Gate evaluation failed." })
+                : Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(issues ?? new List<Issue>()))
         },
         ReadWorkClaimAsync = (_, _) => Task.FromResult<WorkClaim?>(null),
         ResolveLocalIdentityAsync = (_, _) => Task.FromResult(gitIdentity),
         ResolveAuthenticatedGitHubLoginAsync = (_, _) => Task.FromResult<string?>(null)
+    };
+
+    private static WorkflowResponse OkGate(params WorkflowItem[] tasks) => new()
+    {
+        IsSuccessful = true,
+        Tasks = tasks.ToList(),
+        Message = tasks.Length == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed."
+    };
+
+    private static WorkflowResponse Ok() => new() { IsSuccessful = true, Tasks = new List<WorkflowItem>() };
+
+    private static WorkflowResponse Ok(IReadOnlyList<Issue> issues) => new()
+    {
+        IsSuccessful = true,
+        Tasks = issues.Select(issue => new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = issue.Number }).ToList(),
+        ConsideredIssues = issues.ToList()
     };
 
     private static RouterConfiguration WorkerConfiguration() => new()

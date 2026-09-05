@@ -211,7 +211,8 @@ public static class AssignmentRoutingService
             NoEligibleWork = noEligibleWork,
             IneligibleWorkerIssues = response.IneligibleWorkerIssues,
             IneligibleAssignmentIssues = ineligible,
-            Message = message
+            Message = message,
+            ConsideredIssues = issues.ToList()
         };
     }
 

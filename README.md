@@ -52,9 +52,14 @@ cgr issue list --state InProgress
 cgr pr list
 cgr auto status
 cgr work status
+cgr work list
+cgr explain
+cgr explain --issue 12
 cgr config validate
 cgr doctor
 ```
+
+`cgr work list` and `cgr explain` are strictly read-only. They run the same production routing scan as the hook (repository gate, then completed, in-progress, and ready discovery) and explain *why* each issue was eligible, blocked, or selected — including workflow state, candidate discovery, worker and assignment routing, repository-gate handling, the active work claim, and the final production routing decision.
 
 ## Troubleshooting
 

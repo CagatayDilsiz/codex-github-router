@@ -78,17 +78,29 @@ public static class WorkCommandHandler
         {
             var configuration = await configurationLoader(workingDirectory);
             var identity = await ResolveListIdentityAsync(configuration, workingDirectory);
+            var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
+            var claim = await WorkClaimStore.TryReadAsync(commonDirectory);
 
-            var filter = IssueFilterResolver.ByState(configuration, WorkflowState.Ready, configuration.DefaultIssueSelection.Limit);
-            var issues = await GitHubCliService.GetIssuesAsync(workingDirectory, filter, false, CancellationToken.None);
-            if (issues.Count == 0)
+            var plan = await RoutingEvaluationService.EvaluateAsync(
+                configuration,
+                workingDirectory,
+                currentModel: null,
+                assignmentIdentity: identity,
+                activeClaim: claim);
+
+            if (!plan.IsSuccessful)
+            {
+                await errorWriter.WriteLineAsync($"Routing evaluation failed: {plan.DiscoveryFailureMessage}");
+                return 1;
+            }
+
+            var explanations = RoutingExplanationService.ExplainAll(plan);
+            if (explanations.Count == 0)
             {
                 Console.WriteLine("No workflow issues found.");
                 return 0;
             }
 
-            var claim = await WorkClaimStore.TryReadAsync(await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory);
-            var explanations = RoutingExplanationService.ExplainAll(configuration, issues, null, identity, claim);
             Console.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
             return 0;
         }

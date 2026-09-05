@@ -399,7 +399,9 @@ public static class WorkerRoutingService
             IsSuccessful = response.IsSuccessful,
             NoEligibleWork = noEligibleWork,
             IneligibleWorkerIssues = ineligible,
-            Message = noEligibleWork ? FormatNoEligibleWorkMessage(currentModel, ineligible) : response.Message
+            IneligibleAssignmentIssues = response.IneligibleAssignmentIssues,
+            Message = noEligibleWork ? FormatNoEligibleWorkMessage(currentModel, ineligible) : response.Message,
+            ConsideredIssues = issues.ToList()
         };
     }
 

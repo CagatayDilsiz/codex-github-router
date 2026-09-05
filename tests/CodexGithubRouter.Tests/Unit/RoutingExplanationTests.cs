@@ -1,4 +1,5 @@
 using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Work;
 using CodexGithubRouter.Workflow;
 using Xunit;
@@ -9,26 +10,25 @@ namespace CodexGithubRouter.Tests;
 public sealed class RoutingExplanationTests
 {
     [Fact]
-    public void Disabled_routing_passes_all_issues()
+    public void Disabled_routing_leaves_ready_issue_eligible()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.True(explanation.IsEligible);
         Assert.Equal(int.MaxValue, explanation.SelectionRank);
-        Assert.All(explanation.Stages, stage =>
-            Assert.True(stage.Verdict is RoutingVerdict.Pass or RoutingVerdict.Disabled));
+        Assert.DoesNotContain(explanation.Stages, stage => stage.Verdict == RoutingVerdict.HardIneligible);
     }
 
     [Fact]
     public void Workflow_state_ready_is_eligible()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var workflowStage = Assert.Single(explanation.Stages, s => s.Name == "Workflow State");
         Assert.Equal(RoutingVerdict.Pass, workflowStage.Verdict);
@@ -36,12 +36,62 @@ public sealed class RoutingExplanationTests
     }
 
     [Fact]
+    public void Considered_issue_reports_production_discovery()
+    {
+        var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        var discoveryStage = Assert.Single(explanation.Stages, s => s.Name == "Candidate Discovery");
+        Assert.Equal(RoutingVerdict.Pass, discoveryStage.Verdict);
+        Assert.Contains("production routing scan", discoveryStage.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Unconsidered_issue_reports_out_of_candidate_universe()
+    {
+        var issue = ReadyIssue(1);
+        var considered = ReadyIssue(2);
+        var plan = Plan(consideredIssues: new[] { considered });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        var discoveryStage = Assert.Single(explanation.Stages, s => s.Name == "Candidate Discovery");
+        Assert.Equal(RoutingVerdict.SoftIneligible, discoveryStage.Verdict);
+        Assert.Contains("not part of the production candidate discovery", discoveryStage.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(explanation.IsEligible);
+    }
+
+    [Fact]
+    public void Gated_unrelated_issue_reports_gate_short_circuit()
+    {
+        var unrelated = ReadyIssue(3);
+        var gatedReady = GatedIssue(1);
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #1." } };
+        var plan = Plan(
+            consideredIssues: new[] { gatedReady },
+            repositoryGateTasks: new[] { gatedTask },
+            actionableTasks: new[] { gatedTask },
+            decision: new HookTaskDecision { SelectedTask = gatedTask, AdditionalContext = "gated" });
+
+        var explanation = RoutingExplanationService.Explain(plan, unrelated);
+
+        var discoveryStage = Assert.Single(explanation.Stages, s => s.Name == "Candidate Discovery");
+        Assert.Equal(RoutingVerdict.SoftIneligible, discoveryStage.Verdict);
+        Assert.Contains("short-circuits unrelated discovery", discoveryStage.Message, StringComparison.OrdinalIgnoreCase);
+        var gateStage = Assert.Single(explanation.Stages, s => s.Name == "Repository Gate");
+        Assert.Equal(RoutingVerdict.Pass, gateStage.Verdict);
+        Assert.Contains("short-circuits", gateStage.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Workflow_state_blocked_is_hard_ineligible()
     {
-        var configuration = new RouterConfiguration();
         var issue = BlockedIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.False(explanation.IsEligible);
         var workflowStage = Assert.Single(explanation.Stages, s => s.Name == "Workflow State");
@@ -52,10 +102,10 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void No_workflow_labels_is_hard_ineligible()
     {
-        var configuration = new RouterConfiguration();
         var issue = new Issue { Number = 1, Labels = new List<GithubLabel>() };
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.False(explanation.IsEligible);
         var workflowStage = Assert.Single(explanation.Stages, s => s.Name == "Workflow State");
@@ -66,10 +116,10 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Worker_routing_disabled_stage_is_disabled()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
         Assert.Equal(RoutingVerdict.Disabled, workerStage.Verdict);
@@ -80,8 +130,9 @@ public sealed class RoutingExplanationTests
     {
         var configuration = WorkerConfiguration();
         var issue = ReadyIssue(1, "codex:worker:luna");
+        var plan = Plan(configuration, currentModel: "luna-model", consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue, "luna-model");
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
         Assert.Equal(RoutingVerdict.Pass, workerStage.Verdict);
@@ -93,8 +144,9 @@ public sealed class RoutingExplanationTests
     {
         var configuration = WorkerConfiguration();
         var issue = ReadyIssue(1, "codex:worker:luna");
+        var plan = Plan(configuration, currentModel: "terra-model", consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue, "terra-model");
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.False(explanation.IsEligible);
         var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
@@ -104,10 +156,10 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Assignment_routing_disabled_stage_is_disabled()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
         Assert.Equal(RoutingVerdict.Disabled, assignmentStage.Verdict);
@@ -118,8 +170,10 @@ public sealed class RoutingExplanationTests
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
+        var issue = IssueWithAssignee(1, "alice");
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1, "alice"), null, identity);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
         Assert.Equal(RoutingVerdict.SoftPrefer, assignmentStage.Verdict);
@@ -131,8 +185,10 @@ public sealed class RoutingExplanationTests
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
+        var issue = IssueWithAssignee(1);
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1), null, identity);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
         Assert.Equal(RoutingVerdict.SoftIneligible, assignmentStage.Verdict);
@@ -144,8 +200,10 @@ public sealed class RoutingExplanationTests
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
+        var issue = IssueWithAssignee(1, "bob");
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1, "bob"), null, identity);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
         Assert.Equal(RoutingVerdict.SoftIneligible, assignmentStage.Verdict);
@@ -157,8 +215,10 @@ public sealed class RoutingExplanationTests
     {
         var configuration = AssignmentConfiguration("require", "allow");
         var identity = Identity("alice");
+        var issue = IssueWithAssignee(1, "bob");
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1, "bob"), null, identity);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.False(explanation.IsEligible);
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
@@ -166,7 +226,7 @@ public sealed class RoutingExplanationTests
     }
 
     [Fact]
-    public void Repository_gate_not_configured_passes_all_issues()
+    public void Repository_gate_not_configured_stage_is_disabled()
     {
         var configuration = new RouterConfiguration
         {
@@ -176,34 +236,63 @@ public sealed class RoutingExplanationTests
             }
         };
         var issue = ReadyIssue(1);
+        var plan = Plan(configuration, consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var gateStage = Assert.Single(explanation.Stages, s => s.Name == "Repository Gate");
         Assert.Equal(RoutingVerdict.Disabled, gateStage.Verdict);
     }
 
     [Fact]
-    public void Repository_gate_active_issue_is_hard_ineligible()
+    public void Gated_ready_issue_is_the_routed_gate_work_and_selected()
     {
-        var configuration = new RouterConfiguration();
         var issue = GatedIssue(1);
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #1." } };
+        var plan = Plan(
+            consideredIssues: new[] { issue },
+            repositoryGateTasks: new[] { gatedTask },
+            actionableTasks: new[] { gatedTask },
+            decision: new HookTaskDecision { SelectedTask = gatedTask, AdditionalContext = "gated" });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.True(explanation.IsEligible);
+        var gateStage = Assert.Single(explanation.Stages, s => s.Name == "Repository Gate");
+        Assert.Equal(RoutingVerdict.Pass, gateStage.Verdict);
+        Assert.Contains("gate short-circuit work", gateStage.Message, StringComparison.OrdinalIgnoreCase);
+        var outcomeStage = Assert.Single(explanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.Selected, outcomeStage.Verdict);
+        Assert.True(explanation.IsSelected);
+    }
+
+    [Fact]
+    public void Gated_blocked_issue_is_hard_ineligible()
+    {
+        var issue = new Issue { Number = 2, Labels = new List<GithubLabel> { new() { Name = "codex:blocked" }, new() { Name = "codex:gate" } } };
+        const string gateBlock = "Repository workflow is gated by issue #2, which is blocked or needs information. Remove codex:gate from issue #2 to allow unrelated work.";
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.RepositoryGateBlock, IssueNumber = 2, Status = new WorkflowTaskStatus { Message = gateBlock } };
+        var plan = Plan(
+            consideredIssues: new[] { issue },
+            repositoryGateTasks: new[] { gatedTask },
+            actionableTasks: new[] { gatedTask },
+            blockReason: gateBlock);
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.False(explanation.IsEligible);
         var gateStage = Assert.Single(explanation.Stages, s => s.Name == "Repository Gate");
         Assert.Equal(RoutingVerdict.HardIneligible, gateStage.Verdict);
-        Assert.Contains("gate", gateStage.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("gated by issue #2", gateStage.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Repository_gate_inactive_issue_is_pass()
+    public void Non_gated_issue_is_pass()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var gateStage = Assert.Single(explanation.Stages, s => s.Name == "Repository Gate");
         Assert.Equal(RoutingVerdict.Pass, gateStage.Verdict);
@@ -212,10 +301,10 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void No_active_claim_stage_is_pass()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
+        var plan = Plan(consideredIssues: new[] { issue });
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var claimStage = Assert.Single(explanation.Stages, s => s.Name == "Work Claim");
         Assert.Equal(RoutingVerdict.Pass, claimStage.Verdict);
@@ -225,11 +314,11 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Active_claim_for_same_issue_is_soft_prefer()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 1, WorkType = WorkClaimType.Implementation };
+        var plan = Plan(consideredIssues: new[] { issue }, claim: claim);
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue, null, null, claim);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var claimStage = Assert.Single(explanation.Stages, s => s.Name == "Work Claim");
         Assert.Equal(RoutingVerdict.SoftPrefer, claimStage.Verdict);
@@ -237,17 +326,30 @@ public sealed class RoutingExplanationTests
     }
 
     [Fact]
-    public void Active_claim_for_different_issue_marks_claim_stage_as_hard_ineligible()
+    public void Active_claim_for_different_issue_is_hard_ineligible()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(2);
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 1, WorkType = WorkClaimType.Implementation };
+        var plan = Plan(consideredIssues: new[] { issue }, claim: claim);
 
-        var explanation = RoutingExplanationService.Explain(configuration, issue, null, null, claim);
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var claimStage = Assert.Single(explanation.Stages, s => s.Name == "Work Claim");
         Assert.Equal(RoutingVerdict.HardIneligible, claimStage.Verdict);
         Assert.Contains("Active work claim is held", claimStage.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Conflicting_active_claim_propagates_to_overall_ineligibility()
+    {
+        var issue = ReadyIssue(2);
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 1, WorkType = WorkClaimType.Implementation };
+        var plan = Plan(consideredIssues: new[] { issue }, claim: claim);
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.False(explanation.IsEligible);
+        Assert.False(explanation.IsSelected);
     }
 
     [Fact]
@@ -256,7 +358,9 @@ public sealed class RoutingExplanationTests
         var configuration = WorkerConfiguration();
         var issue = ReadyIssue(1, "codex:worker:luna");
         var production = WorkerRoutingService.Evaluate(configuration, issue, "terra-model");
-        var explanation = RoutingExplanationService.Explain(configuration, issue, "terra-model");
+        var plan = Plan(configuration, currentModel: "terra-model", consideredIssues: new[] { issue });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
         Assert.Equal(production.IsEnabled, workerStage.Verdict != RoutingVerdict.Disabled);
@@ -270,7 +374,9 @@ public sealed class RoutingExplanationTests
         var identity = Identity("alice");
         var issue = IssueWithAssignee(1, "bob");
         var production = AssignmentRoutingService.Evaluate(configuration, identity, issue);
-        var explanation = RoutingExplanationService.Explain(configuration, issue, null, identity);
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
         Assert.Equal(production.IsEligible, assignmentStage.Verdict is RoutingVerdict.Pass or RoutingVerdict.SoftPrefer or RoutingVerdict.SoftIneligible);
@@ -284,7 +390,9 @@ public sealed class RoutingExplanationTests
         var issue = WorkerIssue(1, "codex:worker:luna", "alice");
         var workerProduction = WorkerRoutingService.Evaluate(configuration, issue, "luna-model");
         var assignmentProduction = AssignmentRoutingService.Evaluate(configuration, identity, issue);
-        var explanation = RoutingExplanationService.Explain(configuration, issue, "luna-model", identity);
+        var plan = Plan(configuration, currentModel: "luna-model", identity: identity, consideredIssues: new[] { issue });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
         var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
@@ -294,15 +402,73 @@ public sealed class RoutingExplanationTests
     }
 
     [Fact]
-    public void Explanation_all_returns_one_per_issue()
+    public void Explanation_all_returns_one_per_considered_issue()
     {
-        var configuration = new RouterConfiguration();
         var issues = new[] { ReadyIssue(1), ReadyIssue(2), ReadyIssue(3) };
+        var plan = Plan(consideredIssues: issues);
 
-        var explanations = RoutingExplanationService.ExplainAll(configuration, issues);
+        var explanations = RoutingExplanationService.ExplainAll(plan);
 
         Assert.Equal(3, explanations.Count);
         Assert.Equal(new[] { 1, 2, 3 }, explanations.Select(e => e.IssueNumber));
+    }
+
+    [Fact]
+    public void Selected_issue_is_ordered_first_by_production_decision()
+    {
+        var selectedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var otherTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 1, SelectionRank = 0 };
+        var issues = new[] { ReadyIssue(1), ReadyIssue(5) };
+        var plan = Plan(
+            consideredIssues: issues,
+            actionableTasks: new[] { otherTask, selectedTask },
+            decision: new HookTaskDecision { SelectedTask = selectedTask, AdditionalContext = "issue 5" });
+
+        var explanations = RoutingExplanationService.ExplainAll(plan);
+
+        Assert.Equal(5, explanations[0].IssueNumber);
+        Assert.True(explanations[0].IsSelected);
+    }
+
+    [Fact]
+    public void Routing_outcome_prefers_priority_then_rank_ties_break_by_discovery()
+    {
+        var changeRequest = new WorkflowItem { Type = WorkflowItemType.ChangeRequest, IssueNumber = 2, PullRequestNumber = 20, SelectionRank = 0 };
+        var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 3, SelectionRank = 0 };
+        var issues = new[] { ReadyIssue(2, "codex:worker:luna"), ReadyIssue(3, "codex:worker:luna") };
+        var plan = Plan(
+            configuration: WorkerConfiguration(),
+            currentModel: "luna-model",
+            consideredIssues: issues,
+            actionableTasks: new[] { changeRequest, newIssue },
+            decision: new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = "change" });
+
+        var rankTwoExplanation = RoutingExplanationService.Explain(plan, issues[0]);
+        var newIssueExplanation = RoutingExplanationService.Explain(plan, issues[1]);
+
+        var changeOutcome = Assert.Single(rankTwoExplanation.Stages, s => s.Name == "Routing Outcome");
+        var newOutcome = Assert.Single(newIssueExplanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.Selected, changeOutcome.Verdict);
+        Assert.Equal(RoutingVerdict.SoftIneligible, newOutcome.Verdict);
+        Assert.Contains("change-request", newOutcome.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Blocked_decision_reports_issue_level_blocking_task()
+    {
+        var issue = CompletedWithoutMergeIssue(1);
+        var blockingTask = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
+        var plan = Plan(
+            consideredIssues: new[] { issue },
+            actionableTasks: new[] { blockingTask },
+            blockReason: "Closed without merge.");
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.False(explanation.IsEligible);
+        var outcomeStage = Assert.Single(explanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.HardIneligible, outcomeStage.Verdict);
+        Assert.Contains("Closed without merge", outcomeStage.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -311,9 +477,9 @@ public sealed class RoutingExplanationTests
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
 
-        var mine = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1, "alice"), null, identity);
-        var unassigned = RoutingExplanationService.Explain(configuration, IssueWithAssignee(2), null, identity);
-        var other = RoutingExplanationService.Explain(configuration, IssueWithAssignee(3, "bob"), null, identity);
+        var mine = RoutingExplanationService.Explain(Plan(configuration, identity: identity, consideredIssues: new[] { IssueWithAssignee(1, "alice") }), IssueWithAssignee(1, "alice"));
+        var unassigned = RoutingExplanationService.Explain(Plan(configuration, identity: identity, consideredIssues: new[] { IssueWithAssignee(2) }), IssueWithAssignee(2));
+        var other = RoutingExplanationService.Explain(Plan(configuration, identity: identity, consideredIssues: new[] { IssueWithAssignee(3, "bob") }), IssueWithAssignee(3, "bob"));
 
         Assert.True(mine.SelectionRank < unassigned.SelectionRank);
         Assert.True(unassigned.SelectionRank < other.SelectionRank);
@@ -322,9 +488,9 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Format_single_explanation_includes_eligibility_and_stages()
     {
-        var configuration = new RouterConfiguration();
         var issue = ReadyIssue(1);
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var plan = Plan(consideredIssues: new[] { issue });
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var output = RoutingExplanationService.FormatSingleExplanation(explanation);
 
@@ -336,9 +502,9 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Format_single_explanation_shows_ineligible_for_blocked_issue()
     {
-        var configuration = new RouterConfiguration();
         var issue = BlockedIssue(1);
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var plan = Plan(consideredIssues: new[] { issue });
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         var output = RoutingExplanationService.FormatSingleExplanation(explanation);
 
@@ -349,10 +515,9 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Format_explanations_shows_all_issues()
     {
-        var configuration = new RouterConfiguration();
         var issues = new[] { ReadyIssue(1), ReadyIssue(2) };
-
-        var explanations = RoutingExplanationService.ExplainAll(configuration, issues);
+        var plan = Plan(consideredIssues: issues);
+        var explanations = RoutingExplanationService.ExplainAll(plan);
         var output = RoutingExplanationService.FormatExplanations(explanations);
 
         Assert.Contains("#1", output, StringComparison.OrdinalIgnoreCase);
@@ -361,11 +526,32 @@ public sealed class RoutingExplanationTests
     }
 
     [Fact]
+    public void Format_explanations_marks_selected_issue()
+    {
+        var gatedIssue = GatedIssue(1);
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "gated" } };
+        var other = ReadyIssue(2);
+        var plan = Plan(
+            consideredIssues: new[] { gatedIssue, other },
+            repositoryGateTasks: new[] { gatedTask },
+            actionableTasks: new[] { gatedTask },
+            decision: new HookTaskDecision { SelectedTask = gatedTask, AdditionalContext = "gated" });
+
+        var explanations = RoutingExplanationService.ExplainAll(plan);
+        var output = RoutingExplanationService.FormatExplanations(explanations);
+
+        Assert.Contains("#1", output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("SELECTED", output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Summary_describes_eligible_issue_with_rank_zero()
     {
         var configuration = AssignmentConfiguration("prefer", "allow");
         var identity = Identity("alice");
-        var explanation = RoutingExplanationService.Explain(configuration, IssueWithAssignee(1, "alice"), null, identity);
+        var issue = IssueWithAssignee(1, "alice");
+        var plan = Plan(configuration, identity: identity, consideredIssues: new[] { issue });
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.Contains("highest-priority candidate", explanation.Summary, StringComparison.OrdinalIgnoreCase);
     }
@@ -373,9 +559,9 @@ public sealed class RoutingExplanationTests
     [Fact]
     public void Summary_describes_ineligible_issue_with_blocker_reason()
     {
-        var configuration = new RouterConfiguration();
         var issue = BlockedIssue(1);
-        var explanation = RoutingExplanationService.Explain(configuration, issue);
+        var plan = Plan(consideredIssues: new[] { issue });
+        var explanation = RoutingExplanationService.Explain(plan, issue);
 
         Assert.Contains("ineligible", explanation.Summary, StringComparison.OrdinalIgnoreCase);
     }
@@ -387,13 +573,39 @@ public sealed class RoutingExplanationTests
         var identity = Identity("alice");
         var matchingWorkerAndAssignment = WorkerIssue(1, "codex:worker:luna", "alice");
         var matchingWorkerOtherAssignment = WorkerIssue(2, "codex:worker:luna", "bob");
+        var plan1 = Plan(configuration, currentModel: "luna-model", identity: identity, consideredIssues: new[] { matchingWorkerAndAssignment });
+        var plan2 = Plan(configuration, currentModel: "luna-model", identity: identity, consideredIssues: new[] { matchingWorkerOtherAssignment });
 
-        var explanation1 = RoutingExplanationService.Explain(configuration, matchingWorkerAndAssignment, "luna-model", identity);
-        var explanation2 = RoutingExplanationService.Explain(configuration, matchingWorkerOtherAssignment, "luna-model", identity);
+        var explanation1 = RoutingExplanationService.Explain(plan1, matchingWorkerAndAssignment);
+        var explanation2 = RoutingExplanationService.Explain(plan2, matchingWorkerOtherAssignment);
 
         Assert.True(explanation1.IsEligible);
         Assert.False(explanation2.IsEligible);
     }
+
+    private static RoutingEvaluationResult Plan(
+        RouterConfiguration? configuration = null,
+        string? currentModel = null,
+        AssignmentIdentity? identity = null,
+        WorkClaim? claim = null,
+        IReadOnlyList<Issue>? consideredIssues = null,
+        IReadOnlyList<WorkflowItem>? repositoryGateTasks = null,
+        IReadOnlyList<WorkflowItem>? actionableTasks = null,
+        IReadOnlyList<WorkflowItem>? workflowTasks = null,
+        HookTaskDecision? decision = null,
+        string? blockReason = null) => new()
+        {
+            Configuration = configuration ?? new RouterConfiguration(),
+            CurrentModel = currentModel,
+            AssignmentIdentity = identity,
+            ActiveClaim = claim,
+            ConsideredIssues = consideredIssues ?? new List<Issue>(),
+            RepositoryGateTasks = repositoryGateTasks ?? new List<WorkflowItem>(),
+            ActionableTasks = actionableTasks ?? new List<WorkflowItem>(),
+            WorkflowTasks = workflowTasks ?? (actionableTasks ?? new List<WorkflowItem>()),
+            Decision = decision,
+            BlockReason = blockReason
+        };
 
     private static RouterConfiguration WorkerConfiguration() => new()
     {
@@ -462,6 +674,12 @@ public sealed class RoutingExplanationTests
     {
         Number = number,
         Labels = new List<GithubLabel> { new() { Name = "codex:blocked" } }
+    };
+
+    private static Issue CompletedWithoutMergeIssue(int number) => new()
+    {
+        Number = number,
+        Labels = new List<GithubLabel> { new() { Name = "codex:completed" } }
     };
 
     private static Issue GatedIssue(int number) => new()
