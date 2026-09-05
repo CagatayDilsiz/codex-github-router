@@ -1,3 +1,5 @@
+using CodexGithubRouter.GitHub;
+
 namespace CodexGithubRouter.Workflow;
 
 public class WorkflowResponse
@@ -13,4 +15,6 @@ public class WorkflowResponse
     public IReadOnlyList<WorkerEligibility> IneligibleWorkerIssues { get; init; } = Array.Empty<WorkerEligibility>();
 
     public IReadOnlyList<AssignmentEligibility> IneligibleAssignmentIssues { get; init; } = Array.Empty<AssignmentEligibility>();
+
+    public List<Issue> ConsideredIssues { get; set; } = new List<Issue>();
 }

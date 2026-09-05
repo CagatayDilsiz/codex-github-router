@@ -205,126 +205,32 @@ public static class HookService
         HookExecutionDependencies dependencies,
         bool allowNoClaimReroute = true)
     {
-        var repositoryGateTasks = await WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
-        if (!repositoryGateTasks.IsSuccessful)
+        var plan = await RoutingEvaluationService.EvaluateAsync(
+            configuration,
+            workingDirectory,
+            currentModel: currentModel,
+            dependencies: new RoutingEvaluationDependencies
+            {
+                ResolveAssignmentIdentityAsync = (config, wd) => ResolveAssignmentIdentityAsync(config, wd, dependencies, CancellationToken.None)
+            });
+        if (!plan.IsSuccessful || !string.IsNullOrWhiteSpace(plan.BlockReason))
         {
-            scope.Block(repositoryGateTasks.Message);
-            await WriteBlockAsync(repositoryGateTasks.Message);
+            var blockReason = plan.IsSuccessful ? plan.BlockReason : plan.DiscoveryFailureMessage;
+            scope.SetIdentity(plan.AssignmentIdentity?.Name);
+            scope.Block(blockReason);
+            await WriteBlockAsync(blockReason!);
             return 0;
         }
 
-        IReadOnlyList<WorkflowItem> workflowTasks;
-        WorkflowResponse? noEligibleWorkResponse = null;
-        AssignmentIdentity? assignmentIdentity = null;
-        if (repositoryGateTasks.Tasks.Count > 0)
-        {
-            // A repository gate is an explicit short-circuit. Ordinary discovery
-            // must not be allowed to override or fail before gated work is routed.
-            workflowTasks = SelectWorkflowTasks(repositoryGateTasks.Tasks, Array.Empty<WorkflowItem>());
-        }
-        else
-        {
-            var needsLocalIdentity = AssignmentRoutingService.RequiresLocalIdentity(configuration);
-            if (needsLocalIdentity)
-            {
-                var identityResolution = await ResolveAssignmentIdentityAsync(configuration, workingDirectory, dependencies, CancellationToken.None);
-                if (identityResolution.IsEnabled && !identityResolution.IsResolved)
-                {
-                    scope.SetIdentity(identityResolution.Identity?.Name);
-                    scope.Block(identityResolution.Message);
-                    await WriteBlockAsync(identityResolution.Message);
-                    return 0;
-                }
-
-                assignmentIdentity = identityResolution.Identity;
-                scope.SetIdentity(assignmentIdentity?.Name);
-            }
-
-            var completedIssueTasks = await WorkflowService.CheckCompletedIssuesAsync(configuration, workingDirectory, currentModel: currentModel, assignmentIdentity: assignmentIdentity);
-            if (!completedIssueTasks.IsSuccessful)
-            {
-                scope.Block(completedIssueTasks.Message);
-                await WriteBlockAsync(completedIssueTasks.Message);
-                return 0;
-            }
-
-            var inProgressIssueTasks = await WorkflowService.CheckInProgressIssuesAsync(configuration, workingDirectory, currentModel: currentModel, assignmentIdentity: assignmentIdentity);
-            if (!inProgressIssueTasks.IsSuccessful)
-            {
-                scope.Block(inProgressIssueTasks.Message);
-                await WriteBlockAsync(inProgressIssueTasks.Message);
-                return 0;
-            }
-
-            var newIssueTask = await WorkflowService.CheckNewIssuesAsync(configuration, workingDirectory, currentModel: currentModel, assignmentIdentity: assignmentIdentity);
-            if (!newIssueTask.IsSuccessful)
-            {
-                scope.Block(newIssueTask.Message);
-                await WriteBlockAsync(newIssueTask.Message);
-                return 0;
-            }
-
-            var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask };
-            var workerIneligible = ordinaryResponses.SelectMany(response => response.IneligibleWorkerIssues).ToList();
-            var assignmentIneligible = ordinaryResponses.SelectMany(response => response.IneligibleAssignmentIssues).ToList();
-            noEligibleWorkResponse = ordinaryResponses.FirstOrDefault(response => response.NoEligibleWork);
-            if (workerIneligible.Count > 0 || assignmentIneligible.Count > 0)
-            {
-                noEligibleWorkResponse = new WorkflowResponse
-                {
-                    NoEligibleWork = true,
-                    IneligibleWorkerIssues = workerIneligible,
-                    IneligibleAssignmentIssues = assignmentIneligible,
-                    Message = string.Join(
-                        Environment.NewLine,
-                        new[]
-                        {
-                            workerIneligible.Count > 0 ? WorkerRoutingService.FormatNoEligibleWorkMessage(currentModel, workerIneligible) : null,
-                            assignmentIneligible.Count > 0 ? AssignmentRoutingService.FormatNoEligibleWorkMessage(assignmentIdentity, assignmentIneligible) : null
-                        }.Where(part => !string.IsNullOrWhiteSpace(part)))
-                };
-            }
-
-            workflowTasks = SelectWorkflowTasks(
-                Array.Empty<WorkflowItem>(),
-                completedIssueTasks.Tasks
-                    .Concat(inProgressIssueTasks.Tasks)
-                    .Concat(newIssueTask.Tasks)
-                    .ToList());
-        }
-
-        if (workflowTasks.Count == 0)
-        {
-            var noWorkBlockReason = noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
-            scope.Block(noWorkBlockReason);
-            await WriteBlockAsync(noWorkBlockReason);
-            return 0;
-        }
-
-        var actionableTasks = workflowTasks.Where(t => t.Type != WorkflowItemType.Deferred).ToList();
-        if (actionableTasks.Count == 0)
-        {
-            var deferredBlockReason = noEligibleWorkResponse?.NoEligibleWork == true
-                ? noEligibleWorkResponse.Message
-                : "All workflow tasks are deferred. No action is required at this time.";
-            scope.Block(deferredBlockReason);
-            await WriteBlockAsync(deferredBlockReason);
-            return 0;
-        }
+        var assignmentIdentity = plan.AssignmentIdentity;
+        scope.SetIdentity(assignmentIdentity?.Name);
+        var decision = plan.Decision!;
+        var actionableTasks = plan.ActionableTasks;
 
         // Close issues marked for closure before evaluating hook blockers.
         foreach (var closingIssueTask in actionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue))
         {
             await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber, CancellationToken.None);
-        }
-
-        var decision = HookTaskRouter.Route(actionableTasks);
-        var blockReason = ResolveRoutingBlockReason(decision, noEligibleWorkResponse);
-        if (!string.IsNullOrWhiteSpace(blockReason))
-        {
-            scope.Block(blockReason);
-            await WriteBlockAsync(blockReason);
-            return 0;
         }
 
         if (decision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(decision.SelectedTask))
@@ -341,20 +247,30 @@ public static class HookService
                 ? WorkClaimType.ChangeRequest
                 : WorkClaimType.Implementation;
             var claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
-            var eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
-            if (eligibility.IsEnabled && !eligibility.IsEligible)
+            WorkerEligibility eligibility;
+            if (plan.HasRepositoryGate)
             {
-                scope.Block(eligibility.Message);
-                await WriteBlockAsync(eligibility.Message);
-                return 0;
+                // Repository-gate routing bypasses worker/assignment filtering, so the
+                // selected gate work is claimed without policy eligibility guards.
+                eligibility = WorkerEligibility.Disabled;
             }
-
-            var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue);
-            if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
+            else
             {
-                scope.Block(assignmentEligibility.Message);
-                await WriteBlockAsync(assignmentEligibility.Message);
-                return 0;
+                eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
+                if (eligibility.IsEnabled && !eligibility.IsEligible)
+                {
+                    scope.Block(eligibility.Message);
+                    await WriteBlockAsync(eligibility.Message);
+                    return 0;
+                }
+
+                var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue);
+                if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
+                {
+                    scope.Block(assignmentEligibility.Message);
+                    await WriteBlockAsync(assignmentEligibility.Message);
+                    return 0;
+                }
             }
 
             var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim

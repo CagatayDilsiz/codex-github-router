@@ -1,5 +1,7 @@
 using CodexGithubRouter.Configurations;
+using CodexGithubRouter.Explain;
 using CodexGithubRouter.Git;
+using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Workflow;
 
 namespace CodexGithubRouter.Work;
@@ -22,7 +24,7 @@ public static class WorkCommandHandler
         repositoryGateChecker ??= (configuration, workingDirectory) => WorkflowService.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (args.Length == 0) return Usage();
         var command = args[0].ToLowerInvariant();
-        var workingDirectory = args.LastOrDefault(value => !value.StartsWith("--", StringComparison.Ordinal) && !string.Equals(value, command, StringComparison.OrdinalIgnoreCase) && !int.TryParse(value, out _)) ?? Environment.CurrentDirectory;
+        var workingDirectory = ResolveWorkingDirectory(args, command) ?? Environment.CurrentDirectory;
         Func<string, Task<string?>> resolveCommonDirectory = commonDirectoryResolver ?? (workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory));
         var commonDirectory = await resolveCommonDirectory(workingDirectory);
         if (commonDirectory is null) { await errorWriter.WriteLineAsync("Not a valid Git repository."); return 1; }
@@ -40,6 +42,8 @@ public static class WorkCommandHandler
                     if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
                     else foreach (var task in gateStatus.Tasks.GroupBy(task => task.IssueNumber).Select(group => group.First()).OrderBy(task => task.IssueNumber)) Console.WriteLine($"Repository workflow gate: issue #{task.IssueNumber}. {task.Status.Message}");
                     return 0;
+                case "list":
+                    return await HandleListAsync(args, workingDirectory, configurationLoader, errorWriter);
                 case "reconcile":
                     var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
                     Console.WriteLine(released ? "Released a passive or terminal work claim." : "Active work claim remains unchanged.");
@@ -64,8 +68,122 @@ public static class WorkCommandHandler
 
     private static int Usage()
     {
-        Console.Error.WriteLine("Usage: cgr work <status|reconcile|release --issue <number>> [working-directory]");
+        Console.Error.WriteLine("Usage: cgr work <status|list [--model <model>]|reconcile|release --issue <number>> [working-directory]");
         return 1;
+    }
+
+    private static string? ResolveWorkingDirectory(string[] args, string command)
+    {
+        string? workingDirectory = null;
+        for (var index = 0; index < args.Length; index++)
+        {
+            var argument = args[index];
+            if (string.Equals(argument, command, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (string.Equals(argument, "--model", StringComparison.OrdinalIgnoreCase))
+            {
+                index++;
+                continue;
+            }
+
+            if (argument.StartsWith("--", StringComparison.Ordinal) || int.TryParse(argument, out _))
+            {
+                continue;
+            }
+
+            workingDirectory = argument;
+        }
+
+        return workingDirectory;
+    }
+
+    private static string? ParseModel(string[] args)
+    {
+        for (var index = 0; index < args.Length; index++)
+        {
+            if (string.Equals(args[index], "--model", StringComparison.OrdinalIgnoreCase) && index + 1 < args.Length)
+            {
+                return args[index + 1];
+            }
+        }
+
+        return null;
+    }
+
+    private static async Task<int> HandleListAsync(string[] args, string workingDirectory, Func<string, Task<RouterConfiguration>> configurationLoader, TextWriter errorWriter)
+    {
+        try
+        {
+            var model = ParseModel(args);
+            var configuration = await configurationLoader(workingDirectory);
+            var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
+            var claim = await WorkClaimStore.TryReadAsync(commonDirectory);
+
+            var plan = await RoutingEvaluationService.EvaluateAsync(
+                configuration,
+                workingDirectory,
+                currentModel: model,
+                activeClaim: claim,
+                dependencies: new RoutingEvaluationDependencies
+                {
+                    ResolveAssignmentIdentityAsync = (config, wd) => ResolveIdentityAsync(config, wd)
+                });
+
+            if (!plan.IsSuccessful)
+            {
+                await errorWriter.WriteLineAsync($"Routing evaluation failed: {plan.DiscoveryFailureMessage}");
+                return 1;
+            }
+
+            var explanations = RoutingExplanationService.ExplainAll(plan);
+            if (explanations.Count == 0)
+            {
+                Console.WriteLine("No workflow issues found.");
+                return 0;
+            }
+
+            Console.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            await errorWriter.WriteLineAsync($"Error: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private static async Task<AssignmentIdentityResolution> ResolveIdentityAsync(RouterConfiguration configuration, string workingDirectory)
+    {
+        if (!AssignmentRoutingService.RequiresLocalIdentity(configuration))
+        {
+            return AssignmentIdentityResolution.NotEnabled;
+        }
+
+        var gitIdentityValue = await GitRepositoryService.GetConfigValueAsync(workingDirectory, AssignmentRoutingService.LocalIdentityConfigKey, CancellationToken.None);
+        var usernames = AssignmentRoutingService.ParseIdentityUsernames(gitIdentityValue);
+        if (usernames.Count == 0)
+        {
+            string? authenticatedLogin = null;
+            try
+            {
+                authenticatedLogin = await GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, CancellationToken.None);
+            }
+            catch
+            {
+                // A missing or failing GitHub CLI must not crash the diagnostic; identity
+                // resolution fails closed below when no CGR Git identity is configured.
+            }
+
+            if (!string.IsNullOrWhiteSpace(authenticatedLogin))
+            {
+                usernames = new[] { authenticatedLogin.Trim() };
+            }
+        }
+
+        return AssignmentRoutingService.Resolve(configuration, usernames);
     }
 
     public static string FormatClaimStatus(WorkClaim claim)

@@ -177,6 +177,36 @@ A critical issue or pull-request workstream can block unrelated work with `polic
 cgr work status        # reports repository gates separately from the active claim
 ```
 
+## Explaining routing decisions
+
+`cgr work list` and `cgr explain` are strictly read-only. They produce the same routing plan the hook evaluates — repository gate, then completed, in-progress, and ready discovery — and explain each issue stage by stage:
+
+```bash
+cgr work list                  # all rules and their verdicts, ordered like the hook would route
+cgr work list --model gpt-5-codex   # same list for a specific model (like `cgr explain --model`)
+cgr explain --issue 12         # detailed per-issue explanation
+cgr explain                    # the same list form as `cgr work list`
+cgr explain --issue 12 --model gpt-5-codex
+```
+
+The per-issue explanation covers the identical stages the hook uses to route: Workflow State, Candidate Discovery, Worker Routing, Assignment Routing, Repository Gate, Work Claim, and Routing Outcome (which shows the actual production winner, a production-wide block, or why a competing issue won). Hard ineligibility (for example a worker/model mismatch under `require`, or a blocked/needs-info repository gate) marks the issue ineligible; soft verdicts show an issue that is eligible but ranked or routed behind the production selection.
+
+Diagnostics resolve assignment identity through the same fail-closed plan stage the hook uses: when assignment routing requires an identity and neither the CGR Git identity nor the authenticated GitHub account resolves one, the command fails with the same message the hook would block on instead of reporting assignment-ineligible issues. A claim that production reconciliation would release (a blocked/needs-info/abandoned/closed/missing claimed issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is reported as "would be released by production reconciliation; ordinary routing continues" — a read-only simulation that never touches the claim file.
+
+Example:
+
+```text
+  #12 (Fix signup bug) - ELIGIBLE
+    Selection rank: 0
+    Task: NewIssue
+    [+] Workflow State: Issue #12 is Ready (labels: codex:ready).
+    [+] Candidate Discovery: Issue #12 was discovered by the production routing scan.
+    [*] Assignment Routing: Issue #12 is assigned to current identity (alice). Rank: highest priority.
+    [+] Repository Gate: Issue #12 is not gated.
+    [+] Work Claim: No active work claim.
+    [*] Routing Outcome: Selected: production selected issue #12 as the next work item (task: NewIssue).
+```
+
 ## Worktrees and the single-active-claim limitation
 
 CGR keeps **at most one active coding claim** in the repository's shared Git common directory, so every worktree observes the same owner. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree.
@@ -193,4 +223,4 @@ If you need to understand what the current claim is, inspect before mutating:
 cgr work status        # read-only
 ```
 
-Only `cgr work reconcile` (removes claims GitHub shows as passive/terminal) and `cgr work release --issue <number>` (explicit user recovery, only the supplied issue) mutate claim state. See [troubleshooting.md](troubleshooting.md) for guidance on when to use them.
+Only `cgr work reconcile` (removes claims GitHub shows as releasable — blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request) and `cgr work release --issue <number>` (explicit user recovery, only the supplied issue) mutate claim state. See [troubleshooting.md](troubleshooting.md) for guidance on when to use them.

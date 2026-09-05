@@ -109,6 +109,148 @@ public sealed class WorkClaimReconciliationTests
         Assert.True(WorkClaimReconciliationService.ShouldReleaseForPullRequestTransition(claim, 22, PullRequestState.ReviewRequested));
     }
 
+    [Fact]
+    public async Task DetermineAsync_releases_blocked_claimed_issue()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+        var blocked = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:blocked" } } };
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(blocked),
+            getPullRequest: number => Task.FromResult(Pull(claim, number, "codex/issue-4", "codex:rr", DateTimeOffset.UtcNow)));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_releases_closed_claimed_issue()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+        var closed = new Issue { Number = 4, State = "closed", Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(closed),
+            getPullRequest: number => Task.FromResult(Pull(claim, number, "codex/issue-4", "codex:rr", DateTimeOffset.UtcNow)));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_releases_missing_claimed_issue()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => throw new GitHubItemNotFoundException("issue not found"),
+            getPullRequest: number => throw new GitHubItemNotFoundException("pull request not found"));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_releases_missing_claimed_pull_request()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.Implementation };
+        var inProgress = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(inProgress),
+            getPullRequest: number => throw new GitHubItemNotFoundException("pull request not found"));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_releases_passive_claimed_pull_request()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest };
+        var inProgress = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+        var review = new PullRequest { Number = 22, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:rr" } }, CreatedAt = DateTimeOffset.UtcNow, ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = 4 } } };
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(inProgress),
+            getPullRequest: number => Task.FromResult(review));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_keeps_actionable_change_request_claim()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.ChangeRequest };
+        var inProgress = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+        var changes = new PullRequest { Number = 22, State = "open", Labels = new List<GithubLabel> { new() { Name = "codex:cr" } }, CreatedAt = DateTimeOffset.UtcNow, ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = 4 } } };
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(inProgress),
+            getPullRequest: number => Task.FromResult(changes));
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldKeep, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_releases_completed_issue_with_single_passive_current_pull_request()
+    {
+        var baseline = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = baseline };
+        var issue = CompletedIssue();
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(issue),
+            getPullRequest: number => number switch
+            {
+                21 => throw new GitHubItemNotFoundException("historical reference not found"),
+                22 => Task.FromResult(Pull(claim, 22, "codex/issue-4-current", "codex:rr", baseline.AddMinutes(1))),
+                _ => Task.FromResult(Pull(claim, 23, "codex/issue-4-old", "codex:rr", baseline.AddMinutes(-1)))
+            });
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_keeps_completed_issue_with_current_change_request()
+    {
+        var baseline = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation, ClaimedIssueUpdatedAt = baseline };
+        var issue = CompletedIssue();
+
+        var recommendation = await WorkClaimReconciliationService.DetermineAsync(
+            "wd", claim, new RouterConfiguration(),
+            getIssue: _ => Task.FromResult(issue),
+            getPullRequest: number => number switch
+            {
+                21 => throw new GitHubItemNotFoundException("historical reference not found"),
+                _ => Task.FromResult(Pull(claim, number, "codex/issue-4-current", "codex:cr", baseline.AddMinutes(1)))
+            });
+
+        Assert.Equal(WorkClaimReconciliationRecommendation.WouldKeep, recommendation);
+    }
+
+    [Fact]
+    public async Task DetermineAsync_fails_closed_when_github_state_cannot_be_verified()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, WorkType = WorkClaimType.Implementation };
+        var issue = new Issue { Number = 4, Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+        Assert.Equal(
+            WorkClaimReconciliationRecommendation.UnableToDetermine,
+            await WorkClaimReconciliationService.DetermineAsync(
+                "wd", claim, new RouterConfiguration(),
+                getIssue: _ => throw new InvalidOperationException("transient failure"),
+                getPullRequest: number => throw new InvalidOperationException("transient failure")));
+        Assert.Equal(
+            WorkClaimReconciliationRecommendation.UnableToDetermine,
+            await WorkClaimReconciliationService.DetermineAsync(
+                "wd", new WorkClaim { OwnerSessionId = "a", IssueNumber = 4, PullRequestNumber = 22, WorkType = WorkClaimType.Implementation }, new RouterConfiguration(),
+                getIssue: _ => Task.FromResult(issue),
+                getPullRequest: number => throw new InvalidOperationException("transient failure")));
+    }
+
     private static Issue CompletedIssue() => new()
     {
         Number = 4,

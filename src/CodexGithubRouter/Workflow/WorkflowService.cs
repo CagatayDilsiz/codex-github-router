@@ -9,7 +9,7 @@ public static class WorkflowService
     public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim, string? currentModel = null)
     {
         var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
-        return await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
+        var response = await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
             workingDirectory,
             pullRequestNumber,
             new PullRequestSelection
@@ -22,6 +22,12 @@ public static class WorkflowService
                 ClosingIssuesReferences = true
             },
             CancellationToken.None), currentModel, issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
+        if (response.ConsideredIssues.Count == 0)
+        {
+            response.ConsideredIssues.Add(issue);
+        }
+
+        return response;
     }
 
     public static async Task<WorkflowResponse> EvaluateClaimedWorkAsync(RouterConfiguration configuration, WorkClaim claim, Issue issue, Func<int, Task<PullRequest>> getPullRequest, string? currentModel = null, Func<int, Task<Issue>>? getIssue = null)
@@ -290,7 +296,8 @@ public static class WorkflowService
             return new WorkflowResponse
             {
                 IsSuccessful = true,
-                Message = "No in-progress issues found."
+                Message = "No in-progress issues found.",
+                ConsideredIssues = inProgressIssues.ToList()
             };
         }
 
@@ -324,7 +331,8 @@ public static class WorkflowService
         {
             IsSuccessful = true,
             Message = "In-progress issue evaluation completed.",
-            Tasks = tasks
+            Tasks = tasks,
+            ConsideredIssues = inProgressIssues.ToList()
         }, currentModel));
 
         var codingIssueNumbers = filtered.Tasks
@@ -375,7 +383,8 @@ public static class WorkflowService
             {
                 Tasks = workflowTasks,
                 IsSuccessful = true,
-                Message = "New issues found."
+                Message = "New issues found.",
+                ConsideredIssues = openIssues.ToList()
             }, currentModel));
         }
         else
@@ -384,7 +393,8 @@ public static class WorkflowService
             {
                 Tasks = new List<WorkflowItem>(),
                 IsSuccessful = true,
-                Message = "No new issues found."
+                Message = "No new issues found.",
+                ConsideredIssues = openIssues.ToList()
             };
         }
     }
@@ -456,7 +466,8 @@ public static class WorkflowService
         {
             IsSuccessful = true,
             Tasks = tasks,
-            Message = tasks.Count == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed."
+            Message = tasks.Count == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed.",
+            ConsideredIssues = gatedIssues.ToList()
         };
     }
 
@@ -583,7 +594,8 @@ public static class WorkflowService
             {
                 Tasks = new List<WorkflowItem>(),
                 IsSuccessful = true,
-                Message = "No completed issues found."
+                Message = "No completed issues found.",
+                ConsideredIssues = completedIssues.ToList()
             };
         }
     }
@@ -828,7 +840,8 @@ public static class WorkflowService
         {
             Tasks = workflowTasks,
             IsSuccessful = true,
-            Message = "Workflow check completed successfully."
+            Message = "Workflow check completed successfully.",
+            ConsideredIssues = issueList
         };
     }
 

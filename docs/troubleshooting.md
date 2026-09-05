@@ -120,7 +120,7 @@ cgr work status
 
 **Symptom:** `[FAIL] Active Work Claim`, or `cgr work` commands failing with `Invalid work-claim file: ...`.
 
-Because the claim file cannot be parsed, **every claim command fails until it is repaired**: `cgr work status`, `cgr work reconcile`, and `cgr work release --issue <number>` all read (and validate) the claim file first, so they cannot be used to recover a structurally invalid file.
+Because the claim file cannot be parsed, **every claim command fails until it is repaired**: `cgr work status`, `cgr work list`, `cgr work reconcile`, `cgr work release --issue <number>`, and `cgr explain` all read (and validate) the claim file first, so they cannot be used to recover a structurally invalid file.
 
 **Inspection (read-only):**
 
@@ -148,7 +148,7 @@ cgr work status        # shows the claim's issue, pull request, type, worker, an
 
 **Recovery (mutation), in order of preference:**
 
-1. `cgr work reconcile` — removes only claims that GitHub shows as **passive or terminal** (for example a merged pull request). Safe when no session owns active work.
+1. `cgr work reconcile` — removes claims that GitHub shows as **releasable** (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request; for example a merged pull request). Safe when no session owns active work.
 2. `cgr work release --issue <number>` — explicit user recovery; removes the claim **only** for the supplied issue.
 
 ### Autonomous mode disabled or repository state inconsistent
@@ -170,6 +170,19 @@ cgr auto on          # enable and provision missing labels
 ```
 
 If multiple issues are marked `working`, that is an ambiguous workflow state and blocks the hook. Resolve the labels (move extra issues back to `ready`/`done`) rather than deleting state. See [scenarios.md](scenarios.md).
+
+### Understanding why CGR routes (or blocks) the way it does
+
+The hook and the read-only diagnostic commands share the same routing plan. When a prompt was routed, an expected issue was skipped, or the hook blocked, explain why:
+
+```bash
+cgr work list             # every candidate and why it was eligible, blocked, or selected
+cgr work list --model gpt-5-codex   # same list for a specific model
+cgr explain --issue 12    # detailed per-issue decision stages
+cgr explain              # the same list form as `cgr work list`
+```
+
+This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
 
 ## Structured hook diagnostics
 
