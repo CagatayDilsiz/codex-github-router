@@ -42,11 +42,17 @@ public static class RoutingExplanationService
 
         stages.Add(ExplainDiscovery(plan, issue));
 
-        var workerStage = ExplainWorkerRouting(plan.Configuration, issue, plan.CurrentModel);
+        var workerStage = plan.HasRepositoryGate
+            ? ExemptRouting("Worker Routing", "Not applicable: repository-gate routing bypasses worker filtering for gated work.")
+            : ExplainWorkerRouting(plan.Configuration, issue, plan.CurrentModel);
         stages.Add(workerStage);
         isEligible &= workerStage.Verdict != RoutingVerdict.HardIneligible;
 
-        var assignmentStage = ExplainAssignmentRouting(plan.Configuration, issue, plan.AssignmentIdentity);
+        var assignmentStage = plan.HasRepositoryGate || plan.ClaimRoutingActive
+            ? ExemptRouting("Assignment Routing", plan.HasRepositoryGate
+                ? "Not applicable: repository-gate routing bypasses assignment filtering for gated work."
+                : "Not applicable: active-claim routing does not apply assignment filtering.")
+            : ExplainAssignmentRouting(plan.Configuration, issue, plan.AssignmentIdentity);
         stages.Add(assignmentStage);
         isEligible &= assignmentStage.Verdict != RoutingVerdict.HardIneligible;
 
@@ -61,9 +67,10 @@ public static class RoutingExplanationService
         var workflowTask = SelectWorkflowTask(plan, issue);
         var outcomeStage = ExplainOutcome(plan, issue, workflowTask);
         stages.Add(outcomeStage);
+        isEligible &= outcomeStage.Verdict != RoutingVerdict.HardIneligible;
         var selected = outcomeStage.Verdict == RoutingVerdict.Selected;
 
-        var selectionRank = ResolveSelectionRank(plan.Configuration, issue, plan.AssignmentIdentity);
+        var selectionRank = plan.HasRepositoryGate ? int.MaxValue : ResolveSelectionRank(plan.Configuration, issue, plan.AssignmentIdentity);
 
         return new IssueRoutingExplanation
         {
@@ -109,6 +116,7 @@ public static class RoutingExplanationService
                     RoutingVerdict.Pass => "+",
                     RoutingVerdict.SoftPrefer => "*",
                     RoutingVerdict.SoftIneligible => "~",
+                    RoutingVerdict.Exempt => "=",
                     RoutingVerdict.HardIneligible => "!",
                     _ => " "
                 };
@@ -156,6 +164,7 @@ public static class RoutingExplanationService
                 RoutingVerdict.Pass => "PASS",
                 RoutingVerdict.SoftPrefer => "PREFER",
                 RoutingVerdict.SoftIneligible => "SKIP",
+                RoutingVerdict.Exempt => "EXEMPT",
                 RoutingVerdict.HardIneligible => "BLOCKED",
                 _ => "N/A"
             };
@@ -207,6 +216,19 @@ public static class RoutingExplanationService
 
     private static RoutingStage ExplainDiscovery(RoutingEvaluationResult plan, Issue issue)
     {
+        if (plan.ClaimRoutingActive)
+        {
+            var isClaimedIssue = plan.ActiveClaim is not null && plan.ActiveClaim.IssueNumber == issue.Number;
+            return new RoutingStage
+            {
+                Name = "Candidate Discovery",
+                Verdict = isClaimedIssue ? RoutingVerdict.Pass : RoutingVerdict.SoftIneligible,
+                Message = isClaimedIssue
+                    ? $"Issue #{issue.Number} is the active work-claim issue routed by the production claim evaluation."
+                    : $"Issue #{issue.Number} is not the active work-claim issue and is not part of the production claim routing decision."
+            };
+        }
+
         var isConsidered = plan.ConsideredIssues.Any(candidate => candidate.Number == issue.Number);
         if (isConsidered)
         {
@@ -323,6 +345,13 @@ public static class RoutingExplanationService
             Message = eligibility.Message
         };
     }
+
+    private static RoutingStage ExemptRouting(string name, string message) => new()
+    {
+        Name = name,
+        Verdict = RoutingVerdict.Exempt,
+        Message = message
+    };
 
     private static RoutingStage ExplainRepositoryGate(RoutingEvaluationResult plan, Issue issue)
     {
@@ -468,7 +497,9 @@ public static class RoutingExplanationService
             {
                 Name = "Routing Outcome",
                 Verdict = RoutingVerdict.Selected,
-                Message = $"Selected: production selected issue #{selectedTask.IssueNumber} as the next work item (task: {FormatTaskType(selectedTask.Type)})."
+                Message = plan.ClaimRoutingActive
+                    ? $"Selected: production claim routing selected issue #{selectedTask.IssueNumber} as the active claimed work (task: {FormatTaskType(selectedTask.Type)})."
+                    : $"Selected: production selected issue #{selectedTask.IssueNumber} as the next work item (task: {FormatTaskType(selectedTask.Type)})."
             };
         }
 
@@ -624,7 +655,7 @@ public static class RoutingExplanationService
     }
 
     private static bool IsPassive(WorkflowItemType type) =>
-        type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred or WorkflowItemType.CloseIssue or WorkflowItemType.LinkPullRequestsToIssues;
+        type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred or WorkflowItemType.CloseIssue;
 
     private static string FormatTaskType(WorkflowItemType type) => type switch
     {
@@ -648,10 +679,11 @@ public static class RoutingExplanationService
     {
         0 => "blocker",
         1 => "change-request",
-        2 => "recovery",
-        3 => "link-pull-request",
-        4 => "resume",
-        5 => "new-issue",
+        2 => "current-pr-recovery",
+        3 => "completed-recovery",
+        4 => "link-pull-request",
+        5 => "resume",
+        6 => "new-issue",
         _ => $"tier {tier}"
     };
 }
@@ -663,10 +695,11 @@ public static class RoutingTaskTypeExtensions
         tier = type switch
         {
             WorkflowItemType.ChangeRequest => 1,
-            WorkflowItemType.RecoverCurrentPullRequest or WorkflowItemType.RecoverCompletedIssue => 2,
-            WorkflowItemType.LinkPullRequestsToIssues => 3,
-            WorkflowItemType.ResumeInProgressIssue => 4,
-            WorkflowItemType.NewIssue => 5,
+            WorkflowItemType.RecoverCurrentPullRequest => 2,
+            WorkflowItemType.RecoverCompletedIssue => 3,
+            WorkflowItemType.LinkPullRequestsToIssues => 4,
+            WorkflowItemType.ResumeInProgressIssue => 5,
+            WorkflowItemType.NewIssue => 6,
             _ => 0
         };
 
@@ -701,6 +734,7 @@ public sealed class RoutingStage
 public enum RoutingVerdict
 {
     Disabled,
+    Exempt,
     Pass,
     SoftPrefer,
     SoftIneligible,

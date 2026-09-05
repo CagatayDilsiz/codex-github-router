@@ -29,15 +29,27 @@ public sealed class RoutingEvaluationDependencies
             workingDirectory,
             currentModel: currentModel,
             assignmentIdentity: assignmentIdentity);
+
+    public Func<RouterConfiguration, string, WorkClaim, string?, Task<WorkflowResponse>> CheckClaimedWorkAsync { get; init; }
+        = (configuration, workingDirectory, claim, currentModel) => WorkflowService.CheckClaimedWorkAsync(
+            configuration,
+            workingDirectory,
+            claim,
+            currentModel);
+
+    public Func<RouterConfiguration, string, Task<AssignmentIdentityResolution>> ResolveAssignmentIdentityAsync { get; init; }
+        = (_, _) => Task.FromResult(AssignmentIdentityResolution.NotEnabled);
 }
 
 /// <summary>
 /// Produces the read-only production routing plan that the hook and the diagnostic
-/// commands share. Every stage (repository gate, discovery, worker/assignment
-/// exclusion, generated workflow items and the final routing decision) is evaluated
-/// through the same production code paths used by the hook. This service never
-/// mutates repository state: acquiring claims, closing issues and writing claim
-/// files remain exclusive to the hook.
+/// commands share. Every stage (repository gate, active-claim routing, discovery,
+/// worker/assignment exclusion, generated workflow items and the final routing
+/// decision) is evaluated through the same production code paths used by the hook.
+/// Assignment identity resolution is part of the plan and is only performed on the
+/// ordinary routing path, so an active repository gate never requires developer
+/// identity. This service never mutates repository state: acquiring claims, closing
+/// issues and writing claim files remain exclusive to the hook.
 /// </summary>
 public static class RoutingEvaluationService
 {
@@ -54,6 +66,12 @@ public static class RoutingEvaluationService
 
         dependencies ??= new RoutingEvaluationDependencies();
 
+        if (activeClaim is not null)
+        {
+            return await EvaluateClaimedAsync(configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, dependencies);
+        }
+
+        var identityResolution = AssignmentIdentityResolution.NotEnabled;
         var repositoryGateTasks = await dependencies.CheckRepositoryGateAsync(configuration, workingDirectory);
         if (!repositoryGateTasks.IsSuccessful)
         {
@@ -70,22 +88,36 @@ public static class RoutingEvaluationService
         }
         else
         {
+            if (AssignmentRoutingService.RequiresLocalIdentity(configuration) && assignmentIdentity is null)
+            {
+                identityResolution = await dependencies.ResolveAssignmentIdentityAsync(configuration, workingDirectory);
+                if (identityResolution.IsEnabled && !identityResolution.IsResolved)
+                {
+                    return RoutingEvaluationResult.Failure(identityResolution.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
+                }
+
+                if (identityResolution.IsEnabled && identityResolution.IsResolved)
+                {
+                    assignmentIdentity = identityResolution.Identity;
+                }
+            }
+
             var completedIssueTasks = await dependencies.CheckCompletedIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!completedIssueTasks.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(completedIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+                return RoutingEvaluationResult.Failure(completedIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
             }
 
             var inProgressIssueTasks = await dependencies.CheckInProgressIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!inProgressIssueTasks.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(inProgressIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+                return RoutingEvaluationResult.Failure(inProgressIssueTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
             }
 
             var newIssueTask = await dependencies.CheckNewIssuesAsync(configuration, workingDirectory, currentModel, assignmentIdentity);
             if (!newIssueTask.IsSuccessful)
             {
-                return RoutingEvaluationResult.Failure(newIssueTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+                return RoutingEvaluationResult.Failure(newIssueTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim, identityResolution);
             }
 
             var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask };
@@ -152,6 +184,7 @@ public static class RoutingEvaluationService
             AssignmentIdentity = assignmentIdentity,
             ActiveClaim = activeClaim,
             IsSuccessful = true,
+            IdentityResolution = identityResolution,
             RepositoryGateTasks = repositoryGateTasks.Tasks,
             OrdinaryTasks = workflowTasks,
             WorkflowTasks = workflowTasks,
@@ -162,6 +195,65 @@ public static class RoutingEvaluationService
             ConsideredIssues = consideredIssues
         };
     }
+
+    private static async Task<RoutingEvaluationResult> EvaluateClaimedAsync(
+        RouterConfiguration configuration,
+        string workingDirectory,
+        string? currentModel,
+        AssignmentIdentity? assignmentIdentity,
+        WorkClaim activeClaim,
+        RoutingEvaluationDependencies dependencies)
+    {
+        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, activeClaim, currentModel);
+        if (!claimedWork.IsSuccessful)
+        {
+            return RoutingEvaluationResult.Failure(claimedWork.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+        }
+
+        var workflowTasks = claimedWork.Tasks.ToList();
+        var actionableTasks = workflowTasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
+
+        var consideredIssues = claimedWork.ConsideredIssues.Count == 0
+            ? new List<Issue> { new() { Number = activeClaim.IssueNumber } }
+            : claimedWork.ConsideredIssues.ToList();
+
+        string? blockReason;
+        HookTaskDecision? decision = null;
+        if (workflowTasks.Count == 0)
+        {
+            blockReason = $"Active work claim for issue #{activeClaim.IssueNumber}{FormatPullRequest(activeClaim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed.";
+        }
+        else if (actionableTasks.Count == 0)
+        {
+            blockReason = "All workflow tasks are deferred. No action is required at this time.";
+        }
+        else
+        {
+            decision = HookTaskRouter.Route(actionableTasks);
+            blockReason = string.Equals(decision.BlockReason, "No actionable workflow tasks found.", StringComparison.Ordinal)
+                ? $"Active work claim for issue #{activeClaim.IssueNumber}{FormatPullRequest(activeClaim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed."
+                : decision.BlockReason;
+        }
+
+        return new RoutingEvaluationResult
+        {
+            Configuration = configuration,
+            WorkingDirectory = workingDirectory,
+            CurrentModel = currentModel,
+            AssignmentIdentity = assignmentIdentity,
+            ActiveClaim = activeClaim,
+            IsSuccessful = true,
+            ClaimRoutingActive = true,
+            WorkflowTasks = workflowTasks,
+            ActionableTasks = actionableTasks,
+            Decision = decision,
+            BlockReason = blockReason,
+            ConsideredIssues = consideredIssues
+        };
+    }
+
+    private static string FormatPullRequest(int? pullRequestNumber) =>
+        pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 
     private static IReadOnlyList<Issue> MergeConsideredIssues(IReadOnlyList<WorkflowResponse> responses)
     {
@@ -188,7 +280,8 @@ public sealed class RoutingEvaluationResult
         string workingDirectory,
         string? currentModel,
         AssignmentIdentity? assignmentIdentity,
-        WorkClaim? activeClaim) => new()
+        WorkClaim? activeClaim,
+        AssignmentIdentityResolution? identityResolution = null) => new()
         {
             Configuration = configuration,
             WorkingDirectory = workingDirectory,
@@ -196,6 +289,7 @@ public sealed class RoutingEvaluationResult
             AssignmentIdentity = assignmentIdentity,
             ActiveClaim = activeClaim,
             IsSuccessful = false,
+            IdentityResolution = identityResolution ?? AssignmentIdentityResolution.NotEnabled,
             DiscoveryFailureMessage = message
         };
 
@@ -212,6 +306,10 @@ public sealed class RoutingEvaluationResult
     public bool IsSuccessful { get; init; } = true;
 
     public string? DiscoveryFailureMessage { get; init; }
+
+    public bool ClaimRoutingActive { get; init; }
+
+    public AssignmentIdentityResolution IdentityResolution { get; init; } = AssignmentIdentityResolution.NotEnabled;
 
     public IReadOnlyList<WorkflowItem> RepositoryGateTasks { get; init; } = Array.Empty<WorkflowItem>();
 

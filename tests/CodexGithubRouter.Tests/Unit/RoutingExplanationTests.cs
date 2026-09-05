@@ -583,6 +583,123 @@ public sealed class RoutingExplanationTests
         Assert.False(explanation2.IsEligible);
     }
 
+    [Fact]
+    public void Gate_plan_marks_worker_and_assignment_routing_exempt()
+    {
+        var configuration = WorkerAndAssignmentConfiguration("require", "allow");
+        var identity = Identity("alice");
+        var issue = WorkerIssue(1, "codex:worker:terra", "bob");
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Repository workflow is gated by issue #1." } };
+        var plan = Plan(
+            configuration,
+            currentModel: "luna-model",
+            identity: identity,
+            consideredIssues: new[] { issue },
+            repositoryGateTasks: new[] { gatedTask },
+            actionableTasks: new[] { gatedTask },
+            decision: new HookTaskDecision { SelectedTask = gatedTask, AdditionalContext = "gated" });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        var workerStage = Assert.Single(explanation.Stages, s => s.Name == "Worker Routing");
+        var assignmentStage = Assert.Single(explanation.Stages, s => s.Name == "Assignment Routing");
+        Assert.Equal(RoutingVerdict.Exempt, workerStage.Verdict);
+        Assert.Equal(RoutingVerdict.Exempt, assignmentStage.Verdict);
+        Assert.True(explanation.IsEligible);
+        Assert.True(explanation.IsSelected);
+        Assert.Equal(int.MaxValue, explanation.SelectionRank);
+    }
+
+    [Fact]
+    public void Link_pull_requests_to_issues_is_selectable_in_outcome()
+    {
+        var issue = ReadyIssue(1);
+        var linkTask = new WorkflowItem { Type = WorkflowItemType.LinkPullRequestsToIssues, IssueNumber = 1 };
+        var plan = Plan(
+            consideredIssues: new[] { issue },
+            actionableTasks: new[] { linkTask },
+            decision: new HookTaskDecision { SelectedTask = linkTask, AdditionalContext = "link" });
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.True(explanation.IsSelected);
+        var outcomeStage = Assert.Single(explanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.Selected, outcomeStage.Verdict);
+    }
+
+    [Fact]
+    public void Current_pull_request_recovery_precedes_completed_recovery()
+    {
+        var currentIssue = ReadyIssue(1);
+        var completedIssue = ReadyIssue(2);
+        var currentRecovery = new WorkflowItem { Type = WorkflowItemType.RecoverCurrentPullRequest, IssueNumber = 1, PullRequestNumber = 10, SelectionRank = 0 };
+        var completedRecovery = new WorkflowItem { Type = WorkflowItemType.RecoverCompletedIssue, IssueNumber = 2, SelectionRank = 0 };
+        var plan = Plan(
+            consideredIssues: new[] { currentIssue, completedIssue },
+            actionableTasks: new[] { completedRecovery, currentRecovery },
+            decision: new HookTaskDecision { SelectedTask = currentRecovery, AdditionalContext = "recover current" });
+
+        var currentExplanation = RoutingExplanationService.Explain(plan, currentIssue);
+        var completedExplanation = RoutingExplanationService.Explain(plan, completedIssue);
+
+        Assert.True(currentExplanation.IsSelected);
+        Assert.False(completedExplanation.IsSelected);
+        var completedOutcome = Assert.Single(completedExplanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.SoftIneligible, completedOutcome.Verdict);
+        Assert.Contains("current-pr-recovery", completedOutcome.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(WorkflowItemType.RecoverCurrentPullRequest.TryGetRouteTier(out var currentTier));
+        Assert.True(WorkflowItemType.RecoverCompletedIssue.TryGetRouteTier(out var completedTier));
+        Assert.True(currentTier < completedTier);
+    }
+
+    [Fact]
+    public void Production_blocking_outcome_folds_into_eligibility()
+    {
+        var issue = new Issue { Number = 1, Labels = new List<GithubLabel> { new() { Name = "codex:working" } } };
+        var blockingTask = new WorkflowItem { Type = WorkflowItemType.ClosedWithoutMerge, IssueNumber = 1, Status = new WorkflowTaskStatus { Message = "Closed without merge." } };
+        var plan = Plan(
+            consideredIssues: new[] { issue },
+            actionableTasks: new[] { blockingTask },
+            blockReason: "Closed without merge.");
+
+        var explanation = RoutingExplanationService.Explain(plan, issue);
+
+        Assert.False(explanation.IsEligible);
+        Assert.False(explanation.IsSelected);
+        var workflowStage = Assert.Single(explanation.Stages, s => s.Name == "Workflow State");
+        Assert.Equal(RoutingVerdict.Pass, workflowStage.Verdict);
+        var outcomeStage = Assert.Single(explanation.Stages, s => s.Name == "Routing Outcome");
+        Assert.Equal(RoutingVerdict.HardIneligible, outcomeStage.Verdict);
+    }
+
+    [Fact]
+    public void Claim_active_plan_selects_only_the_claimed_issue()
+    {
+        var claimed = ReadyIssue(1);
+        var other = ReadyIssue(2);
+        var claimTask = new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 1, SelectionRank = 0 };
+        var plan = new RoutingEvaluationResult
+        {
+            Configuration = new RouterConfiguration(),
+            ClaimRoutingActive = true,
+            ActiveClaim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 1, WorkType = WorkClaimType.Implementation },
+            ConsideredIssues = new[] { claimed, other },
+            WorkflowTasks = new[] { claimTask },
+            ActionableTasks = new[] { claimTask },
+            Decision = new HookTaskDecision { SelectedTask = claimTask, AdditionalContext = "claim" }
+        };
+
+        var claimedExplanation = RoutingExplanationService.Explain(plan, claimed);
+        var otherExplanation = RoutingExplanationService.Explain(plan, other);
+
+        Assert.True(claimedExplanation.IsSelected);
+        var discoveryStage = Assert.Single(claimedExplanation.Stages, s => s.Name == "Candidate Discovery");
+        Assert.Contains("claim", discoveryStage.Message, StringComparison.OrdinalIgnoreCase);
+        var assignmentStage = Assert.Single(claimedExplanation.Stages, s => s.Name == "Assignment Routing");
+        Assert.Equal(RoutingVerdict.Exempt, assignmentStage.Verdict);
+        Assert.True(otherExplanation.IsSelected == false);
+    }
+
     private static RoutingEvaluationResult Plan(
         RouterConfiguration? configuration = null,
         string? currentModel = null,

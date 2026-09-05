@@ -205,36 +205,25 @@ public static class HookService
         HookExecutionDependencies dependencies,
         bool allowNoClaimReroute = true)
     {
-        AssignmentIdentity? assignmentIdentity = null;
-        var needsLocalIdentity = AssignmentRoutingService.RequiresLocalIdentity(configuration);
-        if (needsLocalIdentity)
-        {
-            var identityResolution = await ResolveAssignmentIdentityAsync(configuration, workingDirectory, dependencies, CancellationToken.None);
-            if (identityResolution.IsEnabled && !identityResolution.IsResolved)
-            {
-                scope.SetIdentity(identityResolution.Identity?.Name);
-                scope.Block(identityResolution.Message);
-                await WriteBlockAsync(identityResolution.Message);
-                return 0;
-            }
-
-            assignmentIdentity = identityResolution.Identity;
-            scope.SetIdentity(assignmentIdentity?.Name);
-        }
-
         var plan = await RoutingEvaluationService.EvaluateAsync(
             configuration,
             workingDirectory,
             currentModel: currentModel,
-            assignmentIdentity: assignmentIdentity);
+            dependencies: new RoutingEvaluationDependencies
+            {
+                ResolveAssignmentIdentityAsync = (config, wd) => ResolveAssignmentIdentityAsync(config, wd, dependencies, CancellationToken.None)
+            });
         if (!plan.IsSuccessful || !string.IsNullOrWhiteSpace(plan.BlockReason))
         {
             var blockReason = plan.IsSuccessful ? plan.BlockReason : plan.DiscoveryFailureMessage;
+            scope.SetIdentity(plan.AssignmentIdentity?.Name);
             scope.Block(blockReason);
             await WriteBlockAsync(blockReason!);
             return 0;
         }
 
+        var assignmentIdentity = plan.AssignmentIdentity;
+        scope.SetIdentity(assignmentIdentity?.Name);
         var decision = plan.Decision!;
         var actionableTasks = plan.ActionableTasks;
 
@@ -258,20 +247,30 @@ public static class HookService
                 ? WorkClaimType.ChangeRequest
                 : WorkClaimType.Implementation;
             var claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
-            var eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
-            if (eligibility.IsEnabled && !eligibility.IsEligible)
+            WorkerEligibility eligibility;
+            if (plan.HasRepositoryGate)
             {
-                scope.Block(eligibility.Message);
-                await WriteBlockAsync(eligibility.Message);
-                return 0;
+                // Repository-gate routing bypasses worker/assignment filtering, so the
+                // selected gate work is claimed without policy eligibility guards.
+                eligibility = WorkerEligibility.Disabled;
             }
-
-            var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue);
-            if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
+            else
             {
-                scope.Block(assignmentEligibility.Message);
-                await WriteBlockAsync(assignmentEligibility.Message);
-                return 0;
+                eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
+                if (eligibility.IsEnabled && !eligibility.IsEligible)
+                {
+                    scope.Block(eligibility.Message);
+                    await WriteBlockAsync(eligibility.Message);
+                    return 0;
+                }
+
+                var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue);
+                if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
+                {
+                    scope.Block(assignmentEligibility.Message);
+                    await WriteBlockAsync(assignmentEligibility.Message);
+                    return 0;
+                }
             }
 
             var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
