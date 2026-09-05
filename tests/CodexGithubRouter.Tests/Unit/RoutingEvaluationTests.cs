@@ -246,6 +246,7 @@ public sealed class RoutingEvaluationTests
 
         Assert.True(plan.ClaimRoutingActive);
         Assert.NotNull(plan.ActiveClaim);
+        Assert.Equal(200, plan.ActiveClaim!.PullRequestNumber);
         Assert.Equal(claim.IssueNumber, plan.Decision!.SelectedTask!.IssueNumber);
         Assert.Empty(plan.RepositoryGateTasks);
         Assert.Empty(plan.OrdinaryTasks);
@@ -302,10 +303,72 @@ public sealed class RoutingEvaluationTests
     }
 
     [Fact]
-    public async Task Would_keep_release_candidate_claim_blocks_instead_of_rerouting()
+    public async Task No_pr_claim_with_single_passive_candidate_pull_request_enriches_and_releases()
     {
         var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
-        var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9 };
+        var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9, PullRequestNumber = 200 };
+        var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            EvaluateClaimReconciliationAsync = (_, _, evaluated) => Task.FromResult(
+                evaluated.PullRequestNumber.HasValue
+                    ? WorkClaimReconciliationRecommendation.WouldRelease
+                    : WorkClaimReconciliationRecommendation.WouldKeep),
+            CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem> { passiveTask },
+                ConsideredIssues = new List<Issue> { new() { Number = 9 } }
+            }),
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(newIssue))
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", activeClaim: claim, dependencies: dependencies);
+
+        Assert.True(plan.IsSuccessful);
+        Assert.False(plan.ClaimRoutingActive);
+        Assert.Null(plan.ActiveClaim);
+        Assert.Equal(claim.IssueNumber, plan.ReleasedClaim!.IssueNumber);
+        Assert.Equal(newIssue.IssueNumber, plan.Decision!.SelectedTask!.IssueNumber);
+    }
+
+    [Fact]
+    public async Task Multiple_candidate_pull_requests_block_implicit_identity_selection()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, WorkType = WorkClaimType.Implementation };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldKeep),
+            CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem>
+                {
+                    new() { Type = WorkflowItemType.AwaitingReview, IssueNumber = 9, PullRequestNumber = 201 },
+                    new() { Type = WorkflowItemType.AwaitingReview, IssueNumber = 9, PullRequestNumber = 202 }
+                },
+                ConsideredIssues = new List<Issue> { new() { Number = 9 } }
+            }),
+            CheckRepositoryGateAsync = (_, _) => { throw new InvalidOperationException("The repository gate must not run while a work claim is active."); }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", activeClaim: claim, dependencies: dependencies);
+
+        Assert.False(plan.IsSuccessful);
+        Assert.Null(plan.ReleasedClaim);
+        Assert.Contains("multiple candidate pull requests", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("#201", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("#202", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Would_keep_release_candidate_claim_blocks_instead_of_rerouting()
+    {
+        var claim = new WorkClaim { OwnerSessionId = "owner", IssueNumber = 9, PullRequestNumber = 200, WorkType = WorkClaimType.Implementation };
+        var passiveTask = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 9, PullRequestNumber = 200 };
         var dependencies = new RoutingEvaluationDependencies
         {
             EvaluateClaimReconciliationAsync = (_, _, _) => Task.FromResult(WorkClaimReconciliationRecommendation.WouldKeep),
@@ -326,6 +389,7 @@ public sealed class RoutingEvaluationTests
         Assert.False(plan.IsSuccessful);
         Assert.Null(plan.ReleasedClaim);
         Assert.Contains("could not be released safely", plan.DiscoveryFailureMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("pull request #200", plan.DiscoveryFailureMessage, StringComparison.Ordinal);
     }
 
     [Fact]

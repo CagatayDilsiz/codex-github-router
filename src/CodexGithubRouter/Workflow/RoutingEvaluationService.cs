@@ -68,7 +68,10 @@ public sealed class RoutingEvaluationDependencies
 /// needs-info, abandoned or closed claimed issue; a missing claimed issue or
 /// pull request; or a passive/terminal claimed pull request), the plan simulates
 /// that release (without mutating the claim file) and continues through ordinary
-/// routing, mirroring the hook. This service never mutates repository state:
+/// routing, mirroring the hook. A claim without a pull-request identity is first
+/// enriched with the single candidate pull request production would acquire, and
+/// reconciliation is re-evaluated against that enriched identity before a passive
+/// task is treated as unreleasable. This service never mutates repository state:
 /// acquiring claims, closing issues and writing claim files remain exclusive
 /// to the hook.
 /// </summary>
@@ -257,22 +260,69 @@ public static class RoutingEvaluationService
                 configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
         }
 
-        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, activeClaim, currentModel);
+        var effectiveClaim = activeClaim;
+        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, effectiveClaim, currentModel);
         if (!claimedWork.IsSuccessful)
         {
-            return RoutingEvaluationResult.Failure(claimedWork.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+            return RoutingEvaluationResult.Failure(claimedWork.Message, configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
+        }
+
+        // Production (ActiveClaimRouteService) enriches a claim that has no pull-request
+        // identity when claimed-work discovery identifies exactly one candidate pull request,
+        // then re-evaluates claimed work with that identity. This read-only plan mirrors the
+        // step with a synthetic claim; nothing is written or acquired.
+        if (effectiveClaim.PullRequestNumber is null)
+        {
+            var candidatePullRequests = claimedWork.Tasks
+                .Where(task => task.PullRequestNumber.HasValue)
+                .Select(task => task.PullRequestNumber!.Value)
+                .Distinct()
+                .ToList();
+            if (candidatePullRequests.Count > 1)
+            {
+                return RoutingEvaluationResult.Failure(
+                    $"Active work claim for issue #{effectiveClaim.IssueNumber} has multiple candidate pull requests ({string.Join(", ", candidatePullRequests.Select(number => $"#{number}"))}). No work identity will be selected implicitly.",
+                    configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
+            }
+
+            if (candidatePullRequests.Count == 1)
+            {
+                effectiveClaim = EnrichClaim(effectiveClaim, candidatePullRequests[0], currentModel);
+                claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, effectiveClaim, currentModel);
+                if (!claimedWork.IsSuccessful)
+                {
+                    return RoutingEvaluationResult.Failure(claimedWork.Message, configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
+                }
+            }
         }
 
         if (IsReleaseCandidate(claimedWork))
         {
             // Production attempts an in-flight release before routing release-candidate
-            // claimed work. Reconciliation keeps the claim, so the hook blocks rather than
-            // replacing the claimed work with unrelated ordinary routing.
-            return RoutingEvaluationResult.Failure(FormatReleaseFailureReason(activeClaim), configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
+            // claimed work and reconciles against the enriched claim. When the enriched
+            // reconciliation releases, ordinary routing continues; only a kept claim is
+            // unreleasable and blocks exactly like the hook.
+            if (effectiveClaim.PullRequestNumber != activeClaim.PullRequestNumber)
+            {
+                var releaseReconciliation = await dependencies.EvaluateClaimReconciliationAsync(configuration, workingDirectory, effectiveClaim);
+                if (releaseReconciliation == WorkClaimReconciliationRecommendation.WouldRelease)
+                {
+                    return null;
+                }
+
+                if (releaseReconciliation == WorkClaimReconciliationRecommendation.UnableToDetermine)
+                {
+                    return RoutingEvaluationResult.Failure(
+                        $"Active work claim for issue #{effectiveClaim.IssueNumber} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
+                        configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
+                }
+            }
+
+            return RoutingEvaluationResult.Failure(FormatReleaseFailureReason(effectiveClaim), configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
         }
 
         var actionableTasks = claimedWork.Tasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
-        var decision = HookTaskRouter.RouteClaimedWork(activeClaim, activeClaim.OwnerSessionId, actionableTasks);
+        var decision = HookTaskRouter.RouteClaimedWork(effectiveClaim, effectiveClaim.OwnerSessionId, actionableTasks);
 
         return new RoutingEvaluationResult
         {
@@ -280,7 +330,7 @@ public static class RoutingEvaluationService
             WorkingDirectory = workingDirectory,
             CurrentModel = currentModel,
             AssignmentIdentity = assignmentIdentity,
-            ActiveClaim = activeClaim,
+            ActiveClaim = effectiveClaim,
             IsSuccessful = true,
             ClaimRoutingActive = true,
             WorkflowTasks = claimedWork.Tasks,
@@ -288,10 +338,25 @@ public static class RoutingEvaluationService
             Decision = decision,
             BlockReason = decision.BlockReason,
             ConsideredIssues = claimedWork.ConsideredIssues.Count == 0
-                ? new List<Issue> { new() { Number = activeClaim.IssueNumber } }
+                ? new List<Issue> { new() { Number = effectiveClaim.IssueNumber } }
                 : claimedWork.ConsideredIssues.ToList()
         };
     }
+
+    private static WorkClaim EnrichClaim(WorkClaim claim, int pullRequestNumber, string? currentModel) => new()
+    {
+        ClaimId = claim.ClaimId,
+        Version = claim.Version,
+        OwnerSessionId = claim.OwnerSessionId,
+        IssueNumber = claim.IssueNumber,
+        PullRequestNumber = pullRequestNumber,
+        WorkType = claim.WorkType,
+        WorkerProfile = claim.WorkerProfile,
+        Model = currentModel ?? claim.Model,
+        ClaimedIssueUpdatedAt = claim.ClaimedIssueUpdatedAt,
+        ClaimedAt = claim.ClaimedAt,
+        LastUpdatedAt = claim.LastUpdatedAt
+    };
 
     private static string FormatReleaseFailureReason(WorkClaim claim) =>
         $"Active work claim for issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)} remains passive or terminal, but could not be released safely. No unrelated work will be routed.";

@@ -182,7 +182,7 @@ cgr explain --issue 12    # detailed per-issue decision stages
 cgr explain              # the same list form as `cgr work list`
 ```
 
-This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request) is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
+This runs the identical production scan (repository gate, then completed, in-progress, and ready discovery), so what it reports is what the hook consumes — worker and assignment routing, repository-gate short-circuits, the active work claim, and the final routing decision or block reason. Assignment identity uses the same fail-closed plan stage as the hook: when identity cannot be resolved, the command reports the identical failure message the hook would block on. A claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is shown as "would be released; ordinary routing continues" (read-only simulation — the claim is never modified).
 
 ## Structured hook diagnostics
 
