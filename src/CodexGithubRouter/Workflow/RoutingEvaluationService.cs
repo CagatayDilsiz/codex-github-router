@@ -83,6 +83,7 @@ public static class RoutingEvaluationService
         string? currentModel = null,
         AssignmentIdentity? assignmentIdentity = null,
         WorkClaim? activeClaim = null,
+        IReadOnlyList<WorkClaim>? otherWorktreeClaims = null,
         RoutingEvaluationDependencies? dependencies = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
@@ -113,15 +114,26 @@ public static class RoutingEvaluationService
             return RoutingEvaluationResult.Failure(repositoryGateTasks.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, releasedClaim: releasedClaim);
         }
 
-        IReadOnlyList<WorkflowItem> workflowTasks;
+        IReadOnlyList<WorkflowItem> workflowTasks = Array.Empty<WorkflowItem>();
         WorkflowResponse? noEligibleWorkResponse = null;
-        IReadOnlyList<WorkflowResponse> discoveryResponses;
+        IReadOnlyList<WorkflowResponse> discoveryResponses = Array.Empty<WorkflowResponse>();
+        IReadOnlyList<WorkflowItem> plannedGateTasks = Array.Empty<WorkflowItem>();
+
         if (repositoryGateTasks.Tasks.Count > 0)
         {
-            workflowTasks = HookService.SelectWorkflowTasks(repositoryGateTasks.Tasks, Array.Empty<WorkflowItem>());
+            // Peer-worktree claims decide who can work a gated item; the repository gate itself is
+            // an orthogonal repository-wide barrier evaluated before ordinary routing and decides
+            // whether unrelated work may run. A gate with at least one free gated task
+            // short-circuits ordinary discovery so the free gated task is routed. A gate whose
+            // every task is owned by another worktree keeps the gate in force: unrelated ordinary
+            // work is not routed and the plan blocks while the gate remains active, instead of
+            // falling through to ordinary discovery.
+            plannedGateTasks = repositoryGateTasks.Tasks;
+            workflowTasks = repositoryGateTasks.Tasks;
             discoveryResponses = new[] { repositoryGateTasks };
         }
-        else
+
+        if (workflowTasks.Count == 0)
         {
             if (AssignmentRoutingService.RequiresLocalIdentity(configuration) && assignmentIdentity is null)
             {
@@ -185,19 +197,43 @@ public static class RoutingEvaluationService
             discoveryResponses = ordinaryResponses;
         }
 
-        var consideredIssues = MergeConsideredIssues(discoveryResponses);
+        var occupiedClaims = WorkClaimReconciliationService.ResolveOccupiedClaims(otherWorktreeClaims, workflowTasks);
+        var freeWorkflowTasks = workflowTasks.Where(task => !IsOccupied(task, occupiedClaims)).ToList();
+
+        var consideredIssues = MergeConsideredIssues(discoveryResponses).ToList();
+        foreach (var occupied in occupiedClaims)
+        {
+            if (consideredIssues.All(issue => issue.Number != occupied.IssueNumber))
+            {
+                consideredIssues.Add(new Issue { Number = occupied.IssueNumber });
+            }
+        }
 
         string? blockReason;
         HookTaskDecision? decision = null;
         IReadOnlyList<WorkflowItem> actionableTasks = Array.Empty<WorkflowItem>();
 
-        if (workflowTasks.Count == 0)
+        if (freeWorkflowTasks.Count == 0)
         {
-            blockReason = noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
+            if (plannedGateTasks.Count > 0)
+            {
+                // The repository gate remains in force as an orthogonal repository-wide barrier
+                // even when every gated task is owned by another worktree: peer claims decide who
+                // may work the gated item, while the gate itself decides whether unrelated work
+                // may run. Unrelated ordinary routing is therefore blocked instead of falling
+                // through, matching the documented gate contract.
+                blockReason = FormatGateOccupiedBlockReason(repositoryGateTasks);
+            }
+            else
+            {
+                blockReason = occupiedClaims.Count > 0 && noEligibleWorkResponse is null
+                    ? FormatOccupiedBlockReason(occupiedClaims)
+                    : noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
+            }
         }
         else
         {
-            actionableTasks = workflowTasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
+            actionableTasks = freeWorkflowTasks.Where(task => task.Type != WorkflowItemType.Deferred).ToList();
             if (actionableTasks.Count == 0)
             {
                 blockReason = noEligibleWorkResponse?.NoEligibleWork == true
@@ -221,13 +257,14 @@ public static class RoutingEvaluationService
             ReleasedClaim = releasedClaim,
             IsSuccessful = true,
             IdentityResolution = identityResolution,
-            RepositoryGateTasks = repositoryGateTasks.Tasks,
-            OrdinaryTasks = workflowTasks,
+            RepositoryGateTasks = plannedGateTasks,
+            OrdinaryTasks = freeWorkflowTasks,
             WorkflowTasks = workflowTasks,
             ActionableTasks = actionableTasks,
             Decision = decision,
             BlockReason = blockReason,
             NoEligibleWorkResponse = noEligibleWorkResponse,
+            IneligibleOccupiedClaims = occupiedClaims,
             ConsideredIssues = consideredIssues
         };
     }
@@ -369,6 +406,29 @@ public static class RoutingEvaluationService
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
 
+    private static bool IsOccupied(WorkflowItem task, IReadOnlyList<OccupiedWorkClaim> occupiedClaims) =>
+        occupiedClaims.Any(claim =>
+            claim.IssueNumber == task.IssueNumber ||
+            (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value));
+
+    private static string FormatOccupiedBlockReason(IReadOnlyList<OccupiedWorkClaim> occupiedClaims)
+    {
+        var work = string.Join(", ", occupiedClaims
+            .Select(claim => $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}")
+            .Distinct(StringComparer.Ordinal));
+        return $"All discovered work ({work}) is owned by other Git worktrees. Nothing is available for this worktree until one of those claims is released.";
+    }
+
+    private static string FormatGateOccupiedBlockReason(WorkflowResponse repositoryGateTasks)
+    {
+        var gatedIssues = string.Join(", ", repositoryGateTasks.Tasks
+            .Select(task => task.IssueNumber)
+            .Distinct()
+            .OrderBy(number => number)
+            .Select(number => $"issue #{number}"));
+        return $"Repository workflow is gated by {gatedIssues}, which is owned by another Git worktree. Unrelated work cannot be routed while the repository gate is active.";
+    }
+
     private static IReadOnlyList<Issue> MergeConsideredIssues(IReadOnlyList<WorkflowResponse> responses)
     {
         var issuesByNumber = new Dictionary<int, Issue>();
@@ -442,6 +502,8 @@ public sealed class RoutingEvaluationResult
     public string? BlockReason { get; init; }
 
     public WorkflowResponse? NoEligibleWorkResponse { get; init; }
+
+    public IReadOnlyList<OccupiedWorkClaim> IneligibleOccupiedClaims { get; init; } = Array.Empty<OccupiedWorkClaim>();
 
     public IReadOnlyList<Issue> ConsideredIssues { get; init; } = Array.Empty<Issue>();
 

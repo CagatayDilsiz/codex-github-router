@@ -219,7 +219,7 @@ public sealed class HookDiagnosticsTests
                 }
             }
         };
-        await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, new WorkClaim
+        await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
         {
             OwnerSessionId = "other-session",
             IssueNumber = 22,

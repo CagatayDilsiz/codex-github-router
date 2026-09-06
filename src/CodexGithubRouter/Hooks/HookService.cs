@@ -113,8 +113,12 @@ public static class HookService
                 ?? throw new InvalidOperationException("Not a valid Git repository.");
             scope.SetRepository(gitCommonDirectory);
 
-            await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, configuration);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory);
+            var worktreeId = await dependencies.ResolveWorktreeIdAsync(payload.Cwd)
+                ?? throw new InvalidOperationException("Not a valid Git repository.");
+            scope.SetWorktree(worktreeId);
+
+            await WorkClaimReconciliationService.ReconcileAsync(payload.Cwd, gitCommonDirectory, worktreeId, configuration);
+            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory, worktreeId);
             if (activeClaim is not null && !string.Equals(activeClaim.OwnerSessionId, payload.SessionId, StringComparison.Ordinal))
             {
                 scope.SetClaim(activeClaim);
@@ -127,7 +131,7 @@ public static class HookService
             if (activeClaim is not null)
             {
                 scope.SetClaim(activeClaim);
-                var claimedDecision = await RouteActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, payload.Model, activeClaim);
+                var claimedDecision = await RouteActiveClaimAsync(payload.Cwd, gitCommonDirectory, worktreeId, configuration, payload.SessionId, payload.Model, activeClaim);
                 if (claimedDecision is not null)
                 {
                     if (!string.IsNullOrWhiteSpace(claimedDecision.BlockReason))
@@ -148,7 +152,7 @@ public static class HookService
                 // the normal no-claim route in this same hook invocation.
             }
 
-            return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, configuration, payload.SessionId, payload.Model, scope, dependencies);
+            return await RunWithoutActiveClaimAsync(payload.Cwd, gitCommonDirectory, worktreeId, configuration, payload.SessionId, payload.Model, scope, dependencies);
         }
         catch (WorkClaimFileException exception)
         {
@@ -188,16 +192,18 @@ public static class HookService
     private static Task<HookTaskDecision?> RouteActiveClaimAsync(
         string workingDirectory,
         string gitCommonDirectory,
+        string worktreeId,
         RouterConfiguration configuration,
         string? sessionId,
         string? currentModel,
         WorkClaim activeClaim)
-        => ActiveClaimRouteService.Create(workingDirectory, gitCommonDirectory, configuration)
+        => ActiveClaimRouteService.Create(workingDirectory, gitCommonDirectory, worktreeId, configuration)
             .RouteAsync(activeClaim, sessionId, currentModel);
 
     private static async Task<int> RunWithoutActiveClaimAsync(
         string workingDirectory,
         string gitCommonDirectory,
+        string worktreeId,
         RouterConfiguration configuration,
         string? sessionId,
         string? currentModel,
@@ -209,6 +215,7 @@ public static class HookService
             configuration,
             workingDirectory,
             currentModel: currentModel,
+            otherWorktreeClaims: await ReadOtherWorktreeClaimsAsync(gitCommonDirectory, worktreeId),
             dependencies: new RoutingEvaluationDependencies
             {
                 ResolveAssignmentIdentityAsync = (config, wd) => ResolveAssignmentIdentityAsync(config, wd, dependencies, CancellationToken.None)
@@ -273,7 +280,7 @@ public static class HookService
                 }
             }
 
-            var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, new WorkClaim
+            var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, worktreeId, new WorkClaim
             {
                 OwnerSessionId = sessionId,
                 IssueNumber = decision.SelectedTask.IssueNumber,
@@ -286,13 +293,21 @@ public static class HookService
             if (!acquisition.Acquired)
             {
                 var acquisitionBlockReason = acquisition.BlockReason ?? "Could not acquire the repository work claim.";
+                if (allowNoClaimReroute && acquisition.BlockReason?.Contains("another Git worktree", StringComparison.Ordinal) == true)
+                {
+                    // A concurrent worktree claimed the selected work between evaluation and
+                    // acquisition. Re-evaluate once from the refreshed repository-wide claim set
+                    // and route the next eligible item instead of blocking this invocation.
+                    return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, worktreeId, configuration, sessionId, currentModel, scope, dependencies, false);
+                }
+
                 scope.Block(acquisitionBlockReason);
                 await WriteBlockAsync(acquisitionBlockReason);
                 return 0;
             }
 
             var newlyAcquiredClaim = acquisition.Claim;
-            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory) ?? newlyAcquiredClaim;
+            var acquiredClaim = await WorkClaimStore.ReadAsync(gitCommonDirectory, worktreeId) ?? newlyAcquiredClaim;
             if (newlyAcquiredClaim is null || acquiredClaim is null)
             {
                 const string rereadFailureReason = "Repository work was acquired but could not be re-read safely.";
@@ -306,7 +321,7 @@ public static class HookService
             var refreshedClaimedWork = await WorkflowService.CheckClaimedWorkAsync(configuration, workingDirectory, acquiredClaim, currentModel);
             if (!refreshedClaimedWork.IsSuccessful)
             {
-                var released = await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, newlyAcquiredClaim);
+                var released = await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, worktreeId, newlyAcquiredClaim);
                 var refreshBlockReason = released
                     ? refreshedClaimedWork.Message
                     : $"{refreshedClaimedWork.Message} The newly acquired claim could not be released safely because it changed concurrently; no work context was delivered.";
@@ -317,11 +332,11 @@ public static class HookService
 
             if (IsReleaseCandidate(refreshedClaimedWork))
             {
-                if (await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, configuration))
+                if (await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, gitCommonDirectory, worktreeId, configuration))
                 {
                     if (allowNoClaimReroute)
                     {
-                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, configuration, sessionId, currentModel, scope, dependencies, false);
+                        return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, worktreeId, configuration, sessionId, currentModel, scope, dependencies, false);
                     }
 
                     const string rerouteDisallowedReason = "The acquired work became passive or terminal during refresh and was released; no second routing pass is allowed in this invocation.";
@@ -364,6 +379,19 @@ public static class HookService
             WorkflowItemType.Deferred or
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
+
+    private static async Task<IReadOnlyList<WorkClaim>> ReadOtherWorktreeClaimsAsync(string gitCommonDirectory, string worktreeId)
+    {
+        // Defense-in-depth behind repository-wide stale pruning: exclude claims whose worktree no
+        // longer exists using the same shared evaluation production pruning applies, so a deleted
+        // worktree's claim never occupies work even if reconciliation has not run yet.
+        var allClaims = await WorkClaimStore.ReadAllAsync(gitCommonDirectory);
+        var currentKey = WorkClaimStore.NormalizeWorktreeId(gitCommonDirectory, worktreeId);
+        return allClaims
+            .Where(claim => !WorkClaimStore.IsStaleWorktree(gitCommonDirectory, claim) &&
+                !string.Equals(WorkClaimStore.NormalizeWorktreeId(gitCommonDirectory, claim.WorktreeId), currentKey, StringComparison.Ordinal))
+            .ToList();
+    }
 
     private static string ResolveActivationMode(RouterConfiguration configuration)
     {

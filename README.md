@@ -5,7 +5,7 @@
 
 Codex GitHub Router (`cgr`) is a small .NET CLI that connects [Codex](https://openai.com/index/introducing-codex/) sessions with GitHub Issues and Pull Requests. It installs a Codex `UserPromptSubmit` hook, finds the next actionable workflow item, prioritizes existing review or change-request work, and can prevent new work from starting while an earlier item still requires attention.
 
-CGR turns a labeled GitHub workflow (ready → working → done) into router decisions. When you ask Codex to "work on the next task", the hook checks the repository state and delivers the additional context Codex needs: which issue to take, whether an in-progress issue must be resumed, whether a pull request is waiting on a change request, and so on. It intentionally keeps at most one active coding claim per repository so multiple sessions and worktrees agree on who owns the work.
+CGR turns a labeled GitHub workflow (ready → working → done) into router decisions. When you ask Codex to "work on the next task", the hook checks the repository state and delivers the additional context Codex needs: which issue to take, whether an in-progress issue must be resumed, whether a pull request is waiting on a change request, and so on. It keeps a repository-wide claim set with at most one active coding claim per worktree, so parallel work can proceed across Git worktrees while sessions agree on who owns which issue.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ cgr config validate
 cgr doctor
 ```
 
-`cgr work list` and `cgr explain` are strictly read-only. They run the same production routing scan as the hook (repository gate, then completed, in-progress, and ready discovery) and explain *why* each issue was eligible, blocked, or selected — including workflow state, candidate discovery, worker and assignment routing, repository-gate handling, the active work claim, and the final production routing decision. `cgr work list --model <model>` asks "what would this model route?" the same way `cgr explain --model <model>` does. Assignment identity is resolved by the same fail-closed plan stage the hook uses, and a claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is reported as "would be released, ordinary routing continues" without ever modifying the claim file.
+`cgr work list` and `cgr explain` are strictly read-only. They run the same production routing scan as the hook (repository gate, then completed, in-progress, and ready discovery) and explain *why* each issue was eligible, blocked, or selected — including workflow state, candidate discovery, worker and assignment routing, repository-gate handling, the active work claim, and the final production routing decision. A claim owned by a worktree that no longer exists is excluded with the same stale-worktree evaluation production pruning uses, without writing, so a deleted worktree never occupies work in diagnostics. `cgr work list --model <model>` asks "what would this model route?" the same way `cgr explain --model <model>` does. Assignment identity is resolved by the same fail-closed plan stage the hook uses, and a claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is reported as "would be released, ordinary routing continues" without ever modifying the claim file.
 
 ## Troubleshooting
 
@@ -96,8 +96,8 @@ Workflow and pull-request labels, worker routing, assignee-aware routing, reposi
 
 ## Current scope and limitations
 
-- At most **one active coding claim** per repository, shared across worktrees.
-- CGR never starts a second issue, branch, or pull request while work is active.
+- At most **one active coding claim per worktree**, with the full repository claim set shared across worktrees.
+- CGR never starts a second issue, branch, or pull request in a worktree while that worktree has an active claim; different worktrees claim different work items. Work owned by another worktree is treated as occupied and skipped by routing and `cgr explain`, so each worktree routes the next item it can actually claim.
 - Autonomous mode is repository-specific and stored in the shared Git common directory.
 - The router relies on GitHub labels to model state; conflicting labels are treated as an ambiguous state and block the hook.
 - PR review itself is not a claimable work type yet; change requests on linked pull requests are.

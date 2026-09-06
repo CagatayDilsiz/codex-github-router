@@ -581,19 +581,19 @@ public static class DoctorCommandHandler
 
         try
         {
-            var claim = await dependencies.ReadWorkClaimAsync(gitCommonDirectory, cancellationToken);
-            result.Checks.Add(claim is null
+            var claims = await dependencies.ReadWorkClaimsAsync(gitCommonDirectory, cancellationToken);
+            result.Checks.Add(claims.Count == 0
                 ? new DoctorCheck
                 {
                     Name = "Active Work Claim",
                     Status = DoctorCheckStatus.Pass,
-                    Detail = "No active work claim."
+                    Detail = "No active work claims."
                 }
                 : new DoctorCheck
                 {
                     Name = "Active Work Claim",
                     Status = DoctorCheckStatus.Pass,
-                    Detail = FormatClaimSummary(claim)
+                    Detail = string.Join(Environment.NewLine, claims.Select(FormatClaimSummary))
                 });
         }
         catch (WorkClaimFileException exception)
@@ -843,7 +843,10 @@ public static class DoctorCommandHandler
 
         var workIdentity = $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
         var suffix = string.IsNullOrWhiteSpace(metadataSummary) ? string.Empty : $" ({metadataSummary})";
-        return $"Active: {workIdentity}, {claim.WorkType}{suffix}.";
+        var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
+        return $"Active: {workIdentity}, {claim.WorkType}{suffix}. Worktree: {worktreeDisplay}.";
     }
 
     private static void PrintReport(DoctorResult result, TextWriter output)
@@ -1009,8 +1012,8 @@ public sealed class DoctorCommandDependencies
     public Func<string, CancellationToken, Task<RouterConfiguration>> LoadEffectiveConfigurationAsync { get; init; }
         = (repositoryRoot, cancellationToken) => WorkflowConfigurationService.LoadEffectiveFromRepositoryRootAsync(repositoryRoot, DefaultPaths, cancellationToken);
 
-    public Func<string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
-        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, cancellationToken);
+    public Func<string, CancellationToken, Task<IReadOnlyList<WorkClaim>>> ReadWorkClaimsAsync { get; init; }
+        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAllAsync(gitCommonDirectory, cancellationToken);
 
     public Func<string, CancellationToken, Task<HashSet<string>>> GetRepositoryLabelNamesAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitHubCliService.GetRepositoryLabelNamesAsync(repositoryRoot, cancellationToken);

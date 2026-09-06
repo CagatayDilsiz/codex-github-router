@@ -18,6 +18,7 @@ public sealed class HookDiagnosticScope
     private int _retentionDays = 7;
     private bool _policyAppliedFromConfig;
     private string? _gitCommonDirectory;
+    private string? _worktreeIdentity;
     private string? _activationMode;
     private bool? _activationResult;
     private bool? _autonomousEnabled;
@@ -64,6 +65,8 @@ public sealed class HookDiagnosticScope
 
     public void SetRepository(string gitCommonDirectory) => _gitCommonDirectory = gitCommonDirectory;
 
+    public void SetWorktree(string worktreeIdentity) => _worktreeIdentity = worktreeIdentity;
+
     public void SetClaim(WorkClaim? claim)
     {
         if (claim is null)
@@ -74,6 +77,7 @@ public sealed class HookDiagnosticScope
         _claimId = claim.ClaimId == Guid.Empty ? null : claim.ClaimId.ToString("N")[..8];
         _worker = string.IsNullOrWhiteSpace(claim.WorkerProfile) ? _worker : claim.WorkerProfile;
         _model = string.IsNullOrWhiteSpace(claim.Model) ? _model : claim.Model;
+        _worktreeIdentity = string.IsNullOrWhiteSpace(claim.WorktreeId) ? _worktreeIdentity : claim.WorktreeId;
     }
 
     public void SetIdentity(string? identity) => _identity = string.IsNullOrWhiteSpace(identity) ? null : identity;
@@ -146,6 +150,7 @@ public sealed class HookDiagnosticScope
                 TimestampUtc = DateTimeOffset.UtcNow,
                 DurationMs = (long)(DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds,
                 RepositoryIdentity = _gitCommonDirectory,
+                WorktreeIdentity = _worktreeIdentity,
                 AutonomousEnabled = _autonomousEnabled,
                 ActivationMode = _activationMode,
                 ActivationResult = _activationResult,

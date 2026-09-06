@@ -12,6 +12,8 @@ public sealed class HookDiagnosticEvent
 
     public string? RepositoryIdentity { get; init; }
 
+    public string? WorktreeIdentity { get; init; }
+
     public bool? AutonomousEnabled { get; init; }
 
     public string? ActivationMode { get; init; }

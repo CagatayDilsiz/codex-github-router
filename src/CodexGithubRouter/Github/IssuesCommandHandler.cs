@@ -58,7 +58,7 @@ public static class IssuesCommandHandler
 
         try
         {
-            var gitCommonDir = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
 
             if (gitCommonDir is null)
             {
@@ -68,27 +68,35 @@ public static class IssuesCommandHandler
 
             var routerConfig = await dependencies.LoadConfigurationAsync(workingDirectory);
 
+            var issueToTransition = await dependencies.GetIssueByNumberAsync(workingDirectory, issueNumber);
 
-            var issueToTransition = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
-          
             var issueTransition = IssueTransitionPlanner.Plan(issueToTransition, targetState, routerConfig);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
+
+            // A workflow transition can complete any worktree's claim over the affected issue.
+            // The matching claim is located repository-wide by issue identity and released with
+            // its own ClaimId/Version-guarded worktree, so mutating GitHub state never leaves a
+            // peer worktree's claim behind.
+            var matchingClaim = (await WorkClaimStore.ReadAllAsync(gitCommonDir))
+                .FirstOrDefault(claim => claim.IssueNumber == issueNumber);
+            var shouldRelease = WorkClaimReconciliationService.ShouldReleaseForIssueTransition(matchingClaim, issueNumber, targetState);
 
             if (issueTransition.LabelsToAdd.Count == 0 && issueTransition.LabelsToRemove.Count == 0)
             {
-                if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
+                if (shouldRelease && matchingClaim is not null)
                 {
-                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                    await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, matchingClaim.WorktreeId, matchingClaim);
                 }
+
                 Console.WriteLine($"Issue #{issueNumber} is already in state '{targetState}'.");
                 return 0;
             }
 
-            await GitHubCliService.TransitionIssueAsync(workingDirectory, issueTransition, CancellationToken.None);
-            if (WorkClaimReconciliationService.ShouldReleaseForIssueTransition(activeClaim, issueNumber, targetState))
+            await dependencies.TransitionIssueAsync(workingDirectory, issueTransition);
+            if (shouldRelease && matchingClaim is not null)
             {
-                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, activeClaim!);
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, matchingClaim.WorktreeId, matchingClaim);
             }
+
             Console.WriteLine($"Successfully transitioned issue #{issueNumber} to state '{targetState}'.");
         }
         catch (Exception ex)
@@ -222,4 +230,10 @@ public sealed class IssueCommandDependencies
 
     public Func<string, IssueFilters, Task<List<Issue>>> GetIssuesAsync { get; init; } = (workingDirectory, filters) =>
         GitHubCliService.GetIssuesAsync(workingDirectory, filters, false, CancellationToken.None);
+
+    public Func<string, int, Task<Issue>> GetIssueByNumberAsync { get; init; } = (workingDirectory, issueNumber) =>
+        GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
+
+    public Func<string, IssueTransition, Task> TransitionIssueAsync { get; init; } = (workingDirectory, transition) =>
+        GitHubCliService.TransitionIssueAsync(workingDirectory, transition, CancellationToken.None);
 }

@@ -64,6 +64,10 @@ public static class RoutingExplanationService
         stages.Add(claimStage);
         isEligible &= claimStage.Verdict != RoutingVerdict.HardIneligible;
 
+        var otherWorktreeStage = ExplainOtherWorktreeClaims(plan, issue);
+        stages.Add(otherWorktreeStage);
+        isEligible &= otherWorktreeStage.Verdict != RoutingVerdict.HardIneligible;
+
         var workflowTask = SelectWorkflowTask(plan, issue);
         var outcomeStage = ExplainOutcome(plan, issue, workflowTask);
         stages.Add(outcomeStage);
@@ -461,6 +465,41 @@ public static class RoutingExplanationService
         };
     }
 
+    private static RoutingStage ExplainOtherWorktreeClaims(RoutingEvaluationResult plan, Issue issue)
+    {
+        var occupiedByIssue = plan.IneligibleOccupiedClaims.FirstOrDefault(claim => claim.IssueNumber == issue.Number);
+        if (occupiedByIssue is not null)
+        {
+            return new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.HardIneligible,
+                Message = $"Issue #{issue.Number} is claimed by another Git worktree (worktree {FormatWorktree(occupiedByIssue)}) and is not available to this worktree."
+            };
+        }
+
+        var sharedPullRequestNumbers = plan.IneligibleOccupiedClaims
+            .Where(claim => claim.PullRequestNumber.HasValue)
+            .Select(claim => claim.PullRequestNumber!.Value)
+            .ToHashSet();
+        var taskSharesPullRequest = plan.WorkflowTasks.Any(task =>
+            task.IssueNumber == issue.Number && task.PullRequestNumber.HasValue && sharedPullRequestNumbers.Contains(task.PullRequestNumber.Value));
+
+        return taskSharesPullRequest
+            ? new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.HardIneligible,
+                Message = $"Issue #{issue.Number} routes a pull request claimed by another Git worktree and is not available to this worktree."
+            }
+            : new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.Pass,
+                Message = "No other Git worktree claims this work item."
+            };
+    }
+
     private static RoutingStage ExplainOutcome(RoutingEvaluationResult plan, Issue issue, WorkflowItem? workflowTask)
     {
         var blockingTask = workflowTask is not null && BlockingTypes.Contains(workflowTask.Type)
@@ -667,6 +706,11 @@ public static class RoutingExplanationService
 
     private static bool IsPassive(WorkflowItemType type) =>
         type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred or WorkflowItemType.CloseIssue;
+
+    private static string FormatWorktree(OccupiedWorkClaim claim) =>
+        string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
 
     private static string FormatTaskType(WorkflowItemType type) => type switch
     {

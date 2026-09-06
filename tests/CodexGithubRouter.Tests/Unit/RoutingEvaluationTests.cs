@@ -522,6 +522,151 @@ public sealed class RoutingEvaluationTests
         Assert.True(plan.IdentityResolution.IsResolved);
     }
 
+    [Fact]
+    public async Task Occupied_other_worktree_claims_are_excluded_from_the_routing_decision()
+    {
+        var topRanked = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 4, SelectionRank = 0 };
+        var next = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(topRanked, next))
+        };
+        var otherWorktreeClaims = new[]
+        {
+            new WorkClaim { OwnerSessionId = "peer", WorktreeId = "wt-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
+
+        Assert.True(plan.IsSuccessful);
+        Assert.Equal(5, plan.Decision!.SelectedTask!.IssueNumber);
+        Assert.Single(plan.ActionableTasks);
+        Assert.Equal(5, plan.ActionableTasks[0].IssueNumber);
+        var occupied = Assert.Single(plan.IneligibleOccupiedClaims);
+        Assert.Equal(4, occupied.IssueNumber);
+        Assert.Equal("wt-a", occupied.WorktreeId);
+    }
+
+    [Fact]
+    public async Task All_discovered_work_owned_by_other_worktrees_blocks_with_occupied_reason()
+    {
+        var occupied = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 4, SelectionRank = 0 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(occupied))
+        };
+        var otherWorktreeClaims = new[]
+        {
+            new WorkClaim { OwnerSessionId = "peer", WorktreeId = "wt-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
+
+        Assert.True(plan.IsSuccessful);
+        Assert.Empty(plan.ActionableTasks);
+        Assert.Null(plan.Decision);
+        Assert.Contains("All discovered work (issue #4) is owned by other Git worktrees", plan.BlockReason);
+        Assert.Single(plan.IneligibleOccupiedClaims);
+    }
+
+    [Fact]
+    public async Task All_occupied_gate_tasks_keep_the_repository_gate_and_block_unrelated_routing()
+    {
+        var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 7, Status = new WorkflowTaskStatus { Message = "gated" } };
+        var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate(gatedTask)),
+            CheckCompletedIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckInProgressIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckNewIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); }
+        };
+        var otherWorktreeClaims = new[]
+        {
+            new WorkClaim { OwnerSessionId = "peer", WorktreeId = "wt-a", IssueNumber = 7, WorkType = WorkClaimType.Implementation }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
+
+        // The repository gate is orthogonal to peer-worktree claims: peer claims decide who may
+        // work the gated item, but the gate itself still blocks unrelated ordinary routing when
+        // every gated task is owned by another worktree, instead of falling through to #5.
+        Assert.True(plan.HasRepositoryGate);
+        Assert.Empty(plan.ActionableTasks);
+        Assert.Null(plan.Decision);
+        Assert.Contains("Repository workflow is gated by issue #7", plan.BlockReason);
+        Assert.Contains("owned by another Git worktree", plan.BlockReason);
+        var occupied = Assert.Single(plan.IneligibleOccupiedClaims);
+        Assert.Equal(7, occupied.IssueNumber);
+    }
+
+    [Fact]
+    public async Task Unoccupied_gate_tasks_keep_the_gate_when_other_gate_tasks_are_occupied()
+    {
+        var occupiedGate = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 7, Status = new WorkflowTaskStatus { Message = "gated" } };
+        var freeGate = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 8, Status = new WorkflowTaskStatus { Message = "gated" } };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate(occupiedGate, freeGate)),
+            CheckCompletedIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckInProgressIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckNewIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); }
+        };
+        var otherWorktreeClaims = new[]
+        {
+            new WorkClaim { OwnerSessionId = "peer", WorktreeId = "wt-a", IssueNumber = 7, WorkType = WorkClaimType.Implementation }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
+
+        Assert.True(plan.HasRepositoryGate);
+        Assert.Equal(8, plan.Decision!.SelectedTask!.IssueNumber);
+        var occupied = Assert.Single(plan.IneligibleOccupiedClaims);
+        Assert.Equal(7, occupied.IssueNumber);
+    }
+
+    [Fact]
+    public async Task Explain_marks_work_owned_by_another_worktree_hard_ineligible()
+    {
+        var topRanked = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 4, SelectionRank = 0 };
+        var next = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
+        var dependencies = new RoutingEvaluationDependencies
+        {
+            CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate()),
+            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
+            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse
+            {
+                IsSuccessful = true,
+                Tasks = new List<WorkflowItem> { topRanked, next },
+                ConsideredIssues = new List<Issue> { new() { Number = 4 }, new() { Number = 5 } }
+            })
+        };
+        var otherWorktreeClaims = new[]
+        {
+            new WorkClaim { OwnerSessionId = "peer", WorktreeId = "wt-a", IssueNumber = 4, WorkType = WorkClaimType.Implementation }
+        };
+
+        var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
+        var explanations = RoutingExplanationService.ExplainAll(plan);
+
+        var occupiedExplanation = Assert.Single(explanations, explanation => explanation.IssueNumber == 4);
+        Assert.False(occupiedExplanation.IsEligible);
+        Assert.False(occupiedExplanation.IsSelected);
+        Assert.Contains(occupiedExplanation.Stages, stage => stage.Name == "Other Worktree Claims" && stage.Verdict == RoutingVerdict.HardIneligible);
+
+        var selectedExplanation = Assert.Single(explanations, explanation => explanation.IssueNumber == 5);
+        Assert.True(selectedExplanation.IsSelected);
+        Assert.Contains(selectedExplanation.Stages, stage => stage.Name == "Other Worktree Claims" && stage.Verdict == RoutingVerdict.Pass);
+        Assert.Equal(5, plan.Decision!.SelectedTask!.IssueNumber);
+    }
+
     private static Task<WorkflowResponse> NewIssueProductionResponse(RouterConfiguration configuration, IReadOnlyList<Issue> openIssues)
     {
         var workflowTasks = openIssues.Select(issue => new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = issue.Number }).ToList();

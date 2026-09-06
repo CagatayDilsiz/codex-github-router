@@ -98,24 +98,18 @@ public static class PullRequestCommandHandler
             var pullRequestToTransition = await dependencies.GetPullRequestAsync(workingDirectory, pullRequestNumber, pullRequestSelection);
           
             var pullRequestTransition = PullRequestTransitionPlanner.Plan(pullRequestToTransition, targetState, routerConfig);
-            var activeClaim = await WorkClaimStore.ReadAsync(gitCommonDir);
-            var isCurrentImplementationClaim = await IsCurrentImplementationClaimAsync(workingDirectory, activeClaim, pullRequestToTransition);
+            var closingIssueNumbers = pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList();
+            var isPassiveTarget = WorkClaimReconciliationService.IsPassiveTarget(targetState);
 
             if (pullRequestTransition.LabelsToAdd.Count == 0 && pullRequestTransition.LabelsToRemove.Count == 0)
             {
-                if (activeClaim is not null)
-                {
-                    await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
-                }
+                await ReleaseMatchingClaimsAsync(workingDirectory, gitCommonDir, dependencies, pullRequestNumber, closingIssueNumbers, isPassiveTarget);
                 Console.WriteLine($"Pull request #{pullRequestNumber} is already in state '{targetState}'.");
                 return 0;
             }
 
-            await GitHubCliService.TransitionPullRequestAsync(workingDirectory, pullRequestTransition, CancellationToken.None);
-            if (activeClaim is not null)
-            {
-                await WorkClaimStore.ReleaseForPullRequestTransitionAsync(gitCommonDir, activeClaim, pullRequestNumber, pullRequestToTransition.ClosingIssuesReferences.Select(issue => issue.Number).ToList(), WorkClaimReconciliationService.IsPassiveTarget(targetState), isCurrentImplementationClaim);
-            }
+            await dependencies.TransitionPullRequestAsync(workingDirectory, pullRequestTransition);
+            await ReleaseMatchingClaimsAsync(workingDirectory, gitCommonDir, dependencies, pullRequestNumber, closingIssueNumbers, isPassiveTarget);
             Console.WriteLine($"Successfully transitioned pull request #{pullRequestNumber} to state '{targetState}'.");
         }
         catch (Exception ex)
@@ -126,21 +120,55 @@ public static class PullRequestCommandHandler
         return 0;
     }
 
-    private static async Task<bool> IsCurrentImplementationClaimAsync(string workingDirectory, WorkClaim? claim, PullRequest pullRequest)
+    /// <summary>
+    /// A pull-request transition can complete any worktree's claim over the affected PR. Every
+    /// repository-wide claim is evaluated against the PR identity and released with its own
+    /// ClaimId/Version-guarded worktree, so mutating GitHub state never leaves a peer worktree's
+    /// claim behind.
+    /// </summary>
+    private static async Task ReleaseMatchingClaimsAsync(
+        string workingDirectory,
+        string gitCommonDirectory,
+        PullRequestCommandDependencies dependencies,
+        int pullRequestNumber,
+        IReadOnlyCollection<int> closingIssueNumbers,
+        bool isPassiveTarget)
     {
-        if (claim is null || claim.PullRequestNumber.HasValue || claim.WorkType != WorkClaimType.Implementation)
+        if (!isPassiveTarget)
         {
-            return false;
+            return;
         }
 
-        if (!pullRequest.ClosingIssuesReferences.Any(reference => reference.Number == claim.IssueNumber))
+        foreach (var claim in await WorkClaimStore.ReadAllAsync(gitCommonDirectory))
+        {
+            var isCurrentImplementationClaim = claim.PullRequestNumber is null &&
+                claim.WorkType == WorkClaimType.Implementation &&
+                closingIssueNumbers.Contains(claim.IssueNumber) &&
+                await IsCurrentImplementationClaimAsync(workingDirectory, claim, pullRequestNumber, dependencies);
+
+            await WorkClaimStore.ReleaseForPullRequestTransitionAsync(
+                gitCommonDirectory, claim.WorktreeId, claim, pullRequestNumber, closingIssueNumbers, isPassiveTarget, isCurrentImplementationClaim);
+        }
+    }
+
+    private static async Task<bool> IsCurrentImplementationClaimAsync(string workingDirectory, WorkClaim claim, int pullRequestNumber, PullRequestCommandDependencies dependencies)
+    {
+        if (claim.PullRequestNumber.HasValue || claim.WorkType != WorkClaimType.Implementation)
         {
             return false;
         }
 
         try
         {
-            var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
+            var issue = await dependencies.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber);
+            var pullRequest = await dependencies.GetPullRequestAsync(workingDirectory, pullRequestNumber, new PullRequestSelection
+            {
+                Number = true,
+                Labels = true,
+                CreatedAt = true,
+                HeadRefName = true,
+                ClosingIssuesReferences = true
+            });
             return WorkflowService.IsCurrentClaimPullRequest(claim, issue, pullRequest);
         }
         catch (GitHubItemNotFoundException)
@@ -221,6 +249,8 @@ public sealed class PullRequestCommandDependencies
 {
     public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
 
+    public Func<string, Task<string?>> ResolveWorktreeIdAsync { get; init; } = workingDirectory => GitRepositoryService.GetWorktreeIdAsync(workingDirectory);
+
     public Func<string, Task<RouterConfiguration>> LoadConfigurationAsync { get; init; } = workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
 
     public Func<string, int, PullRequestSelection, Task<PullRequest>> GetPullRequestAsync { get; init; } = (workingDirectory, pullRequestNumber, selection) =>
@@ -228,4 +258,10 @@ public sealed class PullRequestCommandDependencies
 
     public Func<string, PullRequestFilters, Task<List<PullRequest>>> GetPullRequestsAsync { get; init; } = (workingDirectory, filters) =>
         GitHubCliService.GetPullRequestsAsync(workingDirectory, filters, new PullRequestSelection(), CancellationToken.None);
+
+    public Func<string, int, Task<Issue>> GetIssueByNumberAsync { get; init; } = (workingDirectory, issueNumber) =>
+        GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None);
+
+    public Func<string, PullRequestTransition, Task> TransitionPullRequestAsync { get; init; } = (workingDirectory, transition) =>
+        GitHubCliService.TransitionPullRequestAsync(workingDirectory, transition, CancellationToken.None);
 }

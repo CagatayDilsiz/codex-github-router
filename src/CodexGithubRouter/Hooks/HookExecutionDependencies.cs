@@ -15,6 +15,8 @@ public sealed class HookExecutionDependencies
 
     public Func<string, Task<string?>> ResolveGitCommonDirectoryAsync { get; init; } = workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory);
 
+    public Func<string, Task<string?>> ResolveWorktreeIdAsync { get; init; } = workingDirectory => GitRepositoryService.GetWorktreeIdAsync(workingDirectory);
+
     public Func<string?, Task<DiagnosticsPolicy?>> ResolveDiagnosticsPolicyAsync { get; init; } = workingDirectory => WorkflowConfigurationService.TryResolveDiagnosticsPolicyAsync(workingDirectory);
 
     public Func<string, CancellationToken, Task<string?>> ResolveAuthenticatedGitHubLoginAsync { get; init; } = (workingDirectory, cancellationToken) => GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, cancellationToken);

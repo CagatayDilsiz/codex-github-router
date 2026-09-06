@@ -37,9 +37,13 @@ public static class WorkClaimReconciliationService
             ? linkedPullRequests.SingleOrDefault(pullRequest => pullRequest.Number == claim.PullRequestNumber.Value)
             : null;
 
-    public static async Task<bool> ReconcileAsync(string workingDirectory, string gitCommonDirectory, RouterConfiguration configuration, CancellationToken cancellationToken = default)
+    public static async Task<bool> ReconcileAsync(string workingDirectory, string gitCommonDirectory, string worktreeId, RouterConfiguration configuration, CancellationToken cancellationToken = default)
     {
-        var claim = await WorkClaimStore.ReadAsync(gitCommonDirectory, cancellationToken);
+        // Stale recovery is repository-wide: a claim owned by a worktree whose git-dir
+        // no longer exists is released before the current worktree's claim is evaluated.
+        await WorkClaimStore.PruneStaleWorktreesAsync(gitCommonDirectory, Directory.Exists, cancellationToken);
+
+        var claim = await WorkClaimStore.ReadAsync(gitCommonDirectory, worktreeId, cancellationToken);
         if (claim is null) return false;
 
         var recommendation = await DetermineAsync(workingDirectory, claim, configuration, cancellationToken: cancellationToken);
@@ -51,7 +55,86 @@ public static class WorkClaimReconciliationService
         }
 
         return recommendation == WorkClaimReconciliationRecommendation.WouldRelease
-            && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim, cancellationToken);
+            && await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, worktreeId, claim, cancellationToken);
+    }
+
+    /// <summary>
+    /// Repository-wide reconciliation: prunes claims of removed worktrees, then evaluates every
+    /// live worktree claim and guarded-releases each one production would drop. This is the manual
+    /// <c>cgr work reconcile</c> path, so a passive or terminal claim owned by any worktree is
+    /// released from any working directory. The hook continues to reconcile only its own worktree
+    /// through <see cref="ReconcileAsync"/>. GitHub lookups may be injected for deterministic tests.
+    /// </summary>
+    public static async Task<WorkClaimReconcileAllResult> ReconcileAllAsync(
+        string workingDirectory,
+        string gitCommonDirectory,
+        RouterConfiguration configuration,
+        Func<int, Task<Issue>>? getIssue = null,
+        Func<int, Task<PullRequest>>? getPullRequest = null,
+        CancellationToken cancellationToken = default)
+    {
+        var pruned = await WorkClaimStore.PruneStaleWorktreesAsync(gitCommonDirectory, Directory.Exists, cancellationToken);
+        var released = 0;
+
+        foreach (var claim in await WorkClaimStore.ReadAllAsync(gitCommonDirectory, cancellationToken))
+        {
+            var recommendation = await DetermineAsync(
+                workingDirectory, claim, configuration,
+                getIssue: getIssue, getPullRequest: getPullRequest,
+                cancellationToken: cancellationToken);
+            if (recommendation == WorkClaimReconciliationRecommendation.UnableToDetermine)
+            {
+                // Same fail-closed contract as the hook: an unverifiable claim is never
+                // silently dropped, and the manual reconcile surfaces the problem.
+                throw new InvalidOperationException("Could not determine whether an active work claim should be released because its GitHub state could not be verified.");
+            }
+
+            if (recommendation == WorkClaimReconciliationRecommendation.WouldRelease &&
+                await WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDirectory, claim.WorktreeId, claim, cancellationToken))
+            {
+                released++;
+            }
+        }
+
+        return new WorkClaimReconcileAllResult { PrunedCount = pruned, ReleasedCount = released };
+    }
+
+    /// <summary>
+    /// Maps repository-wide claims owned by <em>other worktrees</em> (the caller excludes the
+    /// current worktree's own claim) to workflow tasks they occupy. The routing plan treats these
+    /// as a hard ineligibility ("occupied by another worktree") so a worktree routes the next
+    /// eligible item instead of selecting occupied work and failing acquisition.
+    /// </summary>
+    public static IReadOnlyList<OccupiedWorkClaim> ResolveOccupiedClaims(
+        IReadOnlyList<WorkClaim>? otherWorktreeClaims,
+        IEnumerable<WorkflowItem> tasks)
+    {
+        if (otherWorktreeClaims is null || otherWorktreeClaims.Count == 0)
+        {
+            return Array.Empty<OccupiedWorkClaim>();
+        }
+
+        var taskList = tasks.ToList();
+        var occupied = new List<OccupiedWorkClaim>();
+        foreach (var claim in otherWorktreeClaims)
+        {
+            var conflicts = taskList.Any(task =>
+                task.IssueNumber == claim.IssueNumber ||
+                (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value));
+            if (conflicts)
+            {
+                occupied.Add(new OccupiedWorkClaim
+                {
+                    IssueNumber = claim.IssueNumber,
+                    PullRequestNumber = claim.PullRequestNumber,
+                    WorktreeId = claim.WorktreeId,
+                    WorktreePath = claim.WorktreePath,
+                    OwnerSessionId = claim.OwnerSessionId
+                });
+            }
+        }
+
+        return occupied;
     }
 
     /// <summary>
@@ -158,4 +241,24 @@ public static class WorkClaimReconciliationService
         claim?.IssueNumber == issueNumber && targetState is WorkflowState.Blocked or WorkflowState.NeedsInfo or WorkflowState.Abandoned;
 
     public static bool IsPassiveTarget(PullRequestState targetState) => targetState is PullRequestState.ReviewRequested or PullRequestState.AwaitingMerge or PullRequestState.Deferred;
+}
+
+public sealed class WorkClaimReconcileAllResult
+{
+    public int PrunedCount { get; init; }
+    public int ReleasedCount { get; init; }
+}
+
+/// <summary>
+/// Work owned by another Git worktree's active claim. The routing plan treats these as a hard
+/// ineligibility ("occupied by another worktree") so the current worktree routes the next eligible
+/// item instead of selecting occupied work and failing acquisition under the store lock.
+/// </summary>
+public sealed class OccupiedWorkClaim
+{
+    public int IssueNumber { get; init; }
+    public int? PullRequestNumber { get; init; }
+    public string WorktreeId { get; init; } = string.Empty;
+    public string? WorktreePath { get; init; }
+    public string OwnerSessionId { get; init; } = string.Empty;
 }

@@ -10,14 +10,15 @@ public static class WorkCommandHandler
 {
     public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null, null, null, null);
 
-    public static Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver) => HandleAsync(args, commonDirectoryResolver, null, null, null);
+    public static Task<int> HandleAsync(string[] args, Func<string, Task<string?>>? commonDirectoryResolver) => HandleAsync(args, commonDirectoryResolver, null, null, null, null);
 
     public static async Task<int> HandleAsync(
         string[] args,
         Func<string, Task<string?>>? commonDirectoryResolver,
         TextWriter? errorWriter,
         Func<string, Task<RouterConfiguration>>? configurationLoader = null,
-        Func<RouterConfiguration, string, Task<WorkflowResponse>>? repositoryGateChecker = null)
+        Func<RouterConfiguration, string, Task<WorkflowResponse>>? repositoryGateChecker = null,
+        Func<string, Task<string?>>? worktreeIdResolver = null)
     {
         errorWriter ??= Console.Error;
         configurationLoader ??= workingDirectory => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory);
@@ -28,38 +29,51 @@ public static class WorkCommandHandler
         Func<string, Task<string?>> resolveCommonDirectory = commonDirectoryResolver ?? (workingDirectory => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory));
         var commonDirectory = await resolveCommonDirectory(workingDirectory);
         if (commonDirectory is null) { await errorWriter.WriteLineAsync("Not a valid Git repository."); return 1; }
+        Func<string, Task<string?>> resolveWorktreeId = worktreeIdResolver ?? (workingDirectory => GitRepositoryService.GetWorktreeIdAsync(workingDirectory));
+        var worktreeId = await resolveWorktreeId(workingDirectory);
+        if (worktreeId is null) { await errorWriter.WriteLineAsync("Not a valid Git repository."); return 1; }
 
         try
         {
             switch (command)
             {
                 case "status":
-                    var claim = await WorkClaimStore.ReadAsync(commonDirectory);
-                    if (claim is null) Console.WriteLine("No active work claim.");
-                    else Console.WriteLine(FormatClaimStatus(claim));
+                    var activeClaims = await WorkClaimStore.TryReadActiveClaimsAsync(commonDirectory);
+                    if (activeClaims.Count == 0) Console.WriteLine("No active work claims.");
+                    else
+                    {
+                        var currentKey = WorkClaimStore.NormalizeWorktreeId(commonDirectory, worktreeId);
+                        foreach (var claim in activeClaims)
+                        {
+                            var isCurrent = string.Equals(WorkClaimStore.NormalizeWorktreeId(commonDirectory, claim.WorktreeId), currentKey, StringComparison.Ordinal);
+                            Console.WriteLine(FormatClaimStatus(claim, isCurrent));
+                        }
+                    }
+
                     var configuration = await configurationLoader(workingDirectory);
                     var gateStatus = await repositoryGateChecker(configuration, workingDirectory);
                     if (gateStatus.Tasks.Count == 0) Console.WriteLine("No active repository workflow gate.");
                     else foreach (var task in gateStatus.Tasks.GroupBy(task => task.IssueNumber).Select(group => group.First()).OrderBy(task => task.IssueNumber)) Console.WriteLine($"Repository workflow gate: issue #{task.IssueNumber}. {task.Status.Message}");
                     return 0;
                 case "list":
-                    return await HandleListAsync(args, workingDirectory, configurationLoader, errorWriter);
+                    return await HandleListAsync(args, workingDirectory, worktreeId, configurationLoader, errorWriter);
                 case "reconcile":
-                    var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
-                    Console.WriteLine(released ? "Released a passive or terminal work claim." : "Active work claim remains unchanged.");
+                    var reconcileResult = await WorkClaimReconciliationService.ReconcileAllAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
+                    if (reconcileResult.PrunedCount > 0) Console.WriteLine($"Pruned {reconcileResult.PrunedCount} stale work claim{(reconcileResult.PrunedCount == 1 ? "" : "s")} from removed worktrees.");
+                    Console.WriteLine(reconcileResult.ReleasedCount > 0 ? $"Released {reconcileResult.ReleasedCount} passive or terminal work claim{(reconcileResult.ReleasedCount == 1 ? "" : "s")} across this repository." : "Active work claims remain unchanged.");
                     return 0;
                 case "release":
                     var issueIndex = Array.FindIndex(args, value => string.Equals(value, "--issue", StringComparison.OrdinalIgnoreCase));
                     if (issueIndex < 0 || issueIndex + 1 >= args.Length || !int.TryParse(args[issueIndex + 1], out var issueNumber)) { Console.Error.WriteLine("Usage: cgr work release --issue <number> [working-directory]"); return 1; }
-                    var didRelease = await WorkClaimStore.ReleaseForIssueAsync(commonDirectory, issueNumber);
-                    Console.WriteLine(didRelease ? $"Released active work claim for issue #{issueNumber} by explicit user request." : $"No active work claim exists for issue #{issueNumber}.");
+                    var didRelease = await WorkClaimStore.ReleaseForIssueAsync(commonDirectory, worktreeId, issueNumber);
+                    Console.WriteLine(didRelease ? $"Released active work claim for issue #{issueNumber} by explicit user request." : $"No active work claim exists for issue #{issueNumber} in this worktree.");
                     return 0;
                 default: return Usage();
             }
         }
         catch (WorkClaimFileException exception)
         {
-            var claimPath = Path.Combine(commonDirectory, "codex-github-router.work.json");
+            var claimPath = Path.Combine(commonDirectory, WorkClaimStore.ClaimFileName);
             await errorWriter.WriteLineAsync($"Invalid work-claim file: {claimPath}. {exception.Message}");
             await errorWriter.WriteLineAsync("Repair the file or remove it after confirming no active session owns the work, then retry the command.");
             return 1;
@@ -113,20 +127,29 @@ public static class WorkCommandHandler
         return null;
     }
 
-    private static async Task<int> HandleListAsync(string[] args, string workingDirectory, Func<string, Task<RouterConfiguration>> configurationLoader, TextWriter errorWriter)
+    private static async Task<int> HandleListAsync(string[] args, string workingDirectory, string worktreeId, Func<string, Task<RouterConfiguration>> configurationLoader, TextWriter errorWriter)
     {
         try
         {
             var model = ParseModel(args);
             var configuration = await configurationLoader(workingDirectory);
             var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
-            var claim = await WorkClaimStore.TryReadAsync(commonDirectory);
+            var claim = await WorkClaimStore.TryReadAsync(commonDirectory, worktreeId);
+            // Read-only routing must apply the same stale-worktree evaluation production pruning
+            // uses: a deleted worktree's claim is excluded without writing to the claim file.
+            var otherWorktreeClaims = (await WorkClaimStore.TryReadActiveClaimsAsync(commonDirectory))
+                .Where(candidate => !string.Equals(
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, candidate.WorktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, worktreeId),
+                    StringComparison.Ordinal))
+                .ToList();
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
                 currentModel: model,
                 activeClaim: claim,
+                otherWorktreeClaims: otherWorktreeClaims,
                 dependencies: new RoutingEvaluationDependencies
                 {
                     ResolveAssignmentIdentityAsync = (config, wd) => ResolveIdentityAsync(config, wd)
@@ -186,7 +209,7 @@ public static class WorkCommandHandler
         return AssignmentRoutingService.Resolve(configuration, usernames);
     }
 
-    public static string FormatClaimStatus(WorkClaim claim)
+    public static string FormatClaimStatus(WorkClaim claim, bool isCurrentWorktree = false)
     {
         ArgumentNullException.ThrowIfNull(claim);
         var workerMetadata = new[]
@@ -196,6 +219,10 @@ public static class WorkCommandHandler
         };
         var metadata = string.Join(", ", workerMetadata.Where(value => value is not null));
         var metadataSuffix = string.IsNullOrWhiteSpace(metadata) ? string.Empty : $", {metadata}";
-        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
+        var worktreeMarker = isCurrentWorktree ? " (this worktree)" : string.Empty;
+        var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
+        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
     }
 }

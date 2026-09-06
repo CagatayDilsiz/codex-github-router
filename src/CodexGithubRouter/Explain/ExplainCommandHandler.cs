@@ -27,14 +27,32 @@ public static class ExplainCommandHandler
                 return 1;
             }
 
+            var worktreeId = await dependencies.GetWorktreeIdAsync(workingDirectory, cancellationToken);
+            if (worktreeId is null)
+            {
+                dependencies.Error.WriteLine("Not a valid Git repository.");
+                return 1;
+            }
+
             var configuration = await dependencies.LoadEffectiveConfigurationAsync(workingDirectory, cancellationToken);
-            var activeClaim = await dependencies.ReadWorkClaimAsync(commonDirectory, cancellationToken);
+            var activeClaim = await dependencies.ReadWorkClaimAsync(commonDirectory, worktreeId, cancellationToken);
+            // Read-only diagnostics must apply the same stale-worktree evaluation production
+            // pruning uses: a deleted worktree's claim is excluded (so it cannot occupy work in
+            // the explanation) without writing to the claim file.
+            var otherWorktreeClaims = (await dependencies.ReadWorkClaimsAsync(commonDirectory, cancellationToken))
+                .Where(claim => !WorkClaimStore.IsStaleWorktree(commonDirectory, claim))
+                .Where(claim => !string.Equals(
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, claim.WorktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, worktreeId),
+                    StringComparison.Ordinal))
+                .ToList();
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
                 currentModel: model,
                 activeClaim: activeClaim,
+                otherWorktreeClaims: otherWorktreeClaims,
                 dependencies: dependencies.RoutingEvaluation.WithIdentityResolver(
                     (_, _) => ResolveIdentityAsync(configuration, workingDirectory, dependencies, cancellationToken)));
 
@@ -199,6 +217,9 @@ public sealed class ExplainCommandDependencies
     public Func<string, CancellationToken, Task<string?>> GetGitCommonDirectoryAsync { get; init; }
         = (workingDirectory, cancellationToken) => GitRepositoryService.GetCommonDirectoryAsync(workingDirectory, cancellationToken);
 
+    public Func<string, CancellationToken, Task<string?>> GetWorktreeIdAsync { get; init; }
+        = (workingDirectory, cancellationToken) => GitRepositoryService.GetWorktreeIdAsync(workingDirectory, cancellationToken);
+
     public Func<string, CancellationToken, Task<RouterConfiguration>> LoadEffectiveConfigurationAsync { get; init; }
         = (workingDirectory, cancellationToken) => WorkflowConfigurationService.LoadEffectiveAsync(workingDirectory, cancellationToken);
 
@@ -217,8 +238,11 @@ public sealed class ExplainCommandDependencies
 
     public RoutingEvaluationDependencies RoutingEvaluation { get; init; } = new();
 
-    public Func<string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
-        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, cancellationToken);
+    public Func<string, string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
+        = (gitCommonDirectory, worktreeId, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, worktreeId, cancellationToken);
+
+    public Func<string, CancellationToken, Task<IReadOnlyList<WorkClaim>>> ReadWorkClaimsAsync { get; init; }
+        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadActiveClaimsAsync(gitCommonDirectory, cancellationToken);
 
     public Func<string, CancellationToken, Task<string?>> ResolveLocalIdentityAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitRepositoryService.GetConfigValueAsync(repositoryRoot, AssignmentRoutingService.LocalIdentityConfigKey, cancellationToken);
