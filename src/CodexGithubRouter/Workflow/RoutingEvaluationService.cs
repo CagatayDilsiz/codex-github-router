@@ -121,17 +121,16 @@ public static class RoutingEvaluationService
 
         if (repositoryGateTasks.Tasks.Count > 0)
         {
-            // Work owned by another worktree is never routed by this worktree. A repository gate
-            // whose tasks remain free still short-circuits ordinary discovery; when every gate task
-            // is owned by another worktree the worktree falls through to ordinary discovery below
-            // so it routes the next eligible item instead of being gated by work it does not own.
-            var occupiedGateClaims = WorkClaimReconciliationService.ResolveOccupiedClaims(otherWorktreeClaims, repositoryGateTasks.Tasks);
-            if (repositoryGateTasks.Tasks.Any(task => !IsOccupied(task, occupiedGateClaims)))
-            {
-                plannedGateTasks = repositoryGateTasks.Tasks;
-                workflowTasks = repositoryGateTasks.Tasks;
-                discoveryResponses = new[] { repositoryGateTasks };
-            }
+            // Peer-worktree claims decide who can work a gated item; the repository gate itself is
+            // an orthogonal repository-wide barrier evaluated before ordinary routing and decides
+            // whether unrelated work may run. A gate with at least one free gated task
+            // short-circuits ordinary discovery so the free gated task is routed. A gate whose
+            // every task is owned by another worktree keeps the gate in force: unrelated ordinary
+            // work is not routed and the plan blocks while the gate remains active, instead of
+            // falling through to ordinary discovery.
+            plannedGateTasks = repositoryGateTasks.Tasks;
+            workflowTasks = repositoryGateTasks.Tasks;
+            discoveryResponses = new[] { repositoryGateTasks };
         }
 
         if (workflowTasks.Count == 0)
@@ -216,9 +215,21 @@ public static class RoutingEvaluationService
 
         if (freeWorkflowTasks.Count == 0)
         {
-            blockReason = occupiedClaims.Count > 0 && noEligibleWorkResponse is null
-                ? FormatOccupiedBlockReason(occupiedClaims)
-                : noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
+            if (plannedGateTasks.Count > 0)
+            {
+                // The repository gate remains in force as an orthogonal repository-wide barrier
+                // even when every gated task is owned by another worktree: peer claims decide who
+                // may work the gated item, while the gate itself decides whether unrelated work
+                // may run. Unrelated ordinary routing is therefore blocked instead of falling
+                // through, matching the documented gate contract.
+                blockReason = FormatGateOccupiedBlockReason(repositoryGateTasks);
+            }
+            else
+            {
+                blockReason = occupiedClaims.Count > 0 && noEligibleWorkResponse is null
+                    ? FormatOccupiedBlockReason(occupiedClaims)
+                    : noEligibleWorkResponse?.Message ?? "No actionable workflow tasks found.";
+            }
         }
         else
         {
@@ -406,6 +417,16 @@ public static class RoutingEvaluationService
             .Select(claim => $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}")
             .Distinct(StringComparer.Ordinal));
         return $"All discovered work ({work}) is owned by other Git worktrees. Nothing is available for this worktree until one of those claims is released.";
+    }
+
+    private static string FormatGateOccupiedBlockReason(WorkflowResponse repositoryGateTasks)
+    {
+        var gatedIssues = string.Join(", ", repositoryGateTasks.Tasks
+            .Select(task => task.IssueNumber)
+            .Distinct()
+            .OrderBy(number => number)
+            .Select(number => $"issue #{number}"));
+        return $"Repository workflow is gated by {gatedIssues}, which is owned by another Git worktree. Unrelated work cannot be routed while the repository gate is active.";
     }
 
     private static IReadOnlyList<Issue> MergeConsideredIssues(IReadOnlyList<WorkflowResponse> responses)

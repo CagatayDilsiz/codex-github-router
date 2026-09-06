@@ -576,16 +576,16 @@ public sealed class RoutingEvaluationTests
     }
 
     [Fact]
-    public async Task Occupied_gate_tasks_fall_through_to_ordinary_discovery()
+    public async Task All_occupied_gate_tasks_keep_the_repository_gate_and_block_unrelated_routing()
     {
         var gatedTask = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 7, Status = new WorkflowTaskStatus { Message = "gated" } };
         var newIssue = new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 5, SelectionRank = 0 };
         var dependencies = new RoutingEvaluationDependencies
         {
             CheckRepositoryGateAsync = (_, _) => Task.FromResult(OkGate(gatedTask)),
-            CheckCompletedIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
-            CheckInProgressIssuesAsync = (_, _, _, _) => Task.FromResult(Ok()),
-            CheckNewIssuesAsync = (_, _, _, _) => Task.FromResult(Ok(newIssue))
+            CheckCompletedIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckInProgressIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); },
+            CheckNewIssuesAsync = (_, _, _, _) => { throw new InvalidOperationException("Ordinary discovery must be short-circuited by the repository gate."); }
         };
         var otherWorktreeClaims = new[]
         {
@@ -594,8 +594,16 @@ public sealed class RoutingEvaluationTests
 
         var plan = await RoutingEvaluationService.EvaluateAsync(new RouterConfiguration(), "wd", otherWorktreeClaims: otherWorktreeClaims, dependencies: dependencies);
 
-        Assert.False(plan.HasRepositoryGate);
-        Assert.Equal(5, plan.Decision!.SelectedTask!.IssueNumber);
+        // The repository gate is orthogonal to peer-worktree claims: peer claims decide who may
+        // work the gated item, but the gate itself still blocks unrelated ordinary routing when
+        // every gated task is owned by another worktree, instead of falling through to #5.
+        Assert.True(plan.HasRepositoryGate);
+        Assert.Empty(plan.ActionableTasks);
+        Assert.Null(plan.Decision);
+        Assert.Contains("Repository workflow is gated by issue #7", plan.BlockReason);
+        Assert.Contains("owned by another Git worktree", plan.BlockReason);
+        var occupied = Assert.Single(plan.IneligibleOccupiedClaims);
+        Assert.Equal(7, occupied.IssueNumber);
     }
 
     [Fact]
