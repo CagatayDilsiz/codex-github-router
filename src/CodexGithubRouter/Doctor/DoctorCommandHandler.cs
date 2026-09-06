@@ -843,7 +843,10 @@ public static class DoctorCommandHandler
 
         var workIdentity = $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
         var suffix = string.IsNullOrWhiteSpace(metadataSummary) ? string.Empty : $" ({metadataSummary})";
-        return $"Active: {workIdentity}, {claim.WorkType}{suffix}. Worktree: {claim.WorktreeId}.";
+        var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
+        return $"Active: {workIdentity}, {claim.WorkType}{suffix}. Worktree: {worktreeDisplay}.";
     }
 
     private static void PrintReport(DoctorResult result, TextWriter output)

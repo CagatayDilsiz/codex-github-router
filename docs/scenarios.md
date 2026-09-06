@@ -209,7 +209,7 @@ Example:
 
 ## Worktrees and per-worktree coding claims
 
-CGR keeps a **repository-wide claim set** in the repository's shared Git common directory, with **at most one active coding claim per worktree**. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree. A worktree is identified by its Git directory (`git rev-parse --absolute-git-dir`): the main worktree's Git directory equals the common directory, and each linked worktree has its own Git directory under `<common>/.git/worktrees/<name>`.
+CGR keeps a **repository-wide claim set** in the repository's shared Git common directory, with **at most one active coding claim per worktree**. The claim file, the autonomous marker, and the structured hook diagnostics all live in the common directory (`git rev-parse --git-common-dir`) and are shared by all worktrees; the working files stay in the checked-out tree. A worktree is identified by a **relocation-safe identity**: the main worktree is the stable sentinel `.` and each linked worktree is identified relative to the common directory (for example `worktrees/<name>`). This keeps ownership intact when the repository directory itself is moved or renamed. The absolute Git directory (`git rev-parse --absolute-git-dir`) is recorded as diagnostic-only metadata and never used for identity matching or staleness.
 
 Consequences:
 
@@ -218,8 +218,8 @@ Consequences:
 - **Routing skips work owned by other worktrees.** Work another worktree has claimed is treated as occupied: the router selects the next eligible item, `cgr explain` reports it as hard-ineligible (`Other Worktree Claims`), and a repository gate is ignored when every gate task is owned by another worktree so the worktree still finds the next item it can route.
 - **Claims are a final gate, not the only gate.** Routing asks for a claim only for the item it already selected; if a concurrent worktree claimed that item between evaluation and acquisition, the hook re-evaluates once and routes the next eligible item instead of blocking.
 - A claim is released by whoever proves it is releasable, from any worktree: **issue and pull-request transitions release the matching repository-wide claim** (guard-railed so only the claim whose work matches the transition is released), and `cgr work reconcile` runs **repository-wide** (it prunes claims whose worktree no longer exists and releases every claim GitHub shows as releasable across all worktrees).
-- Worktree identities are compared after normalization (`git rev-parse --absolute-git-dir`), so trailing-separator and path variants resolve to the same worktree.
-- If a worktree is deleted (e.g. `git worktree remove`), its claims are released by `cgr work reconcile`, which prunes claims whose worktree's Git directory no longer exists.
+- Worktree identities are compared after normalization, so trailing-separator and path variants resolve to the same worktree, and the main worktree is recognized under its stable sentinel. Since stored identities are stable, a moved or renamed repository keeps its claims: the main worktree is not classified stale just because its absolute path changed.
+- If a worktree is deleted (e.g. `git worktree remove`), its claims are released by `cgr work reconcile`, which prunes claims whose worktree's Git directory no longer exists. Read-only diagnostics use the **same stale-worktree evaluation**: `cgr work status`, `cgr work list`, and `cgr explain` exclude a deleted worktree's claim (so its work is free to route) without writing to the claim file.
 - Legacy claim files (single-claim format) migrate automatically to the worktree-scoped claim set on the first read, assigned to the main worktree regardless of which worktree triggers the read.
 
 If you need to understand what the current claim is, inspect before mutating:

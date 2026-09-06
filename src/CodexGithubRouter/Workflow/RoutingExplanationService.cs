@@ -474,7 +474,7 @@ public static class RoutingExplanationService
             {
                 Name = "Other Worktree Claims",
                 Verdict = RoutingVerdict.HardIneligible,
-                Message = $"Issue #{issue.Number} is claimed by another Git worktree (worktree {occupiedByIssue.WorktreeId}) and is not available to this worktree."
+                Message = $"Issue #{issue.Number} is claimed by another Git worktree (worktree {FormatWorktree(occupiedByIssue)}) and is not available to this worktree."
             };
         }
 
@@ -706,6 +706,11 @@ public static class RoutingExplanationService
 
     private static bool IsPassive(WorkflowItemType type) =>
         type is WorkflowItemType.AwaitingReview or WorkflowItemType.AwaitingMerge or WorkflowItemType.Deferred or WorkflowItemType.CloseIssue;
+
+    private static string FormatWorktree(OccupiedWorkClaim claim) =>
+        string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
 
     private static string FormatTaskType(WorkflowItemType type) => type switch
     {

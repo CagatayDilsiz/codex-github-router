@@ -38,14 +38,14 @@ public static class WorkCommandHandler
             switch (command)
             {
                 case "status":
-                    var activeClaims = await WorkClaimStore.TryReadAllAsync(commonDirectory);
+                    var activeClaims = await WorkClaimStore.TryReadActiveClaimsAsync(commonDirectory);
                     if (activeClaims.Count == 0) Console.WriteLine("No active work claims.");
                     else
                     {
-                        var currentKey = WorkClaimStore.NormalizeWorktreeId(worktreeId);
+                        var currentKey = WorkClaimStore.NormalizeWorktreeId(commonDirectory, worktreeId);
                         foreach (var claim in activeClaims)
                         {
-                            var isCurrent = string.Equals(claim.WorktreeId, currentKey, StringComparison.Ordinal);
+                            var isCurrent = string.Equals(WorkClaimStore.NormalizeWorktreeId(commonDirectory, claim.WorktreeId), currentKey, StringComparison.Ordinal);
                             Console.WriteLine(FormatClaimStatus(claim, isCurrent));
                         }
                     }
@@ -135,10 +135,12 @@ public static class WorkCommandHandler
             var configuration = await configurationLoader(workingDirectory);
             var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
             var claim = await WorkClaimStore.TryReadAsync(commonDirectory, worktreeId);
-            var otherWorktreeClaims = (await WorkClaimStore.TryReadAllAsync(commonDirectory))
+            // Read-only routing must apply the same stale-worktree evaluation production pruning
+            // uses: a deleted worktree's claim is excluded without writing to the claim file.
+            var otherWorktreeClaims = (await WorkClaimStore.TryReadActiveClaimsAsync(commonDirectory))
                 .Where(candidate => !string.Equals(
-                    WorkClaimStore.NormalizeWorktreeId(candidate.WorktreeId),
-                    WorkClaimStore.NormalizeWorktreeId(worktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, candidate.WorktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(commonDirectory, worktreeId),
                     StringComparison.Ordinal))
                 .ToList();
 
@@ -218,6 +220,9 @@ public static class WorkCommandHandler
         var metadata = string.Join(", ", workerMetadata.Where(value => value is not null));
         var metadataSuffix = string.IsNullOrWhiteSpace(metadata) ? string.Empty : $", {metadata}";
         var worktreeMarker = isCurrentWorktree ? " (this worktree)" : string.Empty;
-        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {claim.WorktreeId}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
+        var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? claim.WorktreeId
+            : $"{claim.WorktreeId} ({claim.WorktreePath})";
+        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
     }
 }

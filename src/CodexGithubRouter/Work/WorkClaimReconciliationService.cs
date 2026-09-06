@@ -128,6 +128,7 @@ public static class WorkClaimReconciliationService
                     IssueNumber = claim.IssueNumber,
                     PullRequestNumber = claim.PullRequestNumber,
                     WorktreeId = claim.WorktreeId,
+                    WorktreePath = claim.WorktreePath,
                     OwnerSessionId = claim.OwnerSessionId
                 });
             }
@@ -258,5 +259,6 @@ public sealed class OccupiedWorkClaim
     public int IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
     public string WorktreeId { get; init; } = string.Empty;
+    public string? WorktreePath { get; init; }
     public string OwnerSessionId { get; init; } = string.Empty;
 }

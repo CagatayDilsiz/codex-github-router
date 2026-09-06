@@ -77,7 +77,9 @@ public sealed class HookDiagnosticScope
         _claimId = claim.ClaimId == Guid.Empty ? null : claim.ClaimId.ToString("N")[..8];
         _worker = string.IsNullOrWhiteSpace(claim.WorkerProfile) ? _worker : claim.WorkerProfile;
         _model = string.IsNullOrWhiteSpace(claim.Model) ? _model : claim.Model;
-        _worktreeIdentity = string.IsNullOrWhiteSpace(claim.WorktreeId) ? _worktreeIdentity : claim.WorktreeId;
+        _worktreeIdentity = string.IsNullOrWhiteSpace(claim.WorktreePath)
+            ? _worktreeIdentity
+            : claim.WorktreePath;
     }
 
     public void SetIdentity(string? identity) => _identity = string.IsNullOrWhiteSpace(identity) ? null : identity;

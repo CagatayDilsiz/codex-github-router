@@ -382,9 +382,15 @@ public static class HookService
 
     private static async Task<IReadOnlyList<WorkClaim>> ReadOtherWorktreeClaimsAsync(string gitCommonDirectory, string worktreeId)
     {
+        // Defense-in-depth behind repository-wide stale pruning: exclude claims whose worktree no
+        // longer exists using the same shared evaluation production pruning applies, so a deleted
+        // worktree's claim never occupies work even if reconciliation has not run yet.
         var allClaims = await WorkClaimStore.ReadAllAsync(gitCommonDirectory);
-        var currentKey = WorkClaimStore.NormalizeWorktreeId(worktreeId);
-        return allClaims.Where(claim => !string.Equals(WorkClaimStore.NormalizeWorktreeId(claim.WorktreeId), currentKey, StringComparison.Ordinal)).ToList();
+        var currentKey = WorkClaimStore.NormalizeWorktreeId(gitCommonDirectory, worktreeId);
+        return allClaims
+            .Where(claim => !WorkClaimStore.IsStaleWorktree(gitCommonDirectory, claim) &&
+                !string.Equals(WorkClaimStore.NormalizeWorktreeId(gitCommonDirectory, claim.WorktreeId), currentKey, StringComparison.Ordinal))
+            .ToList();
     }
 
     private static string ResolveActivationMode(RouterConfiguration configuration)
