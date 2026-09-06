@@ -215,8 +215,12 @@ Consequences:
 
 - Every worktree observes the full claim set. A worktree sees its own active claim when routing, so parallel work can proceed: different worktrees can claim different issues independently.
 - A worktree cannot claim work already owned by another worktree, and cannot start a second issue, branch, or pull request while it already owns an active claim.
+- **Routing skips work owned by other worktrees.** Work another worktree has claimed is treated as occupied: the router selects the next eligible item, `cgr explain` reports it as hard-ineligible (`Other Worktree Claims`), and a repository gate is ignored when every gate task is owned by another worktree so the worktree still finds the next item it can route.
+- **Claims are a final gate, not the only gate.** Routing asks for a claim only for the item it already selected; if a concurrent worktree claimed that item between evaluation and acquisition, the hook re-evaluates once and routes the next eligible item instead of blocking.
+- A claim is released by whoever proves it is releasable, from any worktree: **issue and pull-request transitions release the matching repository-wide claim** (guard-railed so only the claim whose work matches the transition is released), and `cgr work reconcile` runs **repository-wide** (it prunes claims whose worktree no longer exists and releases every claim GitHub shows as releasable across all worktrees).
+- Worktree identities are compared after normalization (`git rev-parse --absolute-git-dir`), so trailing-separator and path variants resolve to the same worktree.
 - If a worktree is deleted (e.g. `git worktree remove`), its claims are released by `cgr work reconcile`, which prunes claims whose worktree's Git directory no longer exists.
-- Legacy claim files (single-claim format) migrate automatically to the worktree-scoped claim set, assigned to the main worktree.
+- Legacy claim files (single-claim format) migrate automatically to the worktree-scoped claim set on the first read, assigned to the main worktree regardless of which worktree triggers the read.
 
 If you need to understand what the current claim is, inspect before mutating:
 
@@ -224,4 +228,4 @@ If you need to understand what the current claim is, inspect before mutating:
 cgr work status        # read-only
 ```
 
-Only `cgr work reconcile` (removes claims GitHub shows as releasable — blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request) and `cgr work release --issue <number>` (explicit user recovery, only the supplied issue) mutate claim state. See [troubleshooting.md](troubleshooting.md) for guidance on when to use them.
+Only `cgr work reconcile` (repository-wide: removes claims GitHub shows as releasable — blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — and prunes claims whose worktree no longer exists) and `cgr work release --issue <number>` (explicit user recovery, only the supplied issue) mutate claim state. Issue and pull-request transitions also release their matching claim when the transition proves the claim is releasable. See [troubleshooting.md](troubleshooting.md) for guidance on when to use them.

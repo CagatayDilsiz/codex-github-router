@@ -215,6 +215,7 @@ public static class HookService
             configuration,
             workingDirectory,
             currentModel: currentModel,
+            otherWorktreeClaims: await ReadOtherWorktreeClaimsAsync(gitCommonDirectory, worktreeId),
             dependencies: new RoutingEvaluationDependencies
             {
                 ResolveAssignmentIdentityAsync = (config, wd) => ResolveAssignmentIdentityAsync(config, wd, dependencies, CancellationToken.None)
@@ -292,6 +293,14 @@ public static class HookService
             if (!acquisition.Acquired)
             {
                 var acquisitionBlockReason = acquisition.BlockReason ?? "Could not acquire the repository work claim.";
+                if (allowNoClaimReroute && acquisition.BlockReason?.Contains("another Git worktree", StringComparison.Ordinal) == true)
+                {
+                    // A concurrent worktree claimed the selected work between evaluation and
+                    // acquisition. Re-evaluate once from the refreshed repository-wide claim set
+                    // and route the next eligible item instead of blocking this invocation.
+                    return await RunWithoutActiveClaimAsync(workingDirectory, gitCommonDirectory, worktreeId, configuration, sessionId, currentModel, scope, dependencies, false);
+                }
+
                 scope.Block(acquisitionBlockReason);
                 await WriteBlockAsync(acquisitionBlockReason);
                 return 0;
@@ -370,6 +379,13 @@ public static class HookService
             WorkflowItemType.Deferred or
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
+
+    private static async Task<IReadOnlyList<WorkClaim>> ReadOtherWorktreeClaimsAsync(string gitCommonDirectory, string worktreeId)
+    {
+        var allClaims = await WorkClaimStore.ReadAllAsync(gitCommonDirectory);
+        var currentKey = WorkClaimStore.NormalizeWorktreeId(worktreeId);
+        return allClaims.Where(claim => !string.Equals(WorkClaimStore.NormalizeWorktreeId(claim.WorktreeId), currentKey, StringComparison.Ordinal)).ToList();
+    }
 
     private static string ResolveActivationMode(RouterConfiguration configuration)
     {

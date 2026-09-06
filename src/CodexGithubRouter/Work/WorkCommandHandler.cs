@@ -58,10 +58,9 @@ public static class WorkCommandHandler
                 case "list":
                     return await HandleListAsync(args, workingDirectory, worktreeId, configurationLoader, errorWriter);
                 case "reconcile":
-                    var pruned = await WorkClaimStore.PruneStaleWorktreesAsync(commonDirectory, Directory.Exists);
-                    if (pruned > 0) Console.WriteLine($"Pruned {pruned} stale work claim{(pruned == 1 ? "" : "s")} from removed worktrees.");
-                    var released = await WorkClaimReconciliationService.ReconcileAsync(workingDirectory, commonDirectory, worktreeId, await configurationLoader(workingDirectory));
-                    Console.WriteLine(released ? "Released a passive or terminal work claim." : "Active work claim remains unchanged.");
+                    var reconcileResult = await WorkClaimReconciliationService.ReconcileAllAsync(workingDirectory, commonDirectory, await configurationLoader(workingDirectory));
+                    if (reconcileResult.PrunedCount > 0) Console.WriteLine($"Pruned {reconcileResult.PrunedCount} stale work claim{(reconcileResult.PrunedCount == 1 ? "" : "s")} from removed worktrees.");
+                    Console.WriteLine(reconcileResult.ReleasedCount > 0 ? $"Released {reconcileResult.ReleasedCount} passive or terminal work claim{(reconcileResult.ReleasedCount == 1 ? "" : "s")} across this repository." : "Active work claims remain unchanged.");
                     return 0;
                 case "release":
                     var issueIndex = Array.FindIndex(args, value => string.Equals(value, "--issue", StringComparison.OrdinalIgnoreCase));
@@ -136,12 +135,19 @@ public static class WorkCommandHandler
             var configuration = await configurationLoader(workingDirectory);
             var commonDirectory = await GitRepositoryService.GetCommonDirectoryAsync(workingDirectory) ?? workingDirectory;
             var claim = await WorkClaimStore.TryReadAsync(commonDirectory, worktreeId);
+            var otherWorktreeClaims = (await WorkClaimStore.TryReadAllAsync(commonDirectory))
+                .Where(candidate => !string.Equals(
+                    WorkClaimStore.NormalizeWorktreeId(candidate.WorktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(worktreeId),
+                    StringComparison.Ordinal))
+                .ToList();
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
                 currentModel: model,
                 activeClaim: claim,
+                otherWorktreeClaims: otherWorktreeClaims,
                 dependencies: new RoutingEvaluationDependencies
                 {
                     ResolveAssignmentIdentityAsync = (config, wd) => ResolveIdentityAsync(config, wd)

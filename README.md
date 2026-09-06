@@ -97,7 +97,7 @@ Workflow and pull-request labels, worker routing, assignee-aware routing, reposi
 ## Current scope and limitations
 
 - At most **one active coding claim per worktree**, with the full repository claim set shared across worktrees.
-- CGR never starts a second issue, branch, or pull request in a worktree while that worktree has an active claim; different worktrees claim different work items.
+- CGR never starts a second issue, branch, or pull request in a worktree while that worktree has an active claim; different worktrees claim different work items. Work owned by another worktree is treated as occupied and skipped by routing and `cgr explain`, so each worktree routes the next item it can actually claim.
 - Autonomous mode is repository-specific and stored in the shared Git common directory.
 - The router relies on GitHub labels to model state; conflicting labels are treated as an ambiguous state and block the hook.
 - PR review itself is not a claimable work type yet; change requests on linked pull requests are.

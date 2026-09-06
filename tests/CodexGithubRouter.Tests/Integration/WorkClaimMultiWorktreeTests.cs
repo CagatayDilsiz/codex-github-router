@@ -1,4 +1,6 @@
 using CodexGithubRouter.Work;
+using CodexGithubRouter.GitHub;
+using CodexGithubRouter.Workflow;
 using Xunit;
 
 namespace CodexGithubRouter.Tests;
@@ -59,6 +61,74 @@ public sealed class WorkClaimMultiWorktreeTests
         Assert.False(blocked.Acquired);
         Assert.Contains("another Git worktree", blocked.BlockReason);
         Assert.Equal(4, (await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId))!.IssueNumber);
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, linkedWorktree));
+    }
+
+    [Fact]
+    public async Task Cross_worktree_claim_conflicts_by_issue_before_pull_request_enrichment()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedWorktree = sandbox.CreateLinkedWorktree("wt-a");
+        Assert.True((await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "session-main",
+            IssueNumber = 4,
+            WorkType = WorkClaimType.Implementation
+        })).Acquired);
+
+        // Worktree A holds issue #4 without a pull-request identity. Another worktree
+        // attempting the same issue after it gained a linked pull request must still be
+        // blocked; the enriched identity does not reopen the issue for a second worktree.
+        var blocked = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, linkedWorktree, new WorkClaim
+        {
+            OwnerSessionId = "session-a",
+            IssueNumber = 4,
+            PullRequestNumber = 20,
+            WorkType = WorkClaimType.Implementation
+        });
+
+        Assert.False(blocked.Acquired);
+        Assert.Contains("owned by another Git worktree", blocked.BlockReason);
+
+        // The owning worktree may still enrich its own PR-less claim with the candidate PR.
+        var enriched = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "session-main",
+            IssueNumber = 4,
+            PullRequestNumber = 20,
+            WorkType = WorkClaimType.Implementation
+        });
+        Assert.True(enriched.Acquired);
+        Assert.Equal(4, (await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId))!.IssueNumber);
+        Assert.Equal(20, (await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId))!.PullRequestNumber);
+        Assert.Single(await WorkClaimStore.ReadAllAsync(sandbox.GitCommonDirectory));
+    }
+
+    [Fact]
+    public async Task Cross_worktree_claim_conflicts_by_pull_request_across_different_issues()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedWorktree = sandbox.CreateLinkedWorktree("wt-a");
+        Assert.True((await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "session-main",
+            IssueNumber = 4,
+            PullRequestNumber = 20,
+            WorkType = WorkClaimType.Implementation
+        })).Acquired);
+
+        // The same pull request claimed under a different issue number is the same work item.
+        var blocked = await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, linkedWorktree, new WorkClaim
+        {
+            OwnerSessionId = "session-a",
+            IssueNumber = 9,
+            PullRequestNumber = 20,
+            WorkType = WorkClaimType.Implementation
+        });
+
+        Assert.False(blocked.Acquired);
+        Assert.Contains("pull request #20", blocked.BlockReason);
+        Assert.Contains("owned by another Git worktree", blocked.BlockReason);
         Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, linkedWorktree));
     }
 
@@ -192,6 +262,58 @@ public sealed class WorkClaimMultiWorktreeTests
     }
 
     [Fact]
+    public async Task Reconcile_all_releases_passive_claims_across_multiple_live_worktrees()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedWorktree = sandbox.CreateLinkedWorktree("wt-a");
+        Assert.True((await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "session-main",
+            IssueNumber = 4,
+            WorkType = WorkClaimType.Implementation
+        })).Acquired);
+        Assert.True((await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, linkedWorktree, new WorkClaim
+        {
+            OwnerSessionId = "session-a",
+            IssueNumber = 5,
+            WorkType = WorkClaimType.Implementation
+        })).Acquired);
+
+        var result = await WorkClaimReconciliationService.ReconcileAllAsync(
+            sandbox.RepositoryDirectory,
+            sandbox.GitCommonDirectory,
+            new RouterConfiguration(),
+            getIssue: number => Task.FromResult(new Issue { Number = number, State = "closed", Labels = new List<GithubLabel>() }));
+
+        Assert.Equal(2, result.ReleasedCount);
+        Assert.Equal(0, result.PrunedCount);
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, linkedWorktree));
+    }
+
+    [Fact]
+    public async Task Reconcile_all_fails_closed_when_claim_github_state_cannot_be_verified()
+    {
+        using var sandbox = new TestSandbox();
+        Assert.True((await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "session-main",
+            IssueNumber = 4,
+            WorkType = WorkClaimType.Implementation
+        })).Acquired);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            WorkClaimReconciliationService.ReconcileAllAsync(
+                sandbox.RepositoryDirectory,
+                sandbox.GitCommonDirectory,
+                new RouterConfiguration(),
+                getIssue: _ => throw new InvalidOperationException("transient GitHub failure")));
+
+        Assert.Contains("could not be verified", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
+    }
+
+    [Fact]
     public async Task Legacy_claim_migrates_to_the_main_worktree()
     {
         using var sandbox = new TestSandbox();
@@ -214,5 +336,62 @@ public sealed class WorkClaimMultiWorktreeTests
         Assert.Equal(Path.GetFullPath(sandbox.GitCommonDirectory), claim!.WorktreeId);
         var content = await File.ReadAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"));
         Assert.Contains("\"Claims\"", content);
+    }
+
+    [Fact]
+    public async Task Legacy_claim_read_from_a_linked_worktree_migrates_to_the_main_worktree()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedWorktree = sandbox.CreateLinkedWorktree("wt-a");
+        var claimId = Guid.NewGuid();
+        await File.WriteAllTextAsync(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json"), $$"""
+        {
+          "ClaimId": "{{claimId}}",
+          "Version": 1,
+          "OwnerSessionId": "legacy-session",
+          "IssueNumber": 6,
+          "WorkType": 0,
+          "ClaimedAt": "2026-07-28T12:00:00+00:00",
+          "LastUpdatedAt": "2026-07-28T12:00:00+00:00"
+        }
+        """);
+
+        // A legacy (single-claim) file that predates worktree-scoped claims is shared
+        // across the repository; reading it from a linked worktree migrates the claim to the
+        // main worktree, never to the invoking linked worktree.
+        var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
+
+        Assert.NotNull(claim);
+        Assert.Equal(Path.GetFullPath(sandbox.GitCommonDirectory), claim!.WorktreeId);
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, linkedWorktree));
+    }
+
+    [Fact]
+    public async Task Worktree_path_normalization_treats_separator_variants_as_the_same_worktree()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedWorktree = sandbox.CreateLinkedWorktree("wt-a");
+        var withTrailingSeparator = linkedWorktree.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+        var claimed = await WorkClaimStore.TryAcquireAsync(
+            sandbox.GitCommonDirectory,
+            linkedWorktree,
+            new WorkClaim
+            {
+                OwnerSessionId = "owner",
+                IssueNumber = 9,
+                WorkType = WorkClaimType.Implementation
+            });
+        Assert.True(claimed.Acquired);
+
+        // The same worktree addressed via a trailing-separator variant must be recognized as
+        // the same worktree (continuation), not as a conflicting peer.
+        var releaseMatch = await WorkClaimStore.ReleaseIfMatchesAsync(
+            sandbox.GitCommonDirectory,
+            withTrailingSeparator,
+            claimed.Claim!);
+
+        Assert.True(releaseMatch);
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, linkedWorktree));
     }
 }

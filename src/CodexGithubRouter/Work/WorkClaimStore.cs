@@ -50,9 +50,14 @@ public static class WorkClaimStore
             var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
             var claims = set.Claims;
 
+            // A claim conflicts with another worktree's claim when the same issue is claimed
+            // (regardless of pull-request identity) or when the same pull request is claimed under
+            // a different issue number. Same-issue, PR-less claims and enriched claims therefore
+            // occupy the same work across worktrees, while same-worktree continuation may still
+            // enrich a PR-less claim with the single candidate pull request.
             var otherWorktreeClaim = claims.FirstOrDefault(candidate =>
                 !string.Equals(candidate.WorktreeId, worktreeKey, StringComparison.Ordinal) &&
-                SameWork(candidate, requested));
+                ConflictsWith(candidate, requested));
             if (otherWorktreeClaim is not null)
             {
                 return new WorkClaimAcquisitionResult
@@ -295,7 +300,12 @@ public static class WorkClaimStore
         await using (lockStream) return await action();
     }
 
-    internal static string NormalizeWorktreeId(string worktreeId) => Path.GetFullPath(worktreeId.Trim());
+    internal static string NormalizeWorktreeId(string worktreeId)
+    {
+        var fullPath = Path.GetFullPath(worktreeId.Trim());
+        var trimmed = fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return trimmed.Length == 0 ? fullPath : trimmed;
+    }
 
     private static WorkClaim WithWorktree(WorkClaim claim, string worktreeId) => new()
     {
@@ -315,6 +325,17 @@ public static class WorkClaimStore
 
     private static bool SameWork(WorkClaim left, WorkClaim right) =>
         left.IssueNumber == right.IssueNumber && left.PullRequestNumber == right.PullRequestNumber;
+
+    /// <summary>
+    /// True when the two claims occupy the same work item across the repository: the same
+    /// issue (regardless of pull-request identity), or the same pull request under differing
+    /// issue numbers. Cross-worktree acquisition applies this predicate so a PR-less claim
+    /// over issue #4 still reserves the issue after its linked pull request is enriched, and
+    /// so two claims can never route the same pull request under different issues.
+    /// </summary>
+    internal static bool ConflictsWith(WorkClaim left, WorkClaim right) =>
+        left.IssueNumber == right.IssueNumber ||
+        (left.PullRequestNumber.HasValue && right.PullRequestNumber.HasValue && left.PullRequestNumber.Value == right.PullRequestNumber.Value);
 
     private static bool CanEnrich(WorkClaim existing, WorkClaim requested) =>
         existing.IssueNumber == requested.IssueNumber &&

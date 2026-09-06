@@ -36,12 +36,19 @@ public static class ExplainCommandHandler
 
             var configuration = await dependencies.LoadEffectiveConfigurationAsync(workingDirectory, cancellationToken);
             var activeClaim = await dependencies.ReadWorkClaimAsync(commonDirectory, worktreeId, cancellationToken);
+            var otherWorktreeClaims = (await dependencies.ReadWorkClaimsAsync(commonDirectory, cancellationToken))
+                .Where(claim => !string.Equals(
+                    WorkClaimStore.NormalizeWorktreeId(claim.WorktreeId),
+                    WorkClaimStore.NormalizeWorktreeId(worktreeId),
+                    StringComparison.Ordinal))
+                .ToList();
 
             var plan = await RoutingEvaluationService.EvaluateAsync(
                 configuration,
                 workingDirectory,
                 currentModel: model,
                 activeClaim: activeClaim,
+                otherWorktreeClaims: otherWorktreeClaims,
                 dependencies: dependencies.RoutingEvaluation.WithIdentityResolver(
                     (_, _) => ResolveIdentityAsync(configuration, workingDirectory, dependencies, cancellationToken)));
 
@@ -229,6 +236,9 @@ public sealed class ExplainCommandDependencies
 
     public Func<string, string, CancellationToken, Task<WorkClaim?>> ReadWorkClaimAsync { get; init; }
         = (gitCommonDirectory, worktreeId, cancellationToken) => WorkClaimStore.TryReadAsync(gitCommonDirectory, worktreeId, cancellationToken);
+
+    public Func<string, CancellationToken, Task<IReadOnlyList<WorkClaim>>> ReadWorkClaimsAsync { get; init; }
+        = (gitCommonDirectory, cancellationToken) => WorkClaimStore.TryReadAllAsync(gitCommonDirectory, cancellationToken);
 
     public Func<string, CancellationToken, Task<string?>> ResolveLocalIdentityAsync { get; init; }
         = (repositoryRoot, cancellationToken) => GitRepositoryService.GetConfigValueAsync(repositoryRoot, AssignmentRoutingService.LocalIdentityConfigKey, cancellationToken);

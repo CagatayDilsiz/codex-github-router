@@ -64,6 +64,10 @@ public static class RoutingExplanationService
         stages.Add(claimStage);
         isEligible &= claimStage.Verdict != RoutingVerdict.HardIneligible;
 
+        var otherWorktreeStage = ExplainOtherWorktreeClaims(plan, issue);
+        stages.Add(otherWorktreeStage);
+        isEligible &= otherWorktreeStage.Verdict != RoutingVerdict.HardIneligible;
+
         var workflowTask = SelectWorkflowTask(plan, issue);
         var outcomeStage = ExplainOutcome(plan, issue, workflowTask);
         stages.Add(outcomeStage);
@@ -459,6 +463,41 @@ public static class RoutingExplanationService
             Verdict = RoutingVerdict.HardIneligible,
             Message = $"Active work claim is held for issue #{activeClaim.IssueNumber}. Issue #{issue.Number} cannot be selected until the current claim is released."
         };
+    }
+
+    private static RoutingStage ExplainOtherWorktreeClaims(RoutingEvaluationResult plan, Issue issue)
+    {
+        var occupiedByIssue = plan.IneligibleOccupiedClaims.FirstOrDefault(claim => claim.IssueNumber == issue.Number);
+        if (occupiedByIssue is not null)
+        {
+            return new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.HardIneligible,
+                Message = $"Issue #{issue.Number} is claimed by another Git worktree (worktree {occupiedByIssue.WorktreeId}) and is not available to this worktree."
+            };
+        }
+
+        var sharedPullRequestNumbers = plan.IneligibleOccupiedClaims
+            .Where(claim => claim.PullRequestNumber.HasValue)
+            .Select(claim => claim.PullRequestNumber!.Value)
+            .ToHashSet();
+        var taskSharesPullRequest = plan.WorkflowTasks.Any(task =>
+            task.IssueNumber == issue.Number && task.PullRequestNumber.HasValue && sharedPullRequestNumbers.Contains(task.PullRequestNumber.Value));
+
+        return taskSharesPullRequest
+            ? new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.HardIneligible,
+                Message = $"Issue #{issue.Number} routes a pull request claimed by another Git worktree and is not available to this worktree."
+            }
+            : new RoutingStage
+            {
+                Name = "Other Worktree Claims",
+                Verdict = RoutingVerdict.Pass,
+                Message = "No other Git worktree claims this work item."
+            };
     }
 
     private static RoutingStage ExplainOutcome(RoutingEvaluationResult plan, Issue issue, WorkflowItem? workflowTask)
