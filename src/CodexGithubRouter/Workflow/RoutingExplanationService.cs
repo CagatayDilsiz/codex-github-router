@@ -181,6 +181,163 @@ public static class RoutingExplanationService
         return string.Join(Environment.NewLine, lines);
     }
 
+    /// <summary>
+    /// Explains the review-routing decision for a single pull request against the authenticated
+    /// reviewer login. Mirrors the production review decision model through
+    /// <see cref="ReviewRoutingService.EvaluateStages"/> so read-only diagnostics match routing,
+    /// including the claim-aware "Work Claim / Other Worktree Claims" stage.
+    /// </summary>
+    public static PullRequestRoutingExplanation ExplainReview(
+        RoutingEvaluationResult plan,
+        PullRequest pullRequest,
+        string reviewerLogin)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(pullRequest);
+        if (string.IsNullOrWhiteSpace(reviewerLogin))
+        {
+            throw new ArgumentException("A reviewer login is required to explain review routing.", nameof(reviewerLogin));
+        }
+
+        var otherClaims = plan.IneligibleOccupiedClaims
+            .Select(claim => new WorkClaim
+            {
+                IssueNumber = claim.IssueNumber,
+                PullRequestNumber = claim.PullRequestNumber,
+                WorkType = claim.WorkType,
+                ReviewerLogin = claim.ReviewerLogin,
+                WorktreeId = claim.WorktreeId,
+                WorktreePath = claim.WorktreePath,
+                OwnerSessionId = claim.OwnerSessionId
+            })
+            .ToList();
+
+        var stages = ReviewRoutingService.EvaluateStages(plan.Configuration, pullRequest, reviewerLogin, plan.ActiveClaim, otherClaims);
+        var isEligible = ReviewRoutingService.IsEligible(stages);
+        var selected = isEligible &&
+            plan.Decision?.SelectedTask is { Type: WorkflowItemType.PullRequestReview } selectedTask &&
+            selectedTask.PullRequestNumber == pullRequest.Number &&
+            string.Equals(selectedTask.ReviewerLogin, reviewerLogin, StringComparison.OrdinalIgnoreCase);
+
+        return new PullRequestRoutingExplanation
+        {
+            PullRequestNumber = pullRequest.Number,
+            PullRequestTitle = pullRequest.Title,
+            ReviewerLogin = reviewerLogin,
+            IsEligible = isEligible,
+            IsSelected = selected,
+            Stages = stages,
+            Summary = FormatReviewSummary(pullRequest, reviewerLogin, isEligible, selected, stages)
+        };
+    }
+
+    public static IReadOnlyList<PullRequestRoutingExplanation> ExplainReviewAll(RoutingEvaluationResult plan, string reviewerLogin)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (string.IsNullOrWhiteSpace(reviewerLogin))
+        {
+            return Array.Empty<PullRequestRoutingExplanation>();
+        }
+
+        return plan.ConsideredPullRequests
+            .Select(pullRequest => ExplainReview(plan, pullRequest, reviewerLogin))
+            .OrderByDescending(explanation => explanation.IsSelected)
+            .ThenByDescending(explanation => explanation.IsEligible)
+            .ThenBy(explanation => explanation.PullRequestNumber)
+            .ToList();
+    }
+
+    public static string FormatReviewExplanation(PullRequestRoutingExplanation explanation)
+    {
+        ArgumentNullException.ThrowIfNull(explanation);
+        var lines = new List<string>();
+        lines.Add($"Pull request #{explanation.PullRequestNumber}{(string.IsNullOrWhiteSpace(explanation.PullRequestTitle) ? "" : $" ({explanation.PullRequestTitle})")}, requested reviewer '{explanation.ReviewerLogin}'");
+        lines.Add($"Eligible: {(explanation.IsEligible ? "yes" : "no")}");
+        if (explanation.IsSelected)
+        {
+            lines.Add("Selected: yes");
+        }
+
+        lines.Add(string.Empty);
+        lines.Add("Decision stages:");
+        foreach (var stage in explanation.Stages)
+        {
+            if (stage.Verdict == RoutingVerdict.Disabled)
+            {
+                continue;
+            }
+
+            var label = stage.Verdict switch
+            {
+                RoutingVerdict.Selected => "SELECTED",
+                RoutingVerdict.Pass => "PASS",
+                RoutingVerdict.SoftPrefer => "PREFER",
+                RoutingVerdict.SoftIneligible => "SKIP",
+                RoutingVerdict.Exempt => "EXEMPT",
+                RoutingVerdict.HardIneligible => "BLOCKED",
+                _ => "N/A"
+            };
+            lines.Add($"  [{label}] {stage.Name}");
+            lines.Add($"         {stage.Message}");
+        }
+
+        lines.Add(string.Empty);
+        lines.Add(explanation.Summary);
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    public static string FormatReviewExplanations(IReadOnlyList<PullRequestRoutingExplanation> explanations)
+    {
+        var lines = new List<string>();
+        lines.Add("Review routing explanations:");
+        lines.Add(string.Empty);
+        foreach (var explanation in explanations)
+        {
+            var marker = explanation.IsSelected
+                ? "SELECTED"
+                : explanation.IsEligible
+                    ? "ELIGIBLE"
+                    : "INELIGIBLE";
+            lines.Add($"  PR #{explanation.PullRequestNumber} {(string.IsNullOrWhiteSpace(explanation.PullRequestTitle) ? "" : $"({explanation.PullRequestTitle}) ")}- {marker} (reviewer '{explanation.ReviewerLogin}')");
+            foreach (var stage in explanation.Stages.Where(stage => stage.Verdict != RoutingVerdict.Disabled))
+            {
+                var stageMarker = stage.Verdict switch
+                {
+                    RoutingVerdict.Selected => "*",
+                    RoutingVerdict.Pass => "+",
+                    RoutingVerdict.SoftPrefer => "*",
+                    RoutingVerdict.SoftIneligible => "~",
+                    RoutingVerdict.Exempt => "=",
+                    RoutingVerdict.HardIneligible => "!",
+                    _ => " "
+                };
+                lines.Add($"    [{stageMarker}] {stage.Name}: {stage.Message}");
+            }
+
+            lines.Add(string.Empty);
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string FormatReviewSummary(PullRequest pullRequest, string reviewerLogin, bool isEligible, bool selected, IReadOnlyList<RoutingStage> stages)
+    {
+        if (!isEligible)
+        {
+            var blockedStages = stages.Where(stage => stage.Verdict == RoutingVerdict.HardIneligible).ToList();
+            if (blockedStages.Count == 1)
+            {
+                return $"Pull request #{pullRequest.Number} is not claimable review work for '{reviewerLogin}': {blockedStages[0].Message}";
+            }
+
+            return $"Pull request #{pullRequest.Number} is not claimable review work for '{reviewerLogin}'. Blocked by: {string.Join("; ", blockedStages.Select(stage => $"{stage.Name}: {stage.Message}"))}";
+        }
+
+        return selected
+            ? $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' and was selected by the production routing decision."
+            : $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' but was not selected by this routing decision.";
+    }
+
     private static RoutingStage ExplainWorkflowState(RouterConfiguration configuration, Issue issue)
     {
         var resolution = WorkflowStateResolver.Resolve(issue.Labels.Select(label => label.Name), configuration.States);
@@ -690,9 +847,11 @@ public static class RoutingExplanationService
     }
 
     private static string DescribeTask(WorkflowItem task) =>
-        task.PullRequestNumber.HasValue
-            ? $"issue #{task.IssueNumber} / pull request #{task.PullRequestNumber.Value}"
-            : $"issue #{task.IssueNumber}";
+        task.Type == WorkflowItemType.PullRequestReview
+            ? $"review of pull request #{task.PullRequestNumber} (reviewer '{task.ReviewerLogin}')"
+            : task.PullRequestNumber.HasValue
+                ? $"issue #{task.IssueNumber} / pull request #{task.PullRequestNumber.Value}"
+                : $"issue #{task.IssueNumber}";
 
     private static (int Tier, int Rank)? RouteOrder(WorkflowItem task)
     {
@@ -720,6 +879,7 @@ public static class RoutingExplanationService
         WorkflowItemType.ResumeInProgressIssue => "ResumeInProgressIssue",
         WorkflowItemType.RecoverCompletedIssue => "RecoverCompletedIssue",
         WorkflowItemType.RecoverCurrentPullRequest => "RecoverCurrentPullRequest",
+        WorkflowItemType.PullRequestReview => "PullRequestReview",
         WorkflowItemType.AwaitingReview => "AwaitingReview",
         WorkflowItemType.AwaitingMerge => "AwaitingMerge",
         WorkflowItemType.Deferred => "Deferred",
@@ -738,7 +898,8 @@ public static class RoutingExplanationService
         3 => "completed-recovery",
         4 => "link-pull-request",
         5 => "resume",
-        6 => "new-issue",
+        6 => "review",
+        7 => "new-issue",
         _ => $"tier {tier}"
     };
 }
@@ -754,7 +915,8 @@ public static class RoutingTaskTypeExtensions
             WorkflowItemType.RecoverCompletedIssue => 3,
             WorkflowItemType.LinkPullRequestsToIssues => 4,
             WorkflowItemType.ResumeInProgressIssue => 5,
-            WorkflowItemType.NewIssue => 6,
+            WorkflowItemType.PullRequestReview => 6,
+            WorkflowItemType.NewIssue => 7,
             _ => 0
         };
 
@@ -763,6 +925,7 @@ public static class RoutingTaskTypeExtensions
             WorkflowItemType.RecoverCompletedIssue or
             WorkflowItemType.LinkPullRequestsToIssues or
             WorkflowItemType.ResumeInProgressIssue or
+            WorkflowItemType.PullRequestReview or
             WorkflowItemType.NewIssue;
     }
 }
@@ -775,6 +938,17 @@ public sealed class IssueRoutingExplanation
     public bool IsSelected { get; init; }
     public int SelectionRank { get; init; }
     public WorkflowItemType? RoutingTaskType { get; init; }
+    public IReadOnlyList<RoutingStage> Stages { get; init; } = Array.Empty<RoutingStage>();
+    public string Summary { get; init; } = string.Empty;
+}
+
+public sealed class PullRequestRoutingExplanation
+{
+    public int PullRequestNumber { get; init; }
+    public string PullRequestTitle { get; init; } = string.Empty;
+    public string ReviewerLogin { get; init; } = string.Empty;
+    public bool IsEligible { get; init; }
+    public bool IsSelected { get; init; }
     public IReadOnlyList<RoutingStage> Stages { get; init; } = Array.Empty<RoutingStage>();
     public string Summary { get; init; } = string.Empty;
 }

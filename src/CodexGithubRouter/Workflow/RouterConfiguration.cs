@@ -114,6 +114,13 @@ public sealed class RouterPolicies
     public AutonomousActivationPolicy? AutonomousActivation { get; init; }
 
     public DiagnosticsPolicy Diagnostics { get; init; } = new();
+
+    public ReviewRoutingPolicy? ReviewRouting { get; init; }
+}
+
+public sealed class ReviewRoutingPolicy
+{
+    public bool Enabled { get; init; }
 }
 
 public sealed class DiagnosticsPolicy

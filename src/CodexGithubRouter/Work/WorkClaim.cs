@@ -3,7 +3,8 @@ namespace CodexGithubRouter.Work;
 public enum WorkClaimType
 {
     Implementation,
-    ChangeRequest
+    ChangeRequest,
+    Review
 }
 
 public sealed class WorkClaim
@@ -27,7 +28,13 @@ public sealed class WorkClaim
     public string? WorktreePath { get; init; }
 
     public string OwnerSessionId { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Issue number for implementation and change-request claims. For review claims this may be
+    /// 0 when the review work has no associated issue.
+    /// </summary>
     public int IssueNumber { get; init; }
+
     public int? PullRequestNumber { get; init; }
     public WorkClaimType WorkType { get; init; }
     public string? WorkerProfile { get; init; }
@@ -35,6 +42,19 @@ public sealed class WorkClaim
     public DateTimeOffset ClaimedIssueUpdatedAt { get; init; }
     public DateTimeOffset ClaimedAt { get; init; }
     public DateTimeOffset LastUpdatedAt { get; init; }
+
+    /// <summary>
+    /// GitHub login of the requested reviewer. Present only for <see cref="WorkClaimType.Review"/>
+    /// claims. The claim identity for review work is (PullRequestNumber, ReviewerLogin).
+    /// </summary>
+    public string? ReviewerLogin { get; init; }
+
+    /// <summary>
+    /// Stable marker captured at review-claim acquisition that identifies the review cycle.
+    /// Used to distinguish an in-progress cycle from a later re-request after the reviewer
+    /// submitted a review. For example, this may be the GitHub review-request node ID.
+    /// </summary>
+    public string? ReviewCycleId { get; init; }
 }
 
 public sealed class WorkClaimAcquisitionResult

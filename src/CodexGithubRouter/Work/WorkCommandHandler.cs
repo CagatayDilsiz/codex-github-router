@@ -223,6 +223,9 @@ public static class WorkCommandHandler
         var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
             ? claim.WorktreeId
             : $"{claim.WorktreeId} ({claim.WorktreePath})";
-        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
+        var identity = claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
+        return $"Active work claim: {identity}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
     }
 }

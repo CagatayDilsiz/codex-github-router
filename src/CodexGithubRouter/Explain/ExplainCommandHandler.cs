@@ -12,7 +12,7 @@ public static class ExplainCommandHandler
 
     public static async Task<int> HandleAsync(string[] args, ExplainCommandDependencies dependencies, CancellationToken cancellationToken = default)
     {
-        if (!TryParseArguments(args, out var issueNumber, out var workingDirectory, out var model, out var usageError))
+        if (!TryParseArguments(args, out var issueNumber, out var pullRequestNumber, out var workingDirectory, out var model, out var usageError))
         {
             dependencies.Error.WriteLine(usageError);
             return 2;
@@ -67,7 +67,12 @@ public static class ExplainCommandHandler
                 return await ExplainSingleIssueAsync(issueNumber.Value, plan, workingDirectory, dependencies, cancellationToken);
             }
 
-            return await ExplainAllIssuesAsync(plan, dependencies);
+            if (pullRequestNumber.HasValue)
+            {
+                return await ExplainSinglePullRequestAsync(pullRequestNumber.Value, plan, workingDirectory, dependencies, cancellationToken);
+            }
+
+            return await ExplainAllAsync(plan, workingDirectory, dependencies, cancellationToken);
         }
         catch (Exception exception)
         {
@@ -100,17 +105,90 @@ public static class ExplainCommandHandler
         return 0;
     }
 
-    private static Task<int> ExplainAllIssuesAsync(RoutingEvaluationResult plan, ExplainCommandDependencies dependencies)
+    private static async Task<int> ExplainSinglePullRequestAsync(
+        int pullRequestNumber,
+        RoutingEvaluationResult plan,
+        string workingDirectory,
+        ExplainCommandDependencies dependencies,
+        CancellationToken cancellationToken)
     {
-        var explanations = RoutingExplanationService.ExplainAll(plan);
-        if (explanations.Count == 0)
+        PullRequest pullRequest;
+        try
         {
-            dependencies.Output.WriteLine("No issues found matching the workflow configuration.");
-            return Task.FromResult(0);
+            pullRequest = await GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, ReviewRoutingService.Selection, cancellationToken);
+        }
+        catch (GitHubItemNotFoundException)
+        {
+            dependencies.Error.WriteLine($"Pull request #{pullRequestNumber} not found.");
+            return 1;
         }
 
-        dependencies.Output.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
-        return Task.FromResult(0);
+        var reviewerLogin = await ResolveAuthenticatedReviewerLoginAsync(workingDirectory, dependencies, cancellationToken);
+        if (string.IsNullOrWhiteSpace(reviewerLogin))
+        {
+            dependencies.Error.WriteLine("Could not resolve the authenticated GitHub account to explain review routing. Run `gh auth status` and retry.");
+            return 1;
+        }
+
+        var explanation = RoutingExplanationService.ExplainReview(plan, pullRequest, reviewerLogin);
+        dependencies.Output.WriteLine(RoutingExplanationService.FormatReviewExplanation(explanation));
+        return 0;
+    }
+
+    private static async Task<int> ExplainAllAsync(
+        RoutingEvaluationResult plan,
+        string workingDirectory,
+        ExplainCommandDependencies dependencies,
+        CancellationToken cancellationToken)
+    {
+        var lines = new List<string>();
+        var explanations = RoutingExplanationService.ExplainAll(plan);
+        if (explanations.Count > 0)
+        {
+            lines.Add(RoutingExplanationService.FormatExplanations(explanations));
+        }
+
+        if (plan.ConsideredPullRequests.Count > 0)
+        {
+            var reviewerLogin = await ResolveAuthenticatedReviewerLoginAsync(workingDirectory, dependencies, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(reviewerLogin))
+            {
+                var reviewExplanations = RoutingExplanationService.ExplainReviewAll(plan, reviewerLogin);
+                if (reviewExplanations.Count > 0)
+                {
+                    if (lines.Count > 0)
+                    {
+                        lines.Add(string.Empty);
+                    }
+
+                    lines.Add(RoutingExplanationService.FormatReviewExplanations(reviewExplanations));
+                }
+            }
+        }
+
+        if (lines.Count == 0)
+        {
+            dependencies.Output.WriteLine("No issues found matching the workflow configuration.");
+            return 0;
+        }
+
+        dependencies.Output.WriteLine(string.Join(Environment.NewLine, lines));
+        return 0;
+    }
+
+    private static async Task<string?> ResolveAuthenticatedReviewerLoginAsync(
+        string workingDirectory,
+        ExplainCommandDependencies dependencies,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await dependencies.ResolveAuthenticatedGitHubLoginAsync(workingDirectory, cancellationToken);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static async Task<AssignmentIdentityResolution> ResolveIdentityAsync(
@@ -148,9 +226,10 @@ public static class ExplainCommandHandler
         return AssignmentRoutingService.Resolve(configuration, usernames);
     }
 
-    private static bool TryParseArguments(string[] args, out int? issueNumber, out string workingDirectory, out string? model, out string error)
+    private static bool TryParseArguments(string[] args, out int? issueNumber, out int? pullRequestNumber, out string workingDirectory, out string? model, out string error)
     {
         issueNumber = null;
+        pullRequestNumber = null;
         workingDirectory = Environment.CurrentDirectory;
         model = null;
         error = string.Empty;
@@ -180,6 +259,19 @@ public static class ExplainCommandHandler
                 }
 
                 issueNumber = number;
+                index++;
+                continue;
+            }
+
+            if (string.Equals(argument, "--pr", StringComparison.OrdinalIgnoreCase))
+            {
+                if (index + 1 >= args.Length || !int.TryParse(args[index + 1], out var number))
+                {
+                    error = "cgr explain: --pr requires a numeric pull request number.";
+                    return false;
+                }
+
+                pullRequestNumber = number;
                 index++;
                 continue;
             }

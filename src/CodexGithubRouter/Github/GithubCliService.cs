@@ -93,8 +93,8 @@ public static class GitHubCliService
         var arguments = new List<string>
         {
             "pr",
-            "list"           
-        };       
+            "list"
+        };
 
         if (filters is not null && !string.IsNullOrWhiteSpace(filters.State))
         {
@@ -121,6 +121,46 @@ public static class GitHubCliService
         {
             throw new InvalidOperationException($"Failed to deserialize GitHub CLI output", ex);
         }
+    }
+
+    /// <summary>
+    /// Discovers pull request numbers where the named reviewer is directly requested as a
+    /// reviewer. Uses the <c>review-requested:</c> search qualifier restricted to direct user
+    /// requests; team review requests are not returned.
+    /// </summary>
+    public static async Task<List<int>> GetReviewRequestedPullRequestNumbersAsync(string workingDirectory, string reviewerLogin, CancellationToken cancellationToken = default)
+    {
+        var arguments = new List<string>
+        {
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--search",
+            $"review-requested:{reviewerLogin}",
+            "--json",
+            "number,state",
+            "--jq",
+            ".[]?.number"
+        };
+
+        var process = await ProcessRunner.RunAsync(workingDirectory, "gh", arguments, cancellationToken);
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"GitHub CLI command failed with exit code {process.ExitCode}: {process.Error}");
+        }
+
+        var numbers = new List<int>();
+        foreach (var line in process.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (int.TryParse(line.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var number))
+            {
+                numbers.Add(number);
+            }
+        }
+
+        return numbers;
     }
 
     public static async Task<List<Issue>> GetIssuesAsync(string workingDirectory, IssueFilters filters, bool addLinkedPRToSelection = false, CancellationToken cancellationToken = default)
