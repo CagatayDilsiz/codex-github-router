@@ -190,7 +190,8 @@ public static class RoutingExplanationService
     public static PullRequestRoutingExplanation ExplainReview(
         RoutingEvaluationResult plan,
         PullRequest pullRequest,
-        string reviewerLogin)
+        string reviewerLogin,
+        AssignmentIdentity? identity = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(pullRequest);
@@ -212,7 +213,7 @@ public static class RoutingExplanationService
             })
             .ToList();
 
-        var stages = ReviewRoutingService.EvaluateStages(plan.Configuration, pullRequest, reviewerLogin, plan.ActiveClaim, otherClaims);
+        var stages = ReviewRoutingService.EvaluateStages(plan.Configuration, pullRequest, reviewerLogin, plan.ActiveClaim, otherClaims, identity);
         var isEligible = ReviewRoutingService.IsEligible(stages);
         var selected = isEligible &&
             plan.Decision?.SelectedTask is { Type: WorkflowItemType.PullRequestReview } selectedTask &&
@@ -231,7 +232,7 @@ public static class RoutingExplanationService
         };
     }
 
-    public static IReadOnlyList<PullRequestRoutingExplanation> ExplainReviewAll(RoutingEvaluationResult plan, string reviewerLogin)
+    public static IReadOnlyList<PullRequestRoutingExplanation> ExplainReviewAll(RoutingEvaluationResult plan, string reviewerLogin, AssignmentIdentity? identity = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         if (string.IsNullOrWhiteSpace(reviewerLogin))
@@ -240,7 +241,7 @@ public static class RoutingExplanationService
         }
 
         return plan.ConsideredPullRequests
-            .Select(pullRequest => ExplainReview(plan, pullRequest, reviewerLogin))
+            .Select(pullRequest => ExplainReview(plan, pullRequest, reviewerLogin, identity))
             .OrderByDescending(explanation => explanation.IsSelected)
             .ThenByDescending(explanation => explanation.IsEligible)
             .ThenBy(explanation => explanation.PullRequestNumber)
@@ -788,9 +789,14 @@ public static class RoutingExplanationService
 
         foreach (var task in plan.RepositoryGateTasks)
         {
-            if (!issuesByNumber.ContainsKey(task.IssueNumber))
+            if (task.IssueNumber is not { } gateIssueNumber)
             {
-                issuesByNumber[task.IssueNumber] = new Issue { Number = task.IssueNumber };
+                continue;
+            }
+
+            if (!issuesByNumber.ContainsKey(gateIssueNumber))
+            {
+                issuesByNumber[gateIssueNumber] = new Issue { Number = gateIssueNumber };
             }
         }
 

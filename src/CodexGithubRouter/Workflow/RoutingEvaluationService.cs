@@ -217,9 +217,10 @@ public static class RoutingEvaluationService
         var consideredIssues = MergeConsideredIssues(discoveryResponses).ToList();
         foreach (var occupied in occupiedClaims)
         {
-            if (occupied.WorkType != WorkClaimType.Review && consideredIssues.All(issue => issue.Number != occupied.IssueNumber))
+            if (occupied.WorkType != WorkClaimType.Review && occupied.IssueNumber is { } occupiedIssueNumber &&
+                consideredIssues.All(issue => issue.Number != occupiedIssueNumber))
             {
-                consideredIssues.Add(new Issue { Number = occupied.IssueNumber });
+                consideredIssues.Add(new Issue { Number = occupiedIssueNumber });
             }
         }
 
@@ -394,7 +395,7 @@ public static class RoutingEvaluationService
             ConsideredIssues = effectiveClaim.WorkType == WorkClaimType.Review
                 ? Array.Empty<Issue>()
                 : claimedWork.ConsideredIssues.Count == 0
-                    ? new List<Issue> { new() { Number = effectiveClaim.IssueNumber } }
+                    ? new List<Issue> { new() { Number = effectiveClaim.IssueNumber!.Value } }
                     : claimedWork.ConsideredIssues.ToList(),
             ConsideredPullRequests = claimedWork.ConsideredPullRequests.ToList()
         };

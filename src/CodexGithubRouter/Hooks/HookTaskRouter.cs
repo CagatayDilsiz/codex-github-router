@@ -43,7 +43,7 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (changeRequest is not null)
         {
-            return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
+            return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber!.Value, changeRequest.PullRequestNumber!.Value) };
         }
 
         var currentPullRequestRecovery = actionableTasks
@@ -55,7 +55,7 @@ public static class HookTaskRouter
             return new HookTaskDecision
             {
                 SelectedTask = currentPullRequestRecovery,
-                AdditionalContext = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(currentPullRequestRecovery.IssueNumber, currentPullRequestRecovery.PullRequestNumber!.Value)
+                AdditionalContext = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(currentPullRequestRecovery.IssueNumber!.Value, currentPullRequestRecovery.PullRequestNumber!.Value)
             };
         }
 
@@ -68,11 +68,11 @@ public static class HookTaskRouter
             return new HookTaskDecision
             {
                 SelectedTask = completedRecovery,
-                AdditionalContext = ContextPromptService.GetCompletedIssueRecoveryPrompt(completedRecovery.IssueNumber)
+                AdditionalContext = ContextPromptService.GetCompletedIssueRecoveryPrompt(completedRecovery.IssueNumber!.Value)
             };
         }
 
-        var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber).ToList();
+        var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber!.Value).ToList();
         if (issuesNeedingPRLink.Count > 0)
         {
             return new HookTaskDecision { SelectedTask = actionableTasks.First(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues), AdditionalContext = ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()) };
@@ -84,7 +84,7 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (inProgressIssue is not null)
         {
-            return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber!.Value) };
         }
 
         var review = actionableTasks
@@ -106,7 +106,7 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (newIssue is not null)
         {
-            return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber!.Value) };
         }
 
         return new HookTaskDecision { BlockReason = "No actionable workflow tasks found." };

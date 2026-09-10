@@ -27,7 +27,8 @@ public static class ReviewRoutingService
         PullRequest pullRequest,
         string reviewerLogin,
         WorkClaim? activeClaim,
-        IReadOnlyList<WorkClaim>? otherClaims)
+        IReadOnlyList<WorkClaim>? otherClaims,
+        AssignmentIdentity? identity = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(pullRequest);
@@ -40,7 +41,7 @@ public static class ReviewRoutingService
         {
             EvaluatePullRequestState(configuration, pullRequest),
             EvaluateReviewRequest(configuration, pullRequest, reviewerLogin),
-            EvaluateAuthenticationIdentity(configuration, pullRequest, reviewerLogin),
+            EvaluateAuthenticationIdentity(configuration, pullRequest, reviewerLogin, identity),
             EvaluateDraft(pullRequest),
             EvaluateReviewerAuthor(pullRequest, reviewerLogin),
             EvaluateCgrState(configuration, pullRequest),
@@ -54,11 +55,11 @@ public static class ReviewRoutingService
         stages.All(stage => stage.Verdict != RoutingVerdict.HardIneligible);
 
     /// <summary>
-    /// True when the claimed review cycle is still the current GitHub review request. A submit
-    /// followed by a fast re-request produces a fresh review-request id, so the stored cycle marker
-    /// no longer matches and the old claim is treated as completed even when the reviewer appears
-    /// requested again. A legacy claim without a stored marker is kept conservatively when the
-    /// reviewer is still requested.
+    /// True when the claimed review cycle is still the current GitHub review state. The cycle
+    /// marker is the latest submitted-review node ID captured at claim acquisition: a submit (even
+    /// followed by a fast re-request) produces a fresh review identity, so the stored marker no
+    /// longer matches and the old claim is treated as completed. A legacy claim without a stored
+    /// marker is kept conservatively while the reviewer is still requested.
     /// </summary>
     public static bool IsReviewCycleCurrent(PullRequest pullRequest, string reviewerLogin, WorkClaim claim)
     {
@@ -72,59 +73,29 @@ public static class ReviewRoutingService
             return true;
         }
 
-        var currentRequestId = pullRequest.GetReviewRequestId(reviewerLogin);
-        return !string.IsNullOrWhiteSpace(currentRequestId) &&
-            string.Equals(currentRequestId, claim.ReviewCycleId, StringComparison.Ordinal);
+        var currentReviewId = pullRequest.GetLatestReviewId(reviewerLogin);
+        return !string.IsNullOrWhiteSpace(currentReviewId) &&
+            string.Equals(currentReviewId, claim.ReviewCycleId, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Release decision for an existing review claim. Fail-closed: ambiguous CGR pull-request state
-    /// returns <see cref="ReviewClaimReleaseDecision.CannotDetermine"/> instead of guessing.
+    /// Release decision for an existing review claim is owned by
+    /// <see cref="WorkflowService.EvaluateClaimedReviewWork"/>: known terminal (merged/closed),
+    /// draft, removed-reviewer, stale-cycle and contradictory CGR states produce the release-candidate
+    /// sentinel, while an <em>unknown</em> GitHub pull-request state or an ambiguous CGR state fails
+    /// closed (no release, no review work). Reconciliation maps that decision through
+    /// <see cref="WorkClaimReconciliationService.DetermineReviewAsync"/> to the fail-closed
+    /// <see cref="WorkClaimReconciliationRecommendation.UnableToDetermine"/>.
     /// </summary>
-    public static ReviewClaimReleaseDecision EvaluateClaimRelease(
-        RouterConfiguration configuration,
-        PullRequest pullRequest,
-        WorkClaim claim)
-    {
-        if (string.IsNullOrWhiteSpace(claim.ReviewerLogin))
-        {
-            return ReviewClaimReleaseDecision.WouldRelease;
-        }
+    public static bool IsUnknownState(PullRequest pullRequest) =>
+        !IsOpen(pullRequest) && !IsTerminal(pullRequest);
 
-        if (IsTerminal(pullRequest))
-        {
-            return ReviewClaimReleaseDecision.WouldRelease;
-        }
-
-        var pullRequestState = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
-        if (pullRequestState.IsAmbiguous)
-        {
-            return ReviewClaimReleaseDecision.CannotDetermine;
-        }
-
-        if (pullRequestState.MatchedLabels.ContainsKey(PullRequestState.ChangesRequested) ||
-            pullRequestState.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge) ||
-            pullRequestState.MatchedLabels.ContainsKey(PullRequestState.Deferred))
-        {
-            return ReviewClaimReleaseDecision.WouldRelease;
-        }
-
-        if (pullRequest.IsDraft)
-        {
-            return ReviewClaimReleaseDecision.WouldRelease;
-        }
-
-        return IsReviewCycleCurrent(pullRequest, claim.ReviewerLogin, claim)
-            ? ReviewClaimReleaseDecision.WouldKeep
-            : ReviewClaimReleaseDecision.WouldRelease;
-    }
+    public static bool IsOpen(PullRequest pullRequest) =>
+        string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsTerminal(PullRequest pullRequest) =>
         string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase) ||
-        (!string.Equals(pullRequest.State, "open", StringComparison.OrdinalIgnoreCase) &&
-         !string.Equals(pullRequest.State, "merged", StringComparison.OrdinalIgnoreCase) &&
-         !string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase));
+        string.Equals(pullRequest.State, "closed", StringComparison.OrdinalIgnoreCase);
 
     public static string ReviewerIdentityLabel(AssignmentIdentity? identity, string authenticatedLogin)
     {
@@ -219,8 +190,29 @@ public static class ReviewRoutingService
         };
     }
 
-    private static RoutingStage EvaluateAuthenticationIdentity(RouterConfiguration configuration, PullRequest pullRequest, string reviewerLogin)
+    private static RoutingStage EvaluateAuthenticationIdentity(RouterConfiguration configuration, PullRequest pullRequest, string reviewerLogin, AssignmentIdentity? identity)
     {
+        if (identity?.GitHubUsernames is { Count: > 0 })
+        {
+            var isConsistent = identity.GitHubUsernames.Any(login => string.Equals(login.Trim(), reviewerLogin, StringComparison.OrdinalIgnoreCase));
+            if (!isConsistent)
+            {
+                return new RoutingStage
+                {
+                    Name = "GitHub Authentication / Local Identity",
+                    Verdict = RoutingVerdict.HardIneligible,
+                    Message = $"The authenticated gh account '{reviewerLogin}' does not match the configured local identity ({string.Join(", ", identity.GitHubUsernames)}). CGR never acts as a different GitHub account; reconcile the local identity or the authenticated gh account."
+                };
+            }
+
+            return new RoutingStage
+            {
+                Name = "GitHub Authentication / Local Identity",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"The authenticated gh account '{reviewerLogin}' is a configured login of the local identity. CGR never acts as a different GitHub account."
+            };
+        }
+
         return new RoutingStage
         {
             Name = "GitHub Authentication / Local Identity",
@@ -346,11 +338,4 @@ public static class ReviewRoutingService
             Message = $"No worktree claim blocks review work for (pull request #{pullRequest.Number}, reviewer '{reviewerLogin}')."
         };
     }
-}
-
-public enum ReviewClaimReleaseDecision
-{
-    WouldRelease,
-    WouldKeep,
-    CannotDetermine
 }

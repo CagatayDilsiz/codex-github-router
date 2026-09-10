@@ -181,7 +181,7 @@ public static class AssignmentRoutingService
                 continue;
             }
 
-            if (!issueByNumber.TryGetValue(task.IssueNumber, out var issue))
+            if (task.IssueNumber is not { } taskIssueNumber || !issueByNumber.TryGetValue(taskIssueNumber, out var issue))
             {
                 eligibleTasks.Add(task);
                 continue;

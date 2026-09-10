@@ -20,6 +20,7 @@ public sealed class PullRequestSelection
     public bool IsDraft { get; init; } = false;
     public bool Author { get; init; } = false;
     public bool ReviewRequests { get; init; } = false;
+    public bool Reviews { get; init; } = false;
 
     public string ToSelectionString()
     {
@@ -39,6 +40,7 @@ public sealed class PullRequestSelection
         if (IsDraft) selectedFields.Add("isDraft");
         if (Author) selectedFields.Add("author");
         if (ReviewRequests) selectedFields.Add("reviewRequests");
+        if (Reviews) selectedFields.Add("reviews");
 
         return string.Join(',', selectedFields);
     }
@@ -60,7 +62,8 @@ public sealed class PullRequestSelection
             UpdatedAt = true,
             IsDraft = true,
             Author = true,
-            ReviewRequests = true
+            ReviewRequests = true,
+            Reviews = true
         };
     }
 
@@ -72,6 +75,7 @@ public sealed class PullRequestSelection
         Title = true,
         IsDraft = true,
         Author = true,
-        ReviewRequests = true
+        ReviewRequests = true,
+        Reviews = true
     };
 }

@@ -46,6 +46,10 @@ public sealed class PullRequest
     [JsonConverter(typeof(ReviewRequestsConverter))]
     public List<PullRequestReviewRequest> ReviewRequests { get; init; } = new();
 
+    [JsonPropertyName("reviews")]
+    [JsonConverter(typeof(PullRequestReviewsConverter))]
+    public List<PullRequestReview> Reviews { get; init; } = new();
+
     /// <summary>
     /// Logins of directly requested user reviewers (teams are excluded).
     /// </summary>
@@ -63,6 +67,20 @@ public sealed class PullRequest
         ReviewRequests
             .FirstOrDefault(request => !request.IsTeam && string.Equals(request.ReviewerLogin, reviewerLogin, StringComparison.OrdinalIgnoreCase))
             ?.Id;
+
+    /// <summary>
+    /// Node ID of the most recent review submitted by the given reviewer, if any. This is the
+    /// production-available review-cycle marker: <c>gh pr view --json reviews</c> exports the
+    /// submitted-review node ID but never the review-request node ID, so a submit followed by a
+    /// fast re-request is recognized through the submitted-review identity instead.
+    /// </summary>
+    public string? GetLatestReviewId(string reviewerLogin) =>
+        Reviews
+            .Where(review => string.Equals(review.AuthorLogin, reviewerLogin, StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(review.Id))
+            .OrderByDescending(review => review.SubmittedAt)
+            .Select(review => review.Id)
+            .FirstOrDefault();
 
     /// <summary>
     /// True when the pull request has at least one review request that is exclusively a team
@@ -89,6 +107,22 @@ public sealed class PullRequestReviewRequest
     public string ReviewerSlug { get; init; } = string.Empty;
 
     public bool IsTeam { get; init; }
+}
+
+/// <summary>
+/// A single submitted review on a pull request. Only the identity fields needed for review-cycle
+/// detection are modeled: the review node ID and the submitting author. The submitted-review node
+/// ID is the production-available review-cycle marker.
+/// </summary>
+public sealed class PullRequestReview
+{
+    public string Id { get; init; } = string.Empty;
+
+    public string AuthorLogin { get; init; } = string.Empty;
+
+    public string State { get; init; } = string.Empty;
+
+    public DateTimeOffset SubmittedAt { get; init; }
 }
 
 public sealed class PullRequestAuthorConverter : JsonConverter<GithubUser>
@@ -119,9 +153,13 @@ public sealed class PullRequestAuthorConverter : JsonConverter<GithubUser>
 }
 
 /// <summary>
-/// Tolerant deserializer for <c>gh</c> <c>reviewRequests</c> output. Different gh versions wrap
-/// the review requests in a <c>{ "nodes": [...] }</c> GraphQL connection or return a plain array,
-/// so both shapes are accepted. Requested reviewers may be users or teams.
+/// Tolerant deserializer for <c>gh</c> <c>reviewRequests</c> output. Production <c>gh</c> exports
+/// a <em>flat</em> array of reviewer objects:
+/// <c>[{ "__typename": "User", "login": "sergiou87" }]</c> (or <c>"Team"</c>/{ <c>slug</c>})
+/// with no review-request node ID and no <c>requestedReviewer</c> wrapper. Some gh/GraphQL
+/// versions wrap the requests in a <c>{ "nodes": [...] }</c> connection where each node is
+/// <c>{ "id": "...", "requestedReviewer": { ... } }</c>. Both shapes are accepted so request
+/// discovery never silently drops directly requested reviewers.
 /// </summary>
 public sealed class ReviewRequestsConverter : JsonConverter<List<PullRequestReviewRequest>>
 {
@@ -152,10 +190,20 @@ public sealed class ReviewRequestsConverter : JsonConverter<List<PullRequestRevi
                 continue;
             }
 
-            var id = TryReadString(item, "id");
-            if (!item.TryGetProperty("requestedReviewer", out var reviewer) || reviewer.ValueKind != JsonValueKind.Object)
+            // The GraphQL connection shape wraps the reviewer in a "requestedReviewer" object and
+            // carries the review-request node id on the outer node. The production flat shape IS
+            // the reviewer object itself and has no review-request id.
+            JsonElement reviewer;
+            string id;
+            if (item.TryGetProperty("requestedReviewer", out var wrapped) && wrapped.ValueKind == JsonValueKind.Object)
             {
-                continue;
+                reviewer = wrapped;
+                id = TryReadString(item, "id");
+            }
+            else
+            {
+                reviewer = item;
+                id = string.Empty;
             }
 
             var typename = TryReadString(reviewer, "__typename");
@@ -197,6 +245,94 @@ public sealed class ReviewRequestsConverter : JsonConverter<List<PullRequestRevi
             }
 
             writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+    }
+
+    private static string TryReadString(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String)
+        {
+            return property.GetString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+}
+
+/// <summary>
+/// Tolerant deserializer for <c>gh</c> <c>reviews</c> output. Production <c>gh pr view --json reviews</c>
+/// exports a flat array of submitted reviews with the review node ID, the submitting author, state and
+/// <c>submittedAt</c>; a GraphQL connection shape (<c>{ "nodes": [...] }</c>) is also accepted.
+/// </summary>
+public sealed class PullRequestReviewsConverter : JsonConverter<List<PullRequestReview>>
+{
+    public override List<PullRequestReview> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+
+        IEnumerable<JsonElement> items;
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("nodes", out var nodes) && nodes.ValueKind == JsonValueKind.Array)
+        {
+            items = nodes.EnumerateArray().ToList();
+        }
+        else if (root.ValueKind == JsonValueKind.Array)
+        {
+            items = root.EnumerateArray().ToList();
+        }
+        else
+        {
+            return new List<PullRequestReview>();
+        }
+
+        var reviews = new List<PullRequestReview>();
+        foreach (var item in items)
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            string authorLogin = string.Empty;
+            if (item.TryGetProperty("author", out var author) && author.ValueKind == JsonValueKind.Object)
+            {
+                authorLogin = TryReadString(author, "login");
+            }
+
+            DateTimeOffset submittedAt = default;
+            if (item.TryGetProperty("submittedAt", out var submitted) && submitted.ValueKind == JsonValueKind.String)
+            {
+                DateTimeOffset.TryParse(submitted.GetString(), out submittedAt);
+            }
+
+            reviews.Add(new PullRequestReview
+            {
+                Id = TryReadString(item, "id"),
+                AuthorLogin = authorLogin,
+                State = TryReadString(item, "state"),
+                SubmittedAt = submittedAt
+            });
+        }
+
+        return reviews;
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<PullRequestReview> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var review in value)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("id", review.Id);
+            writer.WritePropertyName("author");
+            writer.WriteStartObject();
+            writer.WriteString("login", review.AuthorLogin);
+            writer.WriteEndObject();
+            writer.WriteString("state", review.State);
+            writer.WriteString("submittedAt", review.SubmittedAt.ToString("O"));
             writer.WriteEndObject();
         }
 

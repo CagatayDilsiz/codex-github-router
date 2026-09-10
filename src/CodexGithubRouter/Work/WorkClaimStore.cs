@@ -138,6 +138,17 @@ public static class WorkClaimStore
             return true;
         }, cancellationToken);
 
+    public static Task<bool> ReleaseForPullRequestAsync(string gitCommonDirectory, string worktreeId, int pullRequestNumber, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claim = FindClaim(set, gitCommonDirectory, worktreeId);
+            if (claim is null || claim.PullRequestNumber != pullRequestNumber) return false;
+            set.Claims.Remove(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
+            return true;
+        }, cancellationToken);
+
     public static Task<bool> ReleaseIfMatchesAsync(string gitCommonDirectory, string worktreeId, WorkClaim expected, CancellationToken cancellationToken = default) =>
         WithLockAsync(gitCommonDirectory, async () =>
         {
@@ -162,7 +173,8 @@ public static class WorkClaimStore
             var matchesClaimedPullRequest = claim.PullRequestNumber == pullRequestNumber;
             var matchesInitialImplementation = claim.PullRequestNumber is null &&
                 claim.WorkType == WorkClaimType.Implementation &&
-                closingIssueNumbers.Contains(claim.IssueNumber) &&
+                claim.IssueNumber is { } claimedIssueNumber &&
+                closingIssueNumbers.Contains(claimedIssueNumber) &&
                 isCurrentClaimPullRequest;
             if (!matchesClaimedPullRequest && !matchesInitialImplementation) return false;
 
@@ -349,14 +361,14 @@ public static class WorkClaimStore
         switch (claim.WorkType)
         {
             case WorkClaimType.Implementation:
-                if (claim.IssueNumber <= 0)
+                if (claim.IssueNumber is not > 0)
                 {
                     throw new WorkClaimFileException("The work-claim file contains an invalid claim: an implementation claim requires an issue number.");
                 }
 
                 break;
             case WorkClaimType.ChangeRequest:
-                if (claim.IssueNumber <= 0 || !claim.PullRequestNumber.HasValue)
+                if (claim.IssueNumber is not > 0 || !claim.PullRequestNumber.HasValue)
                 {
                     throw new WorkClaimFileException("The work-claim file contains an invalid claim: a change-request claim requires an issue number and a pull request number.");
                 }

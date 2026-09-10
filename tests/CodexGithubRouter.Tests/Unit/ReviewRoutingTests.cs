@@ -145,8 +145,8 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void Matching_review_cycle_is_current()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
-        var claim = ReviewClaim(41, "bob", "n1");
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
+        var claim = ReviewClaim(41, "bob", "PRR_1");
 
         Assert.True(ReviewRoutingService.IsReviewCycleCurrent(pullRequest, "bob", claim));
     }
@@ -154,8 +154,8 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void New_review_cycle_is_not_current_for_an_older_claim()
     {
-        var pullRequest = Pr(41, "alice", ("n2", "bob", false, string.Empty));
-        var claim = ReviewClaim(41, "bob", "n1");
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n2", "bob", false, string.Empty) }, reviews: ("PRR_2", "bob", "COMMENTED", "2026-07-28T12:05:00Z"));
+        var claim = ReviewClaim(41, "bob", "PRR_1");
 
         Assert.False(ReviewRoutingService.IsReviewCycleCurrent(pullRequest, "bob", claim));
     }
@@ -163,52 +163,42 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void Legacy_claim_without_a_cycle_marker_stays_current_while_requested()
     {
-        var pullRequest = Pr(41, "alice", ("n2", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n2", "bob", false, string.Empty) }, reviews: ("PRR_2", "bob", "COMMENTED", "2026-07-28T12:05:00Z"));
         var claim = ReviewClaim(41, "bob", reviewCycleId: null);
 
         Assert.True(ReviewRoutingService.IsReviewCycleCurrent(pullRequest, "bob", claim));
     }
 
     [Fact]
-    public void EvaluateClaimRelease_keeps_the_current_cycle()
+    public void Unknown_pull_request_state_has_no_cycle_until_production_decides_release()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, state: "superseded", reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        var decision = ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, pullRequest, ReviewClaim(41, "bob", "n1"));
-
-        Assert.Equal(ReviewClaimReleaseDecision.WouldKeep, decision);
+        Assert.False(ReviewRoutingService.IsOpen(pullRequest));
+        Assert.False(ReviewRoutingService.IsTerminal(pullRequest));
+        Assert.True(ReviewRoutingService.IsUnknownState(pullRequest));
     }
 
     [Fact]
-    public void EvaluateClaimRelease_releases_a_stale_cycle_after_re_request()
+    public void EvaluateClaimedReviewWork_fails_closed_for_an_unknown_pull_request_state()
     {
-        var pullRequest = Pr(41, "alice", ("n2", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, state: "superseded", reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        var decision = ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, pullRequest, ReviewClaim(41, "bob", "n1"));
+        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "PRR_1"), pullRequest);
 
-        Assert.Equal(ReviewClaimReleaseDecision.WouldRelease, decision);
+        Assert.False(response.IsSuccessful);
+        Assert.DoesNotContain(response.Tasks, task => task.Type == WorkflowItemType.AwaitingReview);
     }
 
     [Fact]
-    public void EvaluateClaimRelease_releases_terminal_draft_and_contradictory_states()
+    public async Task DetermineReviewAsync_unable_to_determine_for_an_unknown_pull_request_state()
     {
-        var terminal = Pr(41, "alice", state: "merged", requests: ("n1", "bob", false, string.Empty));
-        var draft = Pr(42, "alice", isDraft: true, requests: ("n2", "bob", false, string.Empty));
-        var changesRequested = Pr(43, "alice", label: "codex:cr", requests: ("n3", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, state: "superseded", reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        Assert.Equal(ReviewClaimReleaseDecision.WouldRelease, ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, terminal, ReviewClaim(41, "bob", "n1")));
-        Assert.Equal(ReviewClaimReleaseDecision.WouldRelease, ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, draft, ReviewClaim(42, "bob", "n2")));
-        Assert.Equal(ReviewClaimReleaseDecision.WouldRelease, ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, changesRequested, ReviewClaim(43, "bob", "n3")));
-    }
+        var recommendation = await WorkClaimReconciliationService.DetermineReviewAsync(
+            ReviewClaim(41, "bob", "PRR_1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
 
-    [Fact]
-    public void EvaluateClaimRelease_cannot_determine_ambiguous_state()
-    {
-        var pullRequest = Pr(41, "alice", labels: new[] { "codex:cr", "codex:merge-ready" }, requests: ("n1", "bob", false, string.Empty));
-
-        var decision = ReviewRoutingService.EvaluateClaimRelease(EnabledConfiguration, pullRequest, ReviewClaim(41, "bob", "n1"));
-
-        Assert.Equal(ReviewClaimReleaseDecision.CannotDetermine, decision);
+        Assert.Equal(WorkClaimReconciliationRecommendation.UnableToDetermine, recommendation);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -242,7 +232,7 @@ public sealed class ReviewRoutingTests
     [Fact]
     public async Task CheckReviewWorkAsync_builds_a_review_task_for_the_requested_reviewer()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
         var response = await WorkflowService.CheckReviewWorkAsync(
             EnabledConfiguration,
@@ -256,8 +246,8 @@ public sealed class ReviewRoutingTests
         Assert.Equal(WorkflowItemType.PullRequestReview, task.Type);
         Assert.Equal(41, task.PullRequestNumber);
         Assert.Equal("bob", task.ReviewerLogin);
-        Assert.Equal("n1", task.ReviewCycleId);
-        Assert.Equal(0, task.IssueNumber);
+        Assert.Equal("PRR_1", task.ReviewCycleId);
+        Assert.Null(task.IssueNumber);
         var consideredPullRequest = Assert.Single(response.ConsideredPullRequests);
         Assert.Equal(41, consideredPullRequest.Number);
     }
@@ -325,9 +315,25 @@ public sealed class ReviewRoutingTests
     }
 
     [Fact]
+    public async Task CheckReviewWorkAsync_fails_closed_when_the_authenticated_login_matches_no_local_identity_login()
+    {
+        var response = await WorkflowService.CheckReviewWorkAsync(
+            EnabledConfiguration,
+            "wd",
+            assignmentIdentity: new AssignmentIdentity { GitHubUsernames = new List<string> { "alias-1", "alias-2" } },
+            getAuthenticatedLogin: (_, _) => Task.FromResult<string?>("authenticated-reviewer"),
+            getReviewRequestedPullRequestNumbers: (_, _, _) => throw new InvalidOperationException("The identity gate must reject the mismatch before any discovery."),
+            getPullRequest: (_, _, _) => throw new InvalidOperationException("The identity gate must reject the mismatch before any fetch."));
+
+        Assert.False(response.IsSuccessful);
+        Assert.Contains("authenticated-reviewer", response.Message);
+        Assert.Contains("alias-1", response.Message);
+    }
+
+    [Fact]
     public async Task CheckReviewWorkAsync_considers_assignment_identity_logins_and_the_authenticated_login()
     {
-        var identity = new AssignmentIdentity { GitHubUsernames = new List<string> { "alias-1", "alias-2" } };
+        var identity = new AssignmentIdentity { GitHubUsernames = new List<string> { "alias-1", "alias-2", "authenticated-reviewer" } };
         var queriedLogins = new List<string>();
 
         await WorkflowService.CheckReviewWorkAsync(
@@ -351,13 +357,13 @@ public sealed class ReviewRoutingTests
     [Fact]
     public async Task CheckReviewWorkAsync_deduplicates_pull_requests_across_candidate_logins()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
         var fetched = new List<int>();
 
         var response = await WorkflowService.CheckReviewWorkAsync(
             EnabledConfiguration,
             "wd",
-            assignmentIdentity: new AssignmentIdentity { GitHubUsernames = new List<string> { "alias-1" } },
+            assignmentIdentity: new AssignmentIdentity { GitHubUsernames = new List<string> { "alias-1", "bob" } },
             getAuthenticatedLogin: (_, _) => Task.FromResult<string?>("bob"),
             getReviewRequestedPullRequestNumbers: (_, login, _) => Task.FromResult(login == "bob" ? new List<int> { 41 } : new List<int> { 41 }),
             getPullRequest: (_, number, _) =>
@@ -378,16 +384,16 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void EvaluateClaimedReviewWork_current_cycle_continues_the_review_task()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "n1"), pullRequest);
+        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "PRR_1"), pullRequest);
 
         Assert.True(response.IsSuccessful);
         var task = Assert.Single(response.Tasks);
         Assert.Equal(WorkflowItemType.PullRequestReview, task.Type);
         Assert.Equal(41, task.PullRequestNumber);
         Assert.Equal("bob", task.ReviewerLogin);
-        Assert.Equal("n1", task.ReviewCycleId);
+        Assert.Equal("PRR_1", task.ReviewCycleId);
     }
 
     [Theory]
@@ -428,9 +434,9 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void EvaluateClaimedReviewWork_stale_cycle_releases_the_claim_for_re_request()
     {
-        var pullRequest = Pr(41, "alice", ("n2", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n2", "bob", false, string.Empty) }, reviews: ("PRR_2", "bob", "COMMENTED", "2026-07-28T12:05:00Z"));
 
-        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "n1"), pullRequest);
+        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "PRR_1"), pullRequest);
 
         Assert.True(response.IsSuccessful);
         Assert.Contains(response.Tasks, task => task.Type == WorkflowItemType.AwaitingReview);
@@ -439,9 +445,9 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void EvaluateClaimedReviewWork_contradictory_cgr_state_releases_the_claim()
     {
-        var pullRequest = Pr(41, "alice", label: "codex:cr", requests: ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, labels: new[] { "codex:cr" }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "n1"), pullRequest);
+        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "PRR_1"), pullRequest);
 
         Assert.True(response.IsSuccessful);
         Assert.Contains(response.Tasks, task => task.Type == WorkflowItemType.AwaitingReview);
@@ -450,9 +456,9 @@ public sealed class ReviewRoutingTests
     [Fact]
     public void EvaluateClaimedReviewWork_ambiguous_cgr_state_fails_closed()
     {
-        var pullRequest = Pr(41, "alice", labels: new[] { "codex:cr", "codex:merge-ready" }, requests: ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, labels: new[] { "codex:cr", "codex:merge-ready" }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
-        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "n1"), pullRequest);
+        var response = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, ReviewClaim(41, "bob", "PRR_1"), pullRequest);
 
         Assert.False(response.IsSuccessful);
         Assert.DoesNotContain(response.Tasks, task => task.Type == WorkflowItemType.AwaitingReview);
@@ -586,10 +592,10 @@ public sealed class ReviewRoutingTests
     [Fact]
     public async Task DetermineReviewAsync_keeps_a_current_cycle_request()
     {
-        var pullRequest = Pr(41, "alice", ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
         var recommendation = await WorkClaimReconciliationService.DetermineReviewAsync(
-            ReviewClaim(41, "bob", "n1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
+            ReviewClaim(41, "bob", "PRR_1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
 
         Assert.Equal(WorkClaimReconciliationRecommendation.WouldKeep, recommendation);
     }
@@ -600,7 +606,7 @@ public sealed class ReviewRoutingTests
         var pullRequest = Pr(41, "alice");
 
         var recommendation = await WorkClaimReconciliationService.DetermineReviewAsync(
-            ReviewClaim(41, "bob", "n1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
+            ReviewClaim(41, "bob", "PRR_1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
 
         Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
     }
@@ -608,10 +614,10 @@ public sealed class ReviewRoutingTests
     [Fact]
     public async Task DetermineReviewAsync_releases_a_stale_cycle_after_re_request()
     {
-        var pullRequest = Pr(41, "alice", ("n2", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n2", "bob", false, string.Empty) }, reviews: ("PRR_2", "bob", "COMMENTED", "2026-07-28T12:05:00Z"));
 
         var recommendation = await WorkClaimReconciliationService.DetermineReviewAsync(
-            ReviewClaim(41, "bob", "n1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
+            ReviewClaim(41, "bob", "PRR_1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
 
         Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
     }
@@ -630,10 +636,10 @@ public sealed class ReviewRoutingTests
     [Fact]
     public async Task DetermineReviewAsync_releases_contradictory_cgr_state()
     {
-        var pullRequest = Pr(41, "alice", label: "codex:deferred", requests: ("n1", "bob", false, string.Empty));
+        var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, labels: new[] { "codex:deferred" }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
 
         var recommendation = await WorkClaimReconciliationService.DetermineReviewAsync(
-            ReviewClaim(41, "bob", "n1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
+            ReviewClaim(41, "bob", "PRR_1"), EnabledConfiguration, _ => Task.FromResult(pullRequest));
 
         Assert.Equal(WorkClaimReconciliationRecommendation.WouldRelease, recommendation);
     }
@@ -663,6 +669,26 @@ public sealed class ReviewRoutingTests
             ReviewClaim(41, "bob", "n1"), EnabledConfiguration, _ => throw new InvalidOperationException("transient GitHub failure"));
 
         Assert.Equal(WorkClaimReconciliationRecommendation.UnableToDetermine, recommendation);
+    }
+
+    [Fact]
+    public void Reconciliation_default_pull_request_selection_includes_review_delivery_fields()
+    {
+        // Regression: an earlier default used a review-blind selection without reviewRequests,
+        // isDraft, author or reviews, which made the reconciliation see an empty requested-reviewer
+        // list and release a live review claim. The default must stay a superset of the review
+        // evaluation fields plus the issue-claim fields.
+        var selectionString = WorkClaimReconciliationService.DefaultPullRequestSelection.ToSelectionString();
+
+        Assert.Contains("reviewRequests", selectionString);
+        Assert.Contains("reviews", selectionString);
+        Assert.Contains("isDraft", selectionString);
+        Assert.Contains("author", selectionString);
+        Assert.Contains("state", selectionString);
+        Assert.Contains("labels", selectionString);
+        Assert.Contains("closingIssuesReferences", selectionString);
+        Assert.Contains("createdAt", selectionString);
+        Assert.Contains("headRefName", selectionString);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -855,6 +881,53 @@ public sealed class ReviewRoutingTests
         Assert.False(request.IsTeam);
     }
 
+    [Fact]
+    public void ReviewRequests_converter_accepts_the_real_gh_flat_user_shape()
+    {
+        // gh pr view/list --json reviewRequests emits a flat array where the item IS the
+        // reviewer object (__typename + login for a user, __typename + slug for a team). No
+        // request id is exported, so the review-cycle marker comes from submitted reviews.
+        var pullRequest = JsonSerializer.Deserialize<PullRequest>("""
+        {
+          "number": 41,
+          "reviewRequests": [
+            { "__typename": "User", "login": "bob" },
+            { "__typename": "Team", "slug": "codex-reviewers" }
+          ]
+        }
+        """);
+
+        Assert.NotNull(pullRequest);
+        Assert.Equal(2, pullRequest!.ReviewRequests.Count);
+        Assert.Contains(pullRequest.ReviewRequests, request => request.ReviewerLogin == "bob" && !request.IsTeam);
+        Assert.Contains(pullRequest.ReviewRequests, request => request.ReviewerSlug == "codex-reviewers" && request.IsTeam);
+        Assert.Equal("bob", Assert.Single(pullRequest.RequestedUserReviewerLogins));
+        Assert.Equal("codex-reviewers", Assert.Single(pullRequest.RequestedTeamReviewerSlugs));
+    }
+
+    [Fact]
+    public void Reviews_converter_accepts_the_real_gh_flat_shape()
+    {
+        // gh pr view --json reviews emits a flat array with the review node id, author login,
+        // state and submittedAt. The review node id is the review-cycle marker.
+        var pullRequest = JsonSerializer.Deserialize<PullRequest>("""
+        {
+          "number": 41,
+          "reviews": [
+            { "id": "PRR_1", "author": { "login": "alice" }, "state": "COMMENTED", "submittedAt": "2026-07-28T11:00:00Z" },
+            { "id": "PRR_2", "author": { "login": "bob" }, "state": "APPROVED", "submittedAt": "2026-07-28T12:00:00Z" },
+            { "id": "PRR_3", "author": { "login": "alice" }, "state": "CHANGES_REQUESTED", "submittedAt": "2026-07-28T13:00:00Z" }
+          ]
+        }
+        """);
+
+        Assert.NotNull(pullRequest);
+        Assert.Equal(3, pullRequest!.Reviews.Count);
+        Assert.Equal("PRR_3", pullRequest.GetLatestReviewId("alice"));
+        Assert.Equal("PRR_2", pullRequest.GetLatestReviewId("bob"));
+        Assert.Null(pullRequest.GetLatestReviewId("carol"));
+    }
+
     private static WorkClaim ReviewClaim(int pullRequestNumber, string reviewerLogin, string? reviewCycleId)
     {
         var now = DateTimeOffset.UtcNow;
@@ -919,6 +992,45 @@ public sealed class ReviewRoutingTests
             Author = pullRequest.Author,
             Labels = labels.Select(label => new GithubLabel { Name = label }).ToList(),
             ReviewRequests = pullRequest.ReviewRequests
+        };
+    }
+
+    private static PullRequest PrWithReviews(
+        int number,
+        string authorLogin,
+        (string Id, string ReviewerLogin, bool IsTeam, string TeamSlug)[] requests,
+        string[]? labels = null,
+        string state = "open",
+        params (string Id, string AuthorLogin, string State, string SubmittedAt)[] reviews)
+    {
+        return new PullRequest
+        {
+            Number = number,
+            State = state,
+            Title = $"Title {number}",
+            IsDraft = false,
+            Author = new GithubUser { Login = authorLogin },
+            Labels = labels is null || labels.Length == 0
+                ? new List<GithubLabel>()
+                : labels.Select(label => new GithubLabel { Name = label }).ToList(),
+            ReviewRequests = requests
+                .Select(request => new PullRequestReviewRequest
+                {
+                    Id = request.Id,
+                    ReviewerLogin = request.ReviewerLogin,
+                    ReviewerSlug = request.TeamSlug,
+                    IsTeam = request.IsTeam
+                })
+                .ToList(),
+            Reviews = reviews
+                .Select(review => new PullRequestReview
+                {
+                    Id = review.Id,
+                    AuthorLogin = review.AuthorLogin,
+                    State = review.State,
+                    SubmittedAt = DateTimeOffset.Parse(review.SubmittedAt)
+                })
+                .ToList()
         };
     }
 

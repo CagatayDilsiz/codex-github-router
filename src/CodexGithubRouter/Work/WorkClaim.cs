@@ -30,10 +30,11 @@ public sealed class WorkClaim
     public string OwnerSessionId { get; init; } = string.Empty;
 
     /// <summary>
-    /// Issue number for implementation and change-request claims. For review claims this may be
-    /// 0 when the review work has no associated issue.
+    /// Issue number for implementation and change-request claims, where it is always required.
+    /// Review work is PR-native: its claim is keyed on (PullRequestNumber, ReviewerLogin) and the
+    /// issue number is optional/absent (<c>null</c>) when the review has no associated issue.
     /// </summary>
-    public int IssueNumber { get; init; }
+    public int? IssueNumber { get; init; }
 
     public int? PullRequestNumber { get; init; }
     public WorkClaimType WorkType { get; init; }

@@ -3,7 +3,13 @@ namespace CodexGithubRouter.Workflow;
 public sealed class WorkflowItem
 {
     public WorkflowItemType Type { get; init; }
-    public int IssueNumber { get; init; }
+
+    /// <summary>
+    /// Issue number for issue-derived workflow items (new/in-progress/completed/recovery/gate
+    /// tasks). Review work is PR-native and leaves this <c>null</c> when the pull request is not
+    /// required to close an issue.
+    /// </summary>
+    public int? IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
     public WorkflowTaskStatus Status { get; init; } = new WorkflowTaskStatus();
 

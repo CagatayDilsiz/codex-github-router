@@ -237,7 +237,7 @@ public static class HookService
         // Close issues marked for closure before evaluating hook blockers.
         foreach (var closingIssueTask in actionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue))
         {
-            await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber, CancellationToken.None);
+            await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber!.Value, CancellationToken.None);
         }
 
         if (decision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(decision.SelectedTask))
@@ -259,7 +259,7 @@ public static class HookService
             Issue? claimedIssue = null;
             if (!isReviewAcquisition)
             {
-                claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
+                claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber!.Value, CancellationToken.None);
             }
 
             WorkerEligibility eligibility;

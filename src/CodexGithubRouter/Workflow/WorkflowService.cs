@@ -13,7 +13,7 @@ public static class WorkflowService
             return await CheckClaimedReviewWorkAsync(configuration, workingDirectory, claim);
         }
 
-        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
+        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber!.Value, CancellationToken.None);
         var response = await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
             workingDirectory,
             pullRequestNumber,
@@ -179,6 +179,13 @@ public static class WorkflowService
 
     public static WorkflowResponse EvaluateClaimedReviewWork(RouterConfiguration configuration, WorkClaim claim, PullRequest pullRequest)
     {
+        if (ReviewRoutingService.IsUnknownState(pullRequest))
+        {
+            // Fail closed: an unknown GitHub state is neither "reviewable" nor definitively done.
+            // The claim is not released and no review work is routed.
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active review claim for pull request #{pullRequest.Number} cannot be verified: the pull request is in an unknown state '{pullRequest.State}'. No review work is routed and the claim is not released." };
+        }
+
         if (ReviewRoutingService.IsTerminal(pullRequest))
         {
             return ReviewReleaseCandidate(claim, $"Pull request #{pullRequest.Number} is {pullRequest.State}; the review claim is releasable.");
@@ -223,7 +230,7 @@ public static class WorkflowService
                     Type = WorkflowItemType.PullRequestReview,
                     PullRequestNumber = pullRequest.Number,
                     ReviewerLogin = reviewerLogin,
-                    ReviewCycleId = pullRequest.GetReviewRequestId(reviewerLogin),
+                    ReviewCycleId = pullRequest.GetLatestReviewId(reviewerLogin),
                     Status = new WorkflowTaskStatus { Message = $"Review pull request #{pullRequest.Number} as requested reviewer '{reviewerLogin}'." }
                 }
             },
@@ -264,6 +271,16 @@ public static class WorkflowService
         catch (Exception exception)
         {
             return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing is enabled but the authenticated GitHub account could not be resolved: {exception.Message}" };
+        }
+
+        // When a CGR local identity is in force, CGR's review-work identity must be one of that
+        // identity's GitHub usernames: the authenticated gh account IS the reviewer CGR acts as,
+        // and CGR never acts as a different GitHub account. A mismatch fails closed with an
+        // explainable message instead of silently reviewing as an unauthenticated/other account.
+        if (assignmentIdentity?.GitHubUsernames is { Count: > 0 } &&
+            !assignmentIdentity.GitHubUsernames.Any(login => string.Equals(login, authenticatedLogin, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing is enabled but the authenticated gh account '{authenticatedLogin}' does not match the configured local identity ({string.Join(", ", assignmentIdentity.GitHubUsernames)}). CGR will not act as a different GitHub account; reconcile the local identity or the authenticated gh account." };
         }
 
         var candidateLogins = new List<string>();
@@ -328,7 +345,7 @@ public static class WorkflowService
         var tasks = new List<WorkflowItem>();
         foreach (var pullRequest in consideredPullRequests)
         {
-            var stages = ReviewRoutingService.EvaluateStages(configuration, pullRequest, authenticatedLogin, null, null);
+            var stages = ReviewRoutingService.EvaluateStages(configuration, pullRequest, authenticatedLogin, null, null, assignmentIdentity);
             if (!ReviewRoutingService.IsEligible(stages))
             {
                 continue;
@@ -337,10 +354,9 @@ public static class WorkflowService
             tasks.Add(new WorkflowItem
             {
                 Type = WorkflowItemType.PullRequestReview,
-                IssueNumber = 0,
                 PullRequestNumber = pullRequest.Number,
                 ReviewerLogin = authenticatedLogin,
-                ReviewCycleId = pullRequest.GetReviewRequestId(authenticatedLogin),
+                ReviewCycleId = pullRequest.GetLatestReviewId(authenticatedLogin),
                 Status = new WorkflowTaskStatus { Message = $"Review pull request #{pullRequest.Number} as requested reviewer '{authenticatedLogin}'." }
             });
         }

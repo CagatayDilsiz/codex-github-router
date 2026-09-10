@@ -130,7 +130,7 @@ public static class ExplainCommandHandler
             return 1;
         }
 
-        var explanation = RoutingExplanationService.ExplainReview(plan, pullRequest, reviewerLogin);
+        var explanation = RoutingExplanationService.ExplainReview(plan, pullRequest, reviewerLogin, plan.AssignmentIdentity);
         dependencies.Output.WriteLine(RoutingExplanationService.FormatReviewExplanation(explanation));
         return 0;
     }
@@ -153,7 +153,7 @@ public static class ExplainCommandHandler
             var reviewerLogin = await ResolveAuthenticatedReviewerLoginAsync(workingDirectory, dependencies, cancellationToken);
             if (!string.IsNullOrWhiteSpace(reviewerLogin))
             {
-                var reviewExplanations = RoutingExplanationService.ExplainReviewAll(plan, reviewerLogin);
+                var reviewExplanations = RoutingExplanationService.ExplainReviewAll(plan, reviewerLogin, plan.AssignmentIdentity);
                 if (reviewExplanations.Count > 0)
                 {
                     if (lines.Count > 0)
