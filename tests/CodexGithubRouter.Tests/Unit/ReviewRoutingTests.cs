@@ -180,6 +180,45 @@ public sealed class ReviewRoutingTests
     }
 
     [Fact]
+    public void First_ever_review_with_a_null_baseline_starts_a_new_cycle_once_a_review_is_submitted()
+    {
+        // Bob has never reviewed PR #41: the claim is captured with baseline null but the flag set,
+        // so the pre-submission state is still the same cycle across a fast re-request...
+        var beforeSubmission = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) });
+        var claim = ReviewClaim(41, "bob", reviewCycleId: null, reviewBaselineCaptured: true);
+
+        Assert.True(ReviewRoutingService.IsReviewCycleCurrent(beforeSubmission, "bob", claim));
+
+        // ...but the first submitted review (PRR_1) followed by an immediate re-request completes
+        // the old cycle: the claim is released and a fresh cycle can be claimed.
+        var afterSubmission = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
+        Assert.False(ReviewRoutingService.IsReviewCycleCurrent(afterSubmission, "bob", claim));
+
+        var evaluated = WorkflowService.EvaluateClaimedReviewWork(EnabledConfiguration, claim, afterSubmission);
+        Assert.True(evaluated.IsSuccessful);
+        Assert.Contains(evaluated.Tasks, task => task.Type == WorkflowItemType.AwaitingReview);
+
+        Assert.True(ReviewRoutingService.IsReviewCycleCurrent(afterSubmission, "bob", ReviewClaim(41, "bob", "PRR_1")));
+    }
+
+    [Fact]
+    public void Pending_review_is_never_used_as_the_submitted_review_baseline()
+    {
+        // A draft/PENDING review carries no submitted timestamp and must not become a cycle marker.
+        var withPending = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_pending", "bob", "PENDING", "0001-01-01T00:00:00Z"));
+
+        Assert.Null(withPending.GetLatestReviewId("bob"));
+
+        var claim = ReviewClaim(41, "bob", reviewCycleId: null, reviewBaselineCaptured: true);
+        Assert.True(ReviewRoutingService.IsReviewCycleCurrent(withPending, "bob", claim));
+
+        // Once the pending review is actually submitted it becomes the baseline and closes the cycle.
+        var afterSubmission = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
+        Assert.Equal("PRR_1", afterSubmission.GetLatestReviewId("bob"));
+        Assert.False(ReviewRoutingService.IsReviewCycleCurrent(afterSubmission, "bob", claim));
+    }
+
+    [Fact]
     public void EvaluateClaimedReviewWork_fails_closed_for_an_unknown_pull_request_state()
     {
         var pullRequest = PrWithReviews(41, "alice", new[] { ("n1", "bob", false, string.Empty) }, state: "superseded", reviews: ("PRR_1", "bob", "APPROVED", "2026-07-28T12:00:00Z"));
@@ -928,7 +967,7 @@ public sealed class ReviewRoutingTests
         Assert.Null(pullRequest.GetLatestReviewId("carol"));
     }
 
-    private static WorkClaim ReviewClaim(int pullRequestNumber, string reviewerLogin, string? reviewCycleId)
+    private static WorkClaim ReviewClaim(int pullRequestNumber, string reviewerLogin, string? reviewCycleId, bool? reviewBaselineCaptured = null)
     {
         var now = DateTimeOffset.UtcNow;
         return new WorkClaim
@@ -941,6 +980,7 @@ public sealed class ReviewRoutingTests
             WorkType = WorkClaimType.Review,
             ReviewerLogin = reviewerLogin,
             ReviewCycleId = reviewCycleId,
+            ReviewBaselineCaptured = reviewBaselineCaptured ?? !string.IsNullOrWhiteSpace(reviewCycleId),
             ClaimedAt = now,
             LastUpdatedAt = now
         };

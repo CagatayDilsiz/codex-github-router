@@ -56,10 +56,14 @@ public static class ReviewRoutingService
 
     /// <summary>
     /// True when the claimed review cycle is still the current GitHub review state. The cycle
-    /// marker is the latest submitted-review node ID captured at claim acquisition: a submit (even
-    /// followed by a fast re-request) produces a fresh review identity, so the stored marker no
-    /// longer matches and the old claim is treated as completed. A legacy claim without a stored
-    /// marker is kept conservatively while the reviewer is still requested.
+    /// marker is the node ID of the reviewer's latest <em>submitted</em> review captured at claim
+    /// acquisition: a submit (even followed by a fast re-request) produces a fresh review identity,
+    /// so the stored marker no longer matches and the old claim is treated as completed.
+    /// A freshly acquired claim with no prior submitted review (<see cref="WorkClaim.ReviewBaselineCaptured"/>
+    /// <c>true</c>, marker <c>null</c>) is current <em>only</em> while the reviewer still has no
+    /// submitted review: the first submitted review is a new cycle. A legacy claim that predates
+    /// cycle baselines (<see cref="WorkClaim.ReviewBaselineCaptured"/> <c>false</c>) is kept
+    /// conservatively current while the reviewer is requested.
     /// </summary>
     public static bool IsReviewCycleCurrent(PullRequest pullRequest, string reviewerLogin, WorkClaim claim)
     {
@@ -68,12 +72,21 @@ public static class ReviewRoutingService
             return false;
         }
 
-        if (string.IsNullOrWhiteSpace(claim.ReviewCycleId))
+        if (!claim.ReviewBaselineCaptured)
         {
             return true;
         }
 
         var currentReviewId = pullRequest.GetLatestReviewId(reviewerLogin);
+
+        if (string.IsNullOrWhiteSpace(claim.ReviewCycleId))
+        {
+            // Baseline captured and no prior submitted review existed at acquisition. Still the
+            // same cycle while the reviewer remains re-requested without having submitted a review;
+            // the first submitted review is a new cycle.
+            return string.IsNullOrWhiteSpace(currentReviewId);
+        }
+
         return !string.IsNullOrWhiteSpace(currentReviewId) &&
             string.Equals(currentReviewId, claim.ReviewCycleId, StringComparison.Ordinal);
     }

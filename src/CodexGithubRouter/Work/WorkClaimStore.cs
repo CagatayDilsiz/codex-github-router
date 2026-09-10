@@ -114,7 +114,8 @@ public static class WorkClaimStore
                 ClaimedAt = existing?.ClaimedAt ?? now,
                 LastUpdatedAt = now,
                 ReviewerLogin = requested.ReviewerLogin ?? existing?.ReviewerLogin,
-                ReviewCycleId = requested.ReviewCycleId ?? existing?.ReviewCycleId
+                ReviewCycleId = requested.ReviewCycleId ?? existing?.ReviewCycleId,
+                ReviewBaselineCaptured = requested.ReviewBaselineCaptured || existing is { ReviewBaselineCaptured: true }
             };
 
             if (existing is not null)
@@ -450,7 +451,8 @@ public static class WorkClaimStore
         ClaimedAt = claim.ClaimedAt,
         LastUpdatedAt = claim.LastUpdatedAt,
         ReviewerLogin = claim.ReviewerLogin,
-        ReviewCycleId = claim.ReviewCycleId
+        ReviewCycleId = claim.ReviewCycleId,
+        ReviewBaselineCaptured = claim.ReviewBaselineCaptured
     };
 
     private static bool SameWork(WorkClaim left, WorkClaim right)

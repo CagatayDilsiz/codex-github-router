@@ -299,7 +299,8 @@ public static class HookService
                 Model = currentModel,
                 ClaimedIssueUpdatedAt = claimedIssue?.UpdatedAt ?? default,
                 ReviewerLogin = decision.SelectedTask.ReviewerLogin,
-                ReviewCycleId = decision.SelectedTask.ReviewCycleId
+                ReviewCycleId = decision.SelectedTask.ReviewCycleId,
+                ReviewBaselineCaptured = claimType == WorkClaimType.Review
             });
             if (!acquisition.Acquired)
             {

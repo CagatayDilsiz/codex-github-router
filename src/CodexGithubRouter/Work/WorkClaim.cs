@@ -52,10 +52,22 @@ public sealed class WorkClaim
 
     /// <summary>
     /// Stable marker captured at review-claim acquisition that identifies the review cycle.
-    /// Used to distinguish an in-progress cycle from a later re-request after the reviewer
-    /// submitted a review. For example, this may be the GitHub review-request node ID.
+    /// For example, this is the node ID of the reviewer's latest <em>submitted</em> review at
+    /// acquisition time, or <c>null</c> when the reviewer has never submitted a review on the
+    /// pull request. Used to distinguish an in-progress cycle from a later re-request after the
+    /// reviewer submitted a review.
     /// </summary>
     public string? ReviewCycleId { get; init; }
+
+    /// <summary>
+    /// True when the review-cycle baseline was captured at claim acquisition. Distinguishes a
+    /// freshly acquired claim with <em>no prior submitted review</em> (<c>true</c>,
+    /// <see cref="ReviewCycleId"/> <c>null</c> — any first submitted review starts a new cycle)
+    /// from a legacy claim that predates review-cycle baselines (<c>false</c> — kept
+    /// conservatively current while the reviewer is requested). Existing stored claims without the
+    /// field deserialize as <c>false</c>, preserving the legacy behavior.
+    /// </summary>
+    public bool ReviewBaselineCaptured { get; init; }
 }
 
 public sealed class WorkClaimAcquisitionResult

@@ -69,15 +69,19 @@ public sealed class PullRequest
             ?.Id;
 
     /// <summary>
-    /// Node ID of the most recent review submitted by the given reviewer, if any. This is the
-    /// production-available review-cycle marker: <c>gh pr view --json reviews</c> exports the
+    /// Node ID of the most recent review <em>submitted</em> by the given reviewer, if any. This is
+    /// the production-available review-cycle marker: <c>gh pr view --json reviews</c> exports the
     /// submitted-review node ID but never the review-request node ID, so a submit followed by a
-    /// fast re-request is recognized through the submitted-review identity instead.
+    /// fast re-request is recognized through the submitted-review identity instead. Only genuinely
+    /// submitted reviews count — draft <c>PENDING</c> reviews carry no submitted timestamp and must
+    /// never become a cycle marker.
     /// </summary>
     public string? GetLatestReviewId(string reviewerLogin) =>
         Reviews
             .Where(review => string.Equals(review.AuthorLogin, reviewerLogin, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(review.Id))
+                !string.IsNullOrWhiteSpace(review.Id) &&
+                review.SubmittedAt != default &&
+                !string.Equals(review.State, "PENDING", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(review => review.SubmittedAt)
             .Select(review => review.Id)
             .FirstOrDefault();

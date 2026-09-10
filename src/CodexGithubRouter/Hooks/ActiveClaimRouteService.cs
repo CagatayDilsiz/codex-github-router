@@ -146,6 +146,7 @@ public sealed class ActiveClaimRouteService
                         : WorkClaimType.Implementation,
                 ReviewerLogin = decision.SelectedTask.ReviewerLogin,
                 ReviewCycleId = decision.SelectedTask.ReviewCycleId,
+                ReviewBaselineCaptured = decision.SelectedTask.Type == WorkflowItemType.PullRequestReview,
                 Model = currentModel
             });
             if (!acquisition.Acquired)
