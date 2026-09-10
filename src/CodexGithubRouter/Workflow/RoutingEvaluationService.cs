@@ -30,6 +30,12 @@ public sealed class RoutingEvaluationDependencies
             currentModel: currentModel,
             assignmentIdentity: assignmentIdentity);
 
+    public Func<RouterConfiguration, string, AssignmentIdentity?, Task<WorkflowResponse>> CheckReviewWorkAsync { get; init; }
+        = (configuration, workingDirectory, assignmentIdentity) => WorkflowService.CheckReviewWorkAsync(
+            configuration,
+            workingDirectory,
+            assignmentIdentity);
+
     public Func<RouterConfiguration, string, WorkClaim, string?, Task<WorkflowResponse>> CheckClaimedWorkAsync { get; init; }
         = (configuration, workingDirectory, claim, currentModel) => WorkflowService.CheckClaimedWorkAsync(
             configuration,
@@ -50,6 +56,7 @@ public sealed class RoutingEvaluationDependencies
         CheckCompletedIssuesAsync = CheckCompletedIssuesAsync,
         CheckInProgressIssuesAsync = CheckInProgressIssuesAsync,
         CheckNewIssuesAsync = CheckNewIssuesAsync,
+        CheckReviewWorkAsync = CheckReviewWorkAsync,
         CheckClaimedWorkAsync = CheckClaimedWorkAsync,
         ResolveAssignmentIdentityAsync = resolver,
         EvaluateClaimReconciliationAsync = EvaluateClaimReconciliationAsync
@@ -167,7 +174,13 @@ public static class RoutingEvaluationService
                 return RoutingEvaluationResult.Failure(newIssueTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
             }
 
-            var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask };
+            var reviewWorkTask = await dependencies.CheckReviewWorkAsync(configuration, workingDirectory, assignmentIdentity);
+            if (!reviewWorkTask.IsSuccessful)
+            {
+                return RoutingEvaluationResult.Failure(reviewWorkTask.Message, configuration, workingDirectory, currentModel, assignmentIdentity, activeClaimNow, identityResolution, releasedClaim);
+            }
+
+            var ordinaryResponses = new[] { completedIssueTasks, inProgressIssueTasks, newIssueTask, reviewWorkTask };
             var workerIneligible = ordinaryResponses.SelectMany(response => response.IneligibleWorkerIssues).ToList();
             var assignmentIneligible = ordinaryResponses.SelectMany(response => response.IneligibleAssignmentIssues).ToList();
             noEligibleWorkResponse = ordinaryResponses.FirstOrDefault(response => response.NoEligibleWork);
@@ -193,6 +206,7 @@ public static class RoutingEvaluationService
                 completedIssueTasks.Tasks
                     .Concat(inProgressIssueTasks.Tasks)
                     .Concat(newIssueTask.Tasks)
+                    .Concat(reviewWorkTask.Tasks)
                     .ToList());
             discoveryResponses = ordinaryResponses;
         }
@@ -203,11 +217,14 @@ public static class RoutingEvaluationService
         var consideredIssues = MergeConsideredIssues(discoveryResponses).ToList();
         foreach (var occupied in occupiedClaims)
         {
-            if (consideredIssues.All(issue => issue.Number != occupied.IssueNumber))
+            if (occupied.WorkType != WorkClaimType.Review && occupied.IssueNumber is { } occupiedIssueNumber &&
+                consideredIssues.All(issue => issue.Number != occupiedIssueNumber))
             {
-                consideredIssues.Add(new Issue { Number = occupied.IssueNumber });
+                consideredIssues.Add(new Issue { Number = occupiedIssueNumber });
             }
         }
+
+        var consideredPullRequests = MergeConsideredPullRequests(discoveryResponses).ToList();
 
         string? blockReason;
         HookTaskDecision? decision = null;
@@ -265,7 +282,8 @@ public static class RoutingEvaluationService
             BlockReason = blockReason,
             NoEligibleWorkResponse = noEligibleWorkResponse,
             IneligibleOccupiedClaims = occupiedClaims,
-            ConsideredIssues = consideredIssues
+            ConsideredIssues = consideredIssues,
+            ConsideredPullRequests = consideredPullRequests
         };
     }
 
@@ -293,7 +311,7 @@ public static class RoutingEvaluationService
         if (reconciliation == WorkClaimReconciliationRecommendation.UnableToDetermine)
         {
             return RoutingEvaluationResult.Failure(
-                $"Active work claim for issue #{activeClaim.IssueNumber} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
+                $"Active work claim for {FormatClaimIdentity(activeClaim)} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
                 configuration, workingDirectory, currentModel, assignmentIdentity, activeClaim);
         }
 
@@ -318,7 +336,7 @@ public static class RoutingEvaluationService
             if (candidatePullRequests.Count > 1)
             {
                 return RoutingEvaluationResult.Failure(
-                    $"Active work claim for issue #{effectiveClaim.IssueNumber} has multiple candidate pull requests ({string.Join(", ", candidatePullRequests.Select(number => $"#{number}"))}). No work identity will be selected implicitly.",
+                    $"Active work claim for {FormatClaimIdentity(effectiveClaim)} has multiple candidate pull requests ({string.Join(", ", candidatePullRequests.Select(number => $"#{number}"))}). No work identity will be selected implicitly.",
                     configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
             }
 
@@ -350,7 +368,7 @@ public static class RoutingEvaluationService
                 if (releaseReconciliation == WorkClaimReconciliationRecommendation.UnableToDetermine)
                 {
                     return RoutingEvaluationResult.Failure(
-                        $"Active work claim for issue #{effectiveClaim.IssueNumber} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
+                        $"Active work claim for {FormatClaimIdentity(effectiveClaim)} could not be reconciled: its GitHub state could not be verified, so no release was simulated and claim routing was not evaluated. Production also fails closed in this situation.",
                         configuration, workingDirectory, currentModel, assignmentIdentity, effectiveClaim);
                 }
             }
@@ -374,9 +392,12 @@ public static class RoutingEvaluationService
             ActionableTasks = actionableTasks,
             Decision = decision,
             BlockReason = decision.BlockReason,
-            ConsideredIssues = claimedWork.ConsideredIssues.Count == 0
-                ? new List<Issue> { new() { Number = effectiveClaim.IssueNumber } }
-                : claimedWork.ConsideredIssues.ToList()
+            ConsideredIssues = effectiveClaim.WorkType == WorkClaimType.Review
+                ? Array.Empty<Issue>()
+                : claimedWork.ConsideredIssues.Count == 0
+                    ? new List<Issue> { new() { Number = effectiveClaim.IssueNumber!.Value } }
+                    : claimedWork.ConsideredIssues.ToList(),
+            ConsideredPullRequests = claimedWork.ConsideredPullRequests.ToList()
         };
     }
 
@@ -395,8 +416,13 @@ public static class RoutingEvaluationService
         LastUpdatedAt = claim.LastUpdatedAt
     };
 
+    private static string FormatClaimIdentity(WorkClaim claim) =>
+        claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
+
     private static string FormatReleaseFailureReason(WorkClaim claim) =>
-        $"Active work claim for issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)} remains passive or terminal, but could not be released safely. No unrelated work will be routed.";
+        $"Active work claim for {FormatClaimIdentity(claim)} remains passive or terminal, but could not be released safely. No unrelated work will be routed.";
 
     private static bool IsReleaseCandidate(WorkflowResponse response) =>
         response.Tasks.Count == 1 && response.Tasks[0].Type is
@@ -407,14 +433,29 @@ public static class RoutingEvaluationService
             WorkflowItemType.ClosedWithoutMerge;
 
     private static bool IsOccupied(WorkflowItem task, IReadOnlyList<OccupiedWorkClaim> occupiedClaims) =>
-        occupiedClaims.Any(claim =>
-            claim.IssueNumber == task.IssueNumber ||
-            (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value));
+        occupiedClaims.Any(claim => OccupiesTask(claim, task));
+
+    private static bool OccupiesTask(OccupiedWorkClaim claim, WorkflowItem task)
+    {
+        if (claim.WorkType == WorkClaimType.Review || task.Type == WorkflowItemType.PullRequestReview)
+        {
+            return claim.WorkType == WorkClaimType.Review &&
+                task.Type == WorkflowItemType.PullRequestReview &&
+                claim.PullRequestNumber.HasValue &&
+                task.PullRequestNumber == claim.PullRequestNumber.Value &&
+                string.Equals(task.ReviewerLogin, claim.ReviewerLogin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return task.IssueNumber == claim.IssueNumber ||
+            (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value);
+    }
 
     private static string FormatOccupiedBlockReason(IReadOnlyList<OccupiedWorkClaim> occupiedClaims)
     {
         var work = string.Join(", ", occupiedClaims
-            .Select(claim => $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}")
+            .Select(claim => claim.WorkType == WorkClaimType.Review
+                ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+                : $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}")
             .Distinct(StringComparer.Ordinal));
         return $"All discovered work ({work}) is owned by other Git worktrees. Nothing is available for this worktree until one of those claims is released.";
     }
@@ -442,6 +483,22 @@ public static class RoutingEvaluationService
 
         return issuesByNumber.Values
             .OrderBy(issue => issue.Number)
+            .ToList();
+    }
+
+    private static IReadOnlyList<PullRequest> MergeConsideredPullRequests(IReadOnlyList<WorkflowResponse> responses)
+    {
+        var pullRequestsByNumber = new Dictionary<int, PullRequest>();
+        foreach (var response in responses)
+        {
+            foreach (var pullRequest in response.ConsideredPullRequests)
+            {
+                pullRequestsByNumber[pullRequest.Number] = pullRequest;
+            }
+        }
+
+        return pullRequestsByNumber.Values
+            .OrderBy(pullRequest => pullRequest.Number)
             .ToList();
     }
 }
@@ -506,6 +563,8 @@ public sealed class RoutingEvaluationResult
     public IReadOnlyList<OccupiedWorkClaim> IneligibleOccupiedClaims { get; init; } = Array.Empty<OccupiedWorkClaim>();
 
     public IReadOnlyList<Issue> ConsideredIssues { get; init; } = Array.Empty<Issue>();
+
+    public IReadOnlyList<PullRequest> ConsideredPullRequests { get; init; } = Array.Empty<PullRequest>();
 
     public bool HasRepositoryGate => RepositoryGateTasks.Count > 0;
 }

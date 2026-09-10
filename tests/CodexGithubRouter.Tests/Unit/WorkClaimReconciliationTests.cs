@@ -265,6 +265,6 @@ public sealed class WorkClaimReconciliationTests
         CreatedAt = createdAt,
         HeadRefName = branch,
         Labels = new List<GithubLabel> { new() { Name = label } },
-        ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = claim.IssueNumber } }
+        ClosingIssuesReferences = new List<ClosingIssueReference> { new() { Number = claim.IssueNumber!.Value } }
     };
 }

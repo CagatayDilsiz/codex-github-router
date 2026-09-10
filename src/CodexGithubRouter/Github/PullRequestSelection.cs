@@ -17,6 +17,11 @@ public sealed class PullRequestSelection
     public bool HeadRefName { get; init; } = false;
     public bool UpdatedAt { get; init; } = false;
 
+    public bool IsDraft { get; init; } = false;
+    public bool Author { get; init; } = false;
+    public bool ReviewRequests { get; init; } = false;
+    public bool Reviews { get; init; } = false;
+
     public string ToSelectionString()
     {
         var selectedFields = new List<string>();
@@ -32,6 +37,10 @@ public sealed class PullRequestSelection
         if (Title) selectedFields.Add("title");
         if (Body) selectedFields.Add("body");
         if (UpdatedAt) selectedFields.Add("updatedAt");
+        if (IsDraft) selectedFields.Add("isDraft");
+        if (Author) selectedFields.Add("author");
+        if (ReviewRequests) selectedFields.Add("reviewRequests");
+        if (Reviews) selectedFields.Add("reviews");
 
         return string.Join(',', selectedFields);
     }
@@ -50,7 +59,23 @@ public sealed class PullRequestSelection
             ClosingIssuesReferences = true,
             CreatedAt = true,
             HeadRefName = true,
-            UpdatedAt = true
+            UpdatedAt = true,
+            IsDraft = true,
+            Author = true,
+            ReviewRequests = true,
+            Reviews = true
         };
     }
+
+    public static PullRequestSelection ReviewSelection() => new()
+    {
+        Number = true,
+        State = true,
+        Labels = true,
+        Title = true,
+        IsDraft = true,
+        Author = true,
+        ReviewRequests = true,
+        Reviews = true
+    };
 }

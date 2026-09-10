@@ -686,7 +686,7 @@ public sealed class RoutingEvaluationTests
         IsSuccessful = true,
         Tasks = tasks.ToList(),
         Message = tasks.Length == 0 ? "No blocking repository gates found." : "Repository gate evaluation completed.",
-        ConsideredIssues = tasks.Select(task => new Issue { Number = task.IssueNumber }).ToList()
+        ConsideredIssues = tasks.Select(task => new Issue { Number = task.IssueNumber!.Value }).ToList()
     };
 
     private static WorkflowResponse Ok(params WorkflowItem[] tasks) => new() { IsSuccessful = true, Tasks = tasks.ToList() };

@@ -36,6 +36,18 @@ public sealed class WorkClaimLifecycleTests
     }
 
     [Fact]
+    public async Task Explicit_pull_request_release_requires_a_matching_claim()
+    {
+        using var sandbox = new TestSandbox();
+        await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim { OwnerSessionId = "owner", IssueNumber = 4, PullRequestNumber = 21, WorkType = WorkClaimType.Review, ReviewerLogin = "bob" });
+
+        Assert.False(await WorkClaimStore.ReleaseForPullRequestAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, 22));
+        Assert.Equal(21, (await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId))!.PullRequestNumber);
+        Assert.True(await WorkClaimStore.ReleaseForPullRequestAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, 21));
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
+    }
+
+    [Fact]
     public async Task Missing_baseline_is_preserved_during_claim_storage()
     {
         using var sandbox = new TestSandbox();

@@ -17,4 +17,6 @@ public class WorkflowResponse
     public IReadOnlyList<AssignmentEligibility> IneligibleAssignmentIssues { get; init; } = Array.Empty<AssignmentEligibility>();
 
     public List<Issue> ConsideredIssues { get; set; } = new List<Issue>();
+
+    public List<PullRequest> ConsideredPullRequests { get; set; } = new List<PullRequest>();
 }

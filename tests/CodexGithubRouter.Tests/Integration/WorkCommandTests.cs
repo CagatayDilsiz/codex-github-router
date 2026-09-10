@@ -39,4 +39,27 @@ public sealed class WorkCommandTests
         Assert.Contains("worker terra", status, StringComparison.Ordinal);
         Assert.Contains("model gpt-5-codex", status, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Release_supports_an_explicit_pull_request_escape_hatch()
+    {
+        using var sandbox = new TestSandbox();
+        await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "owner",
+            IssueNumber = 4,
+            PullRequestNumber = 21,
+            WorkType = WorkClaimType.Review,
+            ReviewerLogin = "bob"
+        });
+
+        var result = await WorkCommandHandler.HandleAsync(
+            new[] { "release", "--pr", "21", sandbox.RepositoryDirectory },
+            _ => Task.FromResult<string?>(sandbox.GitCommonDirectory),
+            new StringWriter(),
+            worktreeIdResolver: _ => Task.FromResult<string?>(sandbox.MainWorktreeId));
+
+        Assert.Equal(0, result);
+        Assert.Null(await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId));
+    }
 }

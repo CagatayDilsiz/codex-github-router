@@ -72,7 +72,7 @@ public static class WorkClaimStore
                 return new WorkClaimAcquisitionResult
                 {
                     Claim = otherWorktreeClaim,
-                    BlockReason = $"Active work claim for issue #{otherWorktreeClaim.IssueNumber}{FormatPullRequest(otherWorktreeClaim.PullRequestNumber)} is owned by another Git worktree."
+                    BlockReason = $"Active work claim for {FormatWorkIdentity(otherWorktreeClaim)} is owned by another Git worktree."
                 };
             }
 
@@ -82,7 +82,7 @@ public static class WorkClaimStore
                 return new WorkClaimAcquisitionResult
                 {
                     Claim = existing,
-                    BlockReason = $"Active work claim for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)} is owned by another Codex session."
+                    BlockReason = $"Active work claim for {FormatWorkIdentity(existing)} is owned by another Codex session."
                 };
             }
 
@@ -91,7 +91,7 @@ public static class WorkClaimStore
                 return new WorkClaimAcquisitionResult
                 {
                     Claim = existing,
-                    BlockReason = $"This worktree already owns an active work claim for issue #{existing.IssueNumber}{FormatPullRequest(existing.PullRequestNumber)}; a worktree can hold only one active work item. Release it before claiming issue #{requested.IssueNumber}."
+                    BlockReason = $"This worktree already owns an active work claim for {FormatWorkIdentity(existing)}; a worktree can hold only one active work item. Release it before claiming {FormatWorkIdentity(requested)}."
                 };
             }
 
@@ -112,7 +112,10 @@ public static class WorkClaimStore
                     ? existing.ClaimedIssueUpdatedAt
                     : requested.ClaimedIssueUpdatedAt,
                 ClaimedAt = existing?.ClaimedAt ?? now,
-                LastUpdatedAt = now
+                LastUpdatedAt = now,
+                ReviewerLogin = requested.ReviewerLogin ?? existing?.ReviewerLogin,
+                ReviewCycleId = requested.ReviewCycleId ?? existing?.ReviewCycleId,
+                ReviewBaselineCaptured = requested.ReviewBaselineCaptured || existing is { ReviewBaselineCaptured: true }
             };
 
             if (existing is not null)
@@ -131,6 +134,17 @@ public static class WorkClaimStore
             var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
             var claim = FindClaim(set, gitCommonDirectory, worktreeId);
             if (claim?.IssueNumber != issueNumber) return false;
+            set.Claims.Remove(claim);
+            await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
+            return true;
+        }, cancellationToken);
+
+    public static Task<bool> ReleaseForPullRequestAsync(string gitCommonDirectory, string worktreeId, int pullRequestNumber, CancellationToken cancellationToken = default) =>
+        WithLockAsync(gitCommonDirectory, async () =>
+        {
+            var set = await ReadSetUnsafeAsync(gitCommonDirectory, persistLegacyMigration: true, cancellationToken);
+            var claim = FindClaim(set, gitCommonDirectory, worktreeId);
+            if (claim is null || claim.PullRequestNumber != pullRequestNumber) return false;
             set.Claims.Remove(claim);
             await WriteSetUnsafeAsync(gitCommonDirectory, set, cancellationToken);
             return true;
@@ -160,7 +174,8 @@ public static class WorkClaimStore
             var matchesClaimedPullRequest = claim.PullRequestNumber == pullRequestNumber;
             var matchesInitialImplementation = claim.PullRequestNumber is null &&
                 claim.WorkType == WorkClaimType.Implementation &&
-                closingIssueNumbers.Contains(claim.IssueNumber) &&
+                claim.IssueNumber is { } claimedIssueNumber &&
+                closingIssueNumbers.Contains(claimedIssueNumber) &&
                 isCurrentClaimPullRequest;
             if (!matchesClaimedPullRequest && !matchesInitialImplementation) return false;
 
@@ -338,11 +353,35 @@ public static class WorkClaimStore
     {
         if (claim is null || claim.ClaimId == Guid.Empty || claim.Version <= 0 ||
             string.IsNullOrWhiteSpace(claim.WorktreeId) || string.IsNullOrWhiteSpace(claim.OwnerSessionId) ||
-            claim.IssueNumber <= 0 ||
             !Enum.IsDefined(claim.WorkType) ||
             claim.ClaimedAt == default || claim.LastUpdatedAt == default)
         {
             throw new WorkClaimFileException("The work-claim file contains an invalid claim.");
+        }
+
+        switch (claim.WorkType)
+        {
+            case WorkClaimType.Implementation:
+                if (claim.IssueNumber is not > 0)
+                {
+                    throw new WorkClaimFileException("The work-claim file contains an invalid claim: an implementation claim requires an issue number.");
+                }
+
+                break;
+            case WorkClaimType.ChangeRequest:
+                if (claim.IssueNumber is not > 0 || !claim.PullRequestNumber.HasValue)
+                {
+                    throw new WorkClaimFileException("The work-claim file contains an invalid claim: a change-request claim requires an issue number and a pull request number.");
+                }
+
+                break;
+            case WorkClaimType.Review:
+                if (!claim.PullRequestNumber.HasValue || string.IsNullOrWhiteSpace(claim.ReviewerLogin))
+                {
+                    throw new WorkClaimFileException("The work-claim file contains an invalid claim: a review claim requires a pull request number and a reviewer login.");
+                }
+
+                break;
         }
     }
 
@@ -410,27 +449,59 @@ public static class WorkClaimStore
         Model = claim.Model,
         ClaimedIssueUpdatedAt = claim.ClaimedIssueUpdatedAt,
         ClaimedAt = claim.ClaimedAt,
-        LastUpdatedAt = claim.LastUpdatedAt
+        LastUpdatedAt = claim.LastUpdatedAt,
+        ReviewerLogin = claim.ReviewerLogin,
+        ReviewCycleId = claim.ReviewCycleId,
+        ReviewBaselineCaptured = claim.ReviewBaselineCaptured
     };
 
-    private static bool SameWork(WorkClaim left, WorkClaim right) =>
-        left.IssueNumber == right.IssueNumber && left.PullRequestNumber == right.PullRequestNumber;
+    private static bool SameWork(WorkClaim left, WorkClaim right)
+    {
+        if (left.WorkType == WorkClaimType.Review || right.WorkType == WorkClaimType.Review)
+        {
+            return left.WorkType == right.WorkType &&
+                left.PullRequestNumber == right.PullRequestNumber &&
+                string.Equals(left.ReviewerLogin, right.ReviewerLogin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return left.IssueNumber == right.IssueNumber && left.PullRequestNumber == right.PullRequestNumber;
+    }
 
     /// <summary>
-    /// True when the two claims occupy the same work item across the repository: the same
-    /// issue (regardless of pull-request identity), or the same pull request under differing
-    /// issue numbers. Cross-worktree acquisition applies this predicate so a PR-less claim
-    /// over issue #4 still reserves the issue after its linked pull request is enriched, and
-    /// so two claims can never route the same pull request under different issues.
+    /// True when the two claims occupy the same work item across the repository. Implementation and
+    /// change-request claims conflict on the same issue (regardless of pull-request identity) or
+    /// the same pull request under differing issue numbers. Review claims are PR-native and
+    /// reviewer-scoped: they never conflict with implementation/change-request work and conflict
+    /// with other review claims only on the same (pull request, reviewer) pair, so several
+    /// reviewers may be requested for the same pull request independently.
     /// </summary>
-    internal static bool ConflictsWith(WorkClaim left, WorkClaim right) =>
-        left.IssueNumber == right.IssueNumber ||
-        (left.PullRequestNumber.HasValue && right.PullRequestNumber.HasValue && left.PullRequestNumber.Value == right.PullRequestNumber.Value);
+    internal static bool ConflictsWith(WorkClaim left, WorkClaim right)
+    {
+        var leftIsReview = left.WorkType == WorkClaimType.Review;
+        var rightIsReview = right.WorkType == WorkClaimType.Review;
+        if (leftIsReview || rightIsReview)
+        {
+            return leftIsReview && rightIsReview &&
+                left.PullRequestNumber.HasValue && right.PullRequestNumber.HasValue &&
+                left.PullRequestNumber.Value == right.PullRequestNumber.Value &&
+                string.Equals(left.ReviewerLogin, right.ReviewerLogin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return left.IssueNumber == right.IssueNumber ||
+            (left.PullRequestNumber.HasValue && right.PullRequestNumber.HasValue && left.PullRequestNumber.Value == right.PullRequestNumber.Value);
+    }
 
     private static bool CanEnrich(WorkClaim existing, WorkClaim requested) =>
+        existing.WorkType != WorkClaimType.Review &&
+        requested.WorkType != WorkClaimType.Review &&
         existing.IssueNumber == requested.IssueNumber &&
         existing.PullRequestNumber is null &&
         requested.PullRequestNumber.HasValue;
+
+    private static string FormatWorkIdentity(WorkClaim claim) =>
+        claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)}";
 
     private static string FormatPullRequest(int? pullRequestNumber) => pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 }

@@ -94,6 +94,23 @@ public static class ContextPromptService
         """;
     }
 
+    public static string GetPullRequestReviewPrompt(int? pullRequestNumber, string? reviewerLogin)
+    {
+        var numberText = pullRequestNumber.HasValue ? pullRequestNumber.Value.ToString() : "<unknown>";
+        return $"""
+            Next task is to review pull request #{numberText} as the requested reviewer{(string.IsNullOrWhiteSpace(reviewerLogin) ? string.Empty : $" '{reviewerLogin}'")}.
+
+            1. Use `gh pr view {numberText} --comments` to view the pull request details, the changed files and any available comments. An empty comments result is normal and does not need to be reported.
+
+            2. Use `gh pr diff {numberText}` to inspect the proposed changes, then check whether the working tree is clean with `git status --short`. Do not modify files, create branches or push commits; this is a review-only assignment.
+
+            3. Submit a review for the pull request using `gh pr review {numberText}` with the verdict the changes warrant: approve (`--approve`) if the changes are ready, request changes (`--request-changes`) when the pull request needs further work, or `--comment` for neutral feedback. If the pull request cannot be reviewed because its state is ambiguous or its changes cannot be verified, stop and report the ambiguity instead of submitting a speculative review.
+
+            4. Do not merge the pull request, do not close or transition any issue, do not change any labels, and do not re-request reviewers.
+
+        """;
+    }
+
     public static string GetChangeRequestPrompt(int issueNumber, int pullRequestNumber)
     {
         return $"""

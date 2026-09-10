@@ -143,7 +143,8 @@ public static class PullRequestCommandHandler
         {
             var isCurrentImplementationClaim = claim.PullRequestNumber is null &&
                 claim.WorkType == WorkClaimType.Implementation &&
-                closingIssueNumbers.Contains(claim.IssueNumber) &&
+                claim.IssueNumber is { } claimedIssueNumber &&
+                closingIssueNumbers.Contains(claimedIssueNumber) &&
                 await IsCurrentImplementationClaimAsync(workingDirectory, claim, pullRequestNumber, dependencies);
 
             await WorkClaimStore.ReleaseForPullRequestTransitionAsync(
@@ -160,7 +161,7 @@ public static class PullRequestCommandHandler
 
         try
         {
-            var issue = await dependencies.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber);
+            var issue = await dependencies.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber!.Value);
             var pullRequest = await dependencies.GetPullRequestAsync(workingDirectory, pullRequestNumber, new PullRequestSelection
             {
                 Number = true,

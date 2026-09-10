@@ -13,7 +13,13 @@ public sealed class HookTaskDecision
 
 public static class HookTaskRouter
 {
-    public static bool RequiresWorkClaim(WorkflowItem task) => task.Type is WorkflowItemType.ChangeRequest or WorkflowItemType.ResumeInProgressIssue or WorkflowItemType.NewIssue;
+    public static bool RequiresWorkClaim(WorkflowItem task) => task.Type is
+        WorkflowItemType.ChangeRequest or
+        WorkflowItemType.ResumeInProgressIssue or
+        WorkflowItemType.NewIssue or
+        WorkflowItemType.PullRequestReview;
+
+    public static bool IsReviewTask(WorkflowItem task) => task.Type == WorkflowItemType.PullRequestReview;
 
     public static HookTaskDecision Route(IReadOnlyList<WorkflowItem> actionableTasks)
     {
@@ -37,7 +43,7 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (changeRequest is not null)
         {
-            return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber, changeRequest.PullRequestNumber!.Value) };
+            return new HookTaskDecision { SelectedTask = changeRequest, AdditionalContext = ContextPromptService.GetChangeRequestPrompt(changeRequest.IssueNumber!.Value, changeRequest.PullRequestNumber!.Value) };
         }
 
         var currentPullRequestRecovery = actionableTasks
@@ -49,7 +55,7 @@ public static class HookTaskRouter
             return new HookTaskDecision
             {
                 SelectedTask = currentPullRequestRecovery,
-                AdditionalContext = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(currentPullRequestRecovery.IssueNumber, currentPullRequestRecovery.PullRequestNumber!.Value)
+                AdditionalContext = ContextPromptService.GetCurrentPullRequestRecoveryPrompt(currentPullRequestRecovery.IssueNumber!.Value, currentPullRequestRecovery.PullRequestNumber!.Value)
             };
         }
 
@@ -62,11 +68,11 @@ public static class HookTaskRouter
             return new HookTaskDecision
             {
                 SelectedTask = completedRecovery,
-                AdditionalContext = ContextPromptService.GetCompletedIssueRecoveryPrompt(completedRecovery.IssueNumber)
+                AdditionalContext = ContextPromptService.GetCompletedIssueRecoveryPrompt(completedRecovery.IssueNumber!.Value)
             };
         }
 
-        var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber).ToList();
+        var issuesNeedingPRLink = actionableTasks.Where(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues).Select(task => task.IssueNumber!.Value).ToList();
         if (issuesNeedingPRLink.Count > 0)
         {
             return new HookTaskDecision { SelectedTask = actionableTasks.First(task => task.Type == WorkflowItemType.LinkPullRequestsToIssues), AdditionalContext = ContextPromptService.GetIssuesNeedPRLinkPrompt(issuesNeedingPRLink.ToArray()) };
@@ -78,7 +84,20 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (inProgressIssue is not null)
         {
-            return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = inProgressIssue, AdditionalContext = ContextPromptService.GetInProgressIssuePrompt(inProgressIssue.IssueNumber!.Value) };
+        }
+
+        var review = actionableTasks
+            .Where(task => task.Type == WorkflowItemType.PullRequestReview)
+            .OrderBy(task => task.SelectionRank)
+            .FirstOrDefault();
+        if (review is not null)
+        {
+            return new HookTaskDecision
+            {
+                SelectedTask = review,
+                AdditionalContext = ContextPromptService.GetPullRequestReviewPrompt(review.PullRequestNumber, review.ReviewerLogin)
+            };
         }
 
         var newIssue = actionableTasks
@@ -87,7 +106,7 @@ public static class HookTaskRouter
             .FirstOrDefault();
         if (newIssue is not null)
         {
-            return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber) };
+            return new HookTaskDecision { SelectedTask = newIssue, AdditionalContext = ContextPromptService.GetNewIssuePrompt(newIssue.IssueNumber!.Value) };
         }
 
         return new HookTaskDecision { BlockReason = "No actionable workflow tasks found." };
@@ -97,15 +116,13 @@ public static class HookTaskRouter
     {
         if (!string.Equals(claim.OwnerSessionId, sessionId, StringComparison.Ordinal))
         {
-            return new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} is owned by another Codex session." };
+            return new HookTaskDecision { BlockReason = $"Active work claim for {FormatWorkIdentity(claim)} is owned by another Codex session." };
         }
 
-        var claimedTasks = actionableTasks.Where(task =>
-            task.IssueNumber == claim.IssueNumber &&
-            (!claim.PullRequestNumber.HasValue || task.PullRequestNumber == claim.PullRequestNumber)).ToList();
+        var claimedTasks = actionableTasks.Where(task => MatchesClaim(claim, task)).ToList();
         if (claimedTasks.Count == 0)
         {
-            return new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} was not found in the current workflow discovery. No unrelated work will be routed." };
+            return new HookTaskDecision { BlockReason = $"Active work claim for {FormatWorkIdentity(claim)} was not found in the current workflow discovery. No unrelated work will be routed." };
         }
 
         var discoveredPullRequests = claimedTasks.Where(task => task.PullRequestNumber.HasValue).Select(task => task.PullRequestNumber!.Value).Distinct().ToList();
@@ -117,8 +134,28 @@ public static class HookTaskRouter
         var decision = Route(claimedTasks);
         return string.IsNullOrWhiteSpace(decision.BlockReason)
             ? decision
-            : new HookTaskDecision { BlockReason = $"Active work claim for issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)} has no actionable matching task. No unrelated work will be routed." };
+            : new HookTaskDecision { BlockReason = $"Active work claim for {FormatWorkIdentity(claim)} has no actionable matching task. No unrelated work will be routed." };
     }
+
+    private static bool MatchesClaim(WorkClaim claim, WorkflowItem task)
+    {
+        if (claim.WorkType == WorkClaimType.Review || task.Type == WorkflowItemType.PullRequestReview)
+        {
+            return claim.WorkType == WorkClaimType.Review &&
+                IsReviewTask(task) &&
+                claim.PullRequestNumber.HasValue &&
+                task.PullRequestNumber == claim.PullRequestNumber.Value &&
+                string.Equals(task.ReviewerLogin, claim.ReviewerLogin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return task.IssueNumber == claim.IssueNumber &&
+            (!claim.PullRequestNumber.HasValue || task.PullRequestNumber == claim.PullRequestNumber);
+    }
+
+    private static string FormatWorkIdentity(WorkClaim claim) =>
+        claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)}";
 
     private static string FormatPullRequest(int? pullRequestNumber) => pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
 }

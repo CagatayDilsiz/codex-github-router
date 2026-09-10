@@ -64,10 +64,23 @@ public static class WorkCommandHandler
                     return 0;
                 case "release":
                     var issueIndex = Array.FindIndex(args, value => string.Equals(value, "--issue", StringComparison.OrdinalIgnoreCase));
-                    if (issueIndex < 0 || issueIndex + 1 >= args.Length || !int.TryParse(args[issueIndex + 1], out var issueNumber)) { Console.Error.WriteLine("Usage: cgr work release --issue <number> [working-directory]"); return 1; }
-                    var didRelease = await WorkClaimStore.ReleaseForIssueAsync(commonDirectory, worktreeId, issueNumber);
-                    Console.WriteLine(didRelease ? $"Released active work claim for issue #{issueNumber} by explicit user request." : $"No active work claim exists for issue #{issueNumber} in this worktree.");
-                    return 0;
+                    if (issueIndex >= 0 && issueIndex + 1 < args.Length && int.TryParse(args[issueIndex + 1], out var issueNumber))
+                    {
+                        var didRelease = await WorkClaimStore.ReleaseForIssueAsync(commonDirectory, worktreeId, issueNumber);
+                        Console.WriteLine(didRelease ? $"Released active work claim for issue #{issueNumber} by explicit user request." : $"No active work claim exists for issue #{issueNumber} in this worktree.");
+                        return 0;
+                    }
+
+                    var pullRequestIndex = Array.FindIndex(args, value => string.Equals(value, "--pr", StringComparison.OrdinalIgnoreCase));
+                    if (pullRequestIndex >= 0 && pullRequestIndex + 1 < args.Length && int.TryParse(args[pullRequestIndex + 1], out var pullRequestNumber))
+                    {
+                        var didRelease = await WorkClaimStore.ReleaseForPullRequestAsync(commonDirectory, worktreeId, pullRequestNumber);
+                        Console.WriteLine(didRelease ? $"Released active work claim for pull request #{pullRequestNumber} by explicit user request." : $"No active work claim exists for pull request #{pullRequestNumber} in this worktree.");
+                        return 0;
+                    }
+
+                    Console.Error.WriteLine("Usage: cgr work release <--issue <number>|--pr <number>> [working-directory]");
+                    return 1;
                 default: return Usage();
             }
         }
@@ -82,7 +95,7 @@ public static class WorkCommandHandler
 
     private static int Usage()
     {
-        Console.Error.WriteLine("Usage: cgr work <status|list [--model <model>]|reconcile|release --issue <number>> [working-directory]");
+        Console.Error.WriteLine("Usage: cgr work <status|list [--model <model>]|reconcile|release <--issue <number>|--pr <number>>> [working-directory]");
         return 1;
     }
 
@@ -161,14 +174,43 @@ public static class WorkCommandHandler
                 return 1;
             }
 
+            var blocks = new List<string>();
             var explanations = RoutingExplanationService.ExplainAll(plan);
-            if (explanations.Count == 0)
+            if (explanations.Count > 0)
+            {
+                blocks.Add(RoutingExplanationService.FormatExplanations(explanations));
+            }
+
+            if (plan.ConsideredPullRequests.Count > 0)
+            {
+                string? reviewerLogin = null;
+                try
+                {
+                    reviewerLogin = await GitHubCliService.GetAuthenticatedUserAsync(workingDirectory, CancellationToken.None);
+                }
+                catch
+                {
+                    // Review explanations are a best-effort diagnostic; without an authenticated
+                    // reviewer the issue view still renders below.
+                }
+
+                if (!string.IsNullOrWhiteSpace(reviewerLogin))
+                {
+                    var reviewExplanations = RoutingExplanationService.ExplainReviewAll(plan, reviewerLogin, plan.AssignmentIdentity);
+                    if (reviewExplanations.Count > 0)
+                    {
+                        blocks.Add(RoutingExplanationService.FormatReviewExplanations(reviewExplanations));
+                    }
+                }
+            }
+
+            if (blocks.Count == 0)
             {
                 Console.WriteLine("No workflow issues found.");
                 return 0;
             }
 
-            Console.WriteLine(RoutingExplanationService.FormatExplanations(explanations));
+            Console.WriteLine(string.Join(Environment.NewLine + Environment.NewLine, blocks));
             return 0;
         }
         catch (Exception exception)
@@ -223,6 +265,9 @@ public static class WorkCommandHandler
         var worktreeDisplay = string.IsNullOrWhiteSpace(claim.WorktreePath)
             ? claim.WorktreeId
             : $"{claim.WorktreeId} ({claim.WorktreePath})";
-        return $"Active work claim: issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
+        var identity = claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
+        return $"Active work claim: {identity}, {claim.WorkType}{metadataSuffix}, owner {claim.OwnerSessionId}, worktree {worktreeDisplay}{worktreeMarker}, claimed {claim.ClaimedAt:O}, updated {claim.LastUpdatedAt:O}.";
     }
 }

@@ -122,7 +122,7 @@ public static class HookService
             if (activeClaim is not null && !string.Equals(activeClaim.OwnerSessionId, payload.SessionId, StringComparison.Ordinal))
             {
                 scope.SetClaim(activeClaim);
-                var blockReason = $"Active work claim for issue #{activeClaim.IssueNumber}{(activeClaim.PullRequestNumber.HasValue ? $" / pull request #{activeClaim.PullRequestNumber.Value}" : string.Empty)} is owned by another Codex session.";
+                var blockReason = $"Active work claim for {FormatWorkIdentity(activeClaim)} is owned by another Codex session.";
                 scope.Block(blockReason);
                 await WriteBlockAsync(blockReason);
                 return 0;
@@ -237,7 +237,7 @@ public static class HookService
         // Close issues marked for closure before evaluating hook blockers.
         foreach (var closingIssueTask in actionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue))
         {
-            await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber, CancellationToken.None);
+            await GitHubCliService.CloseIssueAsync(workingDirectory, closingIssueTask.IssueNumber!.Value, CancellationToken.None);
         }
 
         if (decision.SelectedTask is not null && HookTaskRouter.RequiresWorkClaim(decision.SelectedTask))
@@ -252,18 +252,27 @@ public static class HookService
 
             var claimType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
                 ? WorkClaimType.ChangeRequest
-                : WorkClaimType.Implementation;
-            var claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber, CancellationToken.None);
-            WorkerEligibility eligibility;
-            if (plan.HasRepositoryGate)
+                : decision.SelectedTask.Type == WorkflowItemType.PullRequestReview
+                    ? WorkClaimType.Review
+                    : WorkClaimType.Implementation;
+            var isReviewAcquisition = claimType == WorkClaimType.Review;
+            Issue? claimedIssue = null;
+            if (!isReviewAcquisition)
             {
-                // Repository-gate routing bypasses worker/assignment filtering, so the
-                // selected gate work is claimed without policy eligibility guards.
+                claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber!.Value, CancellationToken.None);
+            }
+
+            WorkerEligibility eligibility;
+            if (plan.HasRepositoryGate || isReviewAcquisition)
+            {
+                // Repository-gate routing bypasses worker/assignment filtering, and review work
+                // carries its own eligibility: the review decision model already resolved the
+                // authenticated reviewer and the CGR pull-request state before the task was routed.
                 eligibility = WorkerEligibility.Disabled;
             }
             else
             {
-                eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue, currentModel);
+                eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue!, currentModel);
                 if (eligibility.IsEnabled && !eligibility.IsEligible)
                 {
                     scope.Block(eligibility.Message);
@@ -271,7 +280,7 @@ public static class HookService
                     return 0;
                 }
 
-                var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue);
+                var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue!);
                 if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
                 {
                     scope.Block(assignmentEligibility.Message);
@@ -288,7 +297,10 @@ public static class HookService
                 WorkType = claimType,
                 WorkerProfile = eligibility.WorkerProfile,
                 Model = currentModel,
-                ClaimedIssueUpdatedAt = claimedIssue.UpdatedAt
+                ClaimedIssueUpdatedAt = claimedIssue?.UpdatedAt ?? default,
+                ReviewerLogin = decision.SelectedTask.ReviewerLogin,
+                ReviewCycleId = decision.SelectedTask.ReviewCycleId,
+                ReviewBaselineCaptured = claimType == WorkClaimType.Review
             });
             if (!acquisition.Acquired)
             {
@@ -345,7 +357,7 @@ public static class HookService
                     return 0;
                 }
 
-                var releaseFailureReason = $"Active work claim for issue #{acquiredClaim.IssueNumber}{FormatPullRequest(acquiredClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.";
+                var releaseFailureReason = $"Active work claim for {FormatWorkIdentity(acquiredClaim)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed.";
                 scope.Block(releaseFailureReason);
                 await WriteBlockAsync(releaseFailureReason);
                 return 0;
@@ -408,6 +420,11 @@ public static class HookService
 
         return decision.BlockReason;
     }
+
+    private static string FormatWorkIdentity(WorkClaim claim) =>
+        claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)}";
 
     private static string FormatPullRequest(int? pullRequestNumber) =>
         pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;

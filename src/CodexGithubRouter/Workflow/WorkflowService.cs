@@ -8,7 +8,12 @@ public static class WorkflowService
 {
     public static async Task<WorkflowResponse> CheckClaimedWorkAsync(RouterConfiguration configuration, string workingDirectory, WorkClaim claim, string? currentModel = null)
     {
-        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber, CancellationToken.None);
+        if (claim.WorkType == WorkClaimType.Review)
+        {
+            return await CheckClaimedReviewWorkAsync(configuration, workingDirectory, claim);
+        }
+
+        var issue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, claim.IssueNumber!.Value, CancellationToken.None);
         var response = await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
             workingDirectory,
             pullRequestNumber,
@@ -133,6 +138,252 @@ public static class WorkflowService
 
         return EvaluateClaimedPullRequest(configuration, claim, pullRequest);
     }
+
+    /// <summary>
+    /// Evaluates an active review-work claim. The claim is current only while the pull request is
+    /// open, non-draft, the reviewer is still directly requested on the same review cycle, and the
+    /// CGR pull-request state is compatible. A completed/removed/draft/terminal review returns the
+    /// passive release-candidate sentinel so the shared reconciliation path releases the claim and
+    /// a later re-request can be claimed as a fresh review cycle.
+    /// </summary>
+    public static async Task<WorkflowResponse> CheckClaimedReviewWorkAsync(
+        RouterConfiguration configuration,
+        string workingDirectory,
+        WorkClaim claim,
+        Func<string, int, CancellationToken, Task<PullRequest>>? getPullRequest = null)
+    {
+        getPullRequest ??= (wd, number, ct) => GitHubCliService.GetPullRequestByNumberAsync(wd, number, ReviewRoutingService.Selection, ct);
+
+        if (!claim.PullRequestNumber.HasValue)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = "Active review work claim is missing a pull request identity and cannot be resolved." };
+        }
+
+        PullRequest pullRequest;
+        try
+        {
+            pullRequest = await getPullRequest(workingDirectory, claim.PullRequestNumber.Value, CancellationToken.None);
+        }
+        catch (GitHubItemNotFoundException)
+        {
+            return ReviewReleaseCandidate(claim, "The reviewed pull request no longer exists; the review claim is releasable.");
+        }
+        catch (Exception exception)
+        {
+            // Fail closed: an unavailable GitHub review state must never be treated as done.
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active review claim for pull request #{claim.PullRequestNumber.Value} could not be verified: {exception.Message}" };
+        }
+
+        return EvaluateClaimedReviewWork(configuration, claim, pullRequest);
+    }
+
+    public static WorkflowResponse EvaluateClaimedReviewWork(RouterConfiguration configuration, WorkClaim claim, PullRequest pullRequest)
+    {
+        if (ReviewRoutingService.IsUnknownState(pullRequest))
+        {
+            // Fail closed: an unknown GitHub state is neither "reviewable" nor definitively done.
+            // The claim is not released and no review work is routed.
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Active review claim for pull request #{pullRequest.Number} cannot be verified: the pull request is in an unknown state '{pullRequest.State}'. No review work is routed and the claim is not released." };
+        }
+
+        if (ReviewRoutingService.IsTerminal(pullRequest))
+        {
+            return ReviewReleaseCandidate(claim, $"Pull request #{pullRequest.Number} is {pullRequest.State}; the review claim is releasable.");
+        }
+
+        if (pullRequest.IsDraft)
+        {
+            return ReviewReleaseCandidate(claim, $"Pull request #{pullRequest.Number} became a draft; the review claim is releasable.");
+        }
+
+        var reviewerLogin = claim.ReviewerLogin ?? string.Empty;
+        if (!pullRequest.IsDirectlyReviewerRequested(reviewerLogin))
+        {
+            return ReviewReleaseCandidate(claim, $"Reviewer '{reviewerLogin}' is no longer directly requested on pull request #{pullRequest.Number}; the review claim is releasable.");
+        }
+
+        if (!ReviewRoutingService.IsReviewCycleCurrent(pullRequest, reviewerLogin, claim))
+        {
+            return ReviewReleaseCandidate(claim, $"Pull request #{pullRequest.Number} has a newer review cycle for '{reviewerLogin}'; the old review claim is releasable.");
+        }
+
+        var pullRequestResolution = WorkflowStateResolver.Resolve(pullRequest.Labels.Select(label => label.Name), configuration.PullRequestStates);
+        if (pullRequestResolution.IsAmbiguous)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = pullRequestResolution.DescribeConflict($"claimed review pull request #{pullRequest.Number}") };
+        }
+
+        if (pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.ChangesRequested) ||
+            pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.AwaitingMerge) ||
+            pullRequestResolution.MatchedLabels.ContainsKey(PullRequestState.Deferred))
+        {
+            return ReviewReleaseCandidate(claim, $"Pull request #{pullRequest.Number} has CGR pull-request state {pullRequestResolution.MatchedLabels.Keys.First()}; the review claim is releasable.");
+        }
+
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = new List<WorkflowItem>
+            {
+                new()
+                {
+                    Type = WorkflowItemType.PullRequestReview,
+                    PullRequestNumber = pullRequest.Number,
+                    ReviewerLogin = reviewerLogin,
+                    ReviewCycleId = pullRequest.GetLatestReviewId(reviewerLogin),
+                    Status = new WorkflowTaskStatus { Message = $"Review pull request #{pullRequest.Number} as requested reviewer '{reviewerLogin}'." }
+                }
+            },
+            ConsideredPullRequests = new List<PullRequest> { pullRequest }
+        };
+    }
+
+    /// <summary>
+    /// Discovers claimable <see cref="WorkflowItemType.PullRequestReview"/> work from GitHub's
+    /// direct requested-reviewer signal. Review routing must be enabled. The reviewer identity is
+    /// the account authenticated in <c>gh</c>; CGR never acts as a different GitHub account.
+    /// Fail-closed: when the authenticated account or review state cannot be verified, no review
+    /// work is invented and a failure response is returned.
+    /// </summary>
+    public static async Task<WorkflowResponse> CheckReviewWorkAsync(
+        RouterConfiguration configuration,
+        string workingDirectory,
+        AssignmentIdentity? assignmentIdentity = null,
+        Func<string, CancellationToken, Task<string?>>? getAuthenticatedLogin = null,
+        Func<string, string, CancellationToken, Task<List<int>>>? getReviewRequestedPullRequestNumbers = null,
+        Func<string, int, CancellationToken, Task<PullRequest>>? getPullRequest = null)
+    {
+        getAuthenticatedLogin ??= (wd, ct) => GitHubCliService.GetAuthenticatedUserAsync(wd, ct);
+        getReviewRequestedPullRequestNumbers ??= (wd, reviewerLogin, ct) => GitHubCliService.GetReviewRequestedPullRequestNumbersAsync(wd, reviewerLogin, ct);
+        getPullRequest ??= (wd, number, ct) => GitHubCliService.GetPullRequestByNumberAsync(wd, number, ReviewRoutingService.Selection, ct);
+
+        if (!ReviewRoutingService.IsEnabled(configuration))
+        {
+            return new WorkflowResponse { IsSuccessful = true, Message = "Review routing is disabled." };
+        }
+
+        string authenticatedLogin;
+        try
+        {
+            authenticatedLogin = await getAuthenticatedLogin(workingDirectory, CancellationToken.None)
+                ?? throw new InvalidOperationException("GitHub CLI did not report an authenticated account.");
+        }
+        catch (Exception exception)
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing is enabled but the authenticated GitHub account could not be resolved: {exception.Message}" };
+        }
+
+        // When a CGR local identity is in force, CGR's review-work identity must be one of that
+        // identity's GitHub usernames: the authenticated gh account IS the reviewer CGR acts as,
+        // and CGR never acts as a different GitHub account. A mismatch fails closed with an
+        // explainable message instead of silently reviewing as an unauthenticated/other account.
+        if (assignmentIdentity?.GitHubUsernames is { Count: > 0 } &&
+            !assignmentIdentity.GitHubUsernames.Any(login => string.Equals(login, authenticatedLogin, StringComparison.OrdinalIgnoreCase)))
+        {
+            return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing is enabled but the authenticated gh account '{authenticatedLogin}' does not match the configured local identity ({string.Join(", ", assignmentIdentity.GitHubUsernames)}). CGR will not act as a different GitHub account; reconcile the local identity or the authenticated gh account." };
+        }
+
+        var candidateLogins = new List<string>();
+        if (assignmentIdentity?.GitHubUsernames is { Count: > 0 })
+        {
+            foreach (var login in assignmentIdentity.GitHubUsernames.Where(login => !string.IsNullOrWhiteSpace(login)))
+            {
+                var trimmed = login.Trim();
+                if (!candidateLogins.Any(login => string.Equals(login, trimmed, StringComparison.OrdinalIgnoreCase)))
+                {
+                    candidateLogins.Add(trimmed);
+                }
+            }
+        }
+
+        if (!candidateLogins.Contains(authenticatedLogin, StringComparer.OrdinalIgnoreCase))
+        {
+            candidateLogins.Add(authenticatedLogin);
+        }
+
+        var consideredPullRequests = new List<PullRequest>();
+        foreach (var login in candidateLogins)
+        {
+            List<int> numbers;
+            try
+            {
+                numbers = await getReviewRequestedPullRequestNumbers(workingDirectory, login, CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing could not discover pull requests requesting '{login}': {exception.Message}" };
+            }
+
+            foreach (var number in numbers)
+            {
+                if (consideredPullRequests.Any(candidate => candidate.Number == number))
+                {
+                    continue;
+                }
+
+                PullRequest pullRequest;
+                try
+                {
+                    pullRequest = await getPullRequest(workingDirectory, number, CancellationToken.None);
+                }
+                catch (GitHubItemNotFoundException)
+                {
+                    continue;
+                }
+                catch (Exception exception)
+                {
+                    return new WorkflowResponse { IsSuccessful = false, Message = $"Review routing could not verify pull request #{number}: {exception.Message}" };
+                }
+
+                if (consideredPullRequests.All(candidate => candidate.Number != number))
+                {
+                    consideredPullRequests.Add(pullRequest);
+                }
+            }
+        }
+
+        var tasks = new List<WorkflowItem>();
+        foreach (var pullRequest in consideredPullRequests)
+        {
+            var stages = ReviewRoutingService.EvaluateStages(configuration, pullRequest, authenticatedLogin, null, null, assignmentIdentity);
+            if (!ReviewRoutingService.IsEligible(stages))
+            {
+                continue;
+            }
+
+            tasks.Add(new WorkflowItem
+            {
+                Type = WorkflowItemType.PullRequestReview,
+                PullRequestNumber = pullRequest.Number,
+                ReviewerLogin = authenticatedLogin,
+                ReviewCycleId = pullRequest.GetLatestReviewId(authenticatedLogin),
+                Status = new WorkflowTaskStatus { Message = $"Review pull request #{pullRequest.Number} as requested reviewer '{authenticatedLogin}'." }
+            });
+        }
+
+        return new WorkflowResponse
+        {
+            IsSuccessful = true,
+            Tasks = tasks,
+            Message = tasks.Count == 0 ? "No claimable review work found for the authenticated account." : "Review work discovered.",
+            ConsideredPullRequests = consideredPullRequests
+        };
+    }
+
+    private static WorkflowResponse ReviewReleaseCandidate(WorkClaim claim, string message) => new()
+    {
+        IsSuccessful = true,
+        Tasks = new List<WorkflowItem>
+        {
+            new()
+            {
+                Type = WorkflowItemType.AwaitingReview,
+                IssueNumber = claim.IssueNumber,
+                PullRequestNumber = claim.PullRequestNumber,
+                Status = new WorkflowTaskStatus { Message = message }
+            }
+        }
+    };
 
     private static async Task<List<PullRequest>> GetCurrentClaimPullRequestsAsync(
         WorkClaim claim,

@@ -56,7 +56,7 @@ static int PrintHelp()
           cgr auto <on|off|status> [working-directory]
           cgr issue <list|transition> <options> [working-directory]
           cgr work <status|list|reconcile|release> [working-directory]
-          cgr explain [--issue <number>] [--model <model>] [working-directory]
+          cgr explain [--issue <number>] [--pr <number>] [--model <model>] [working-directory]
           cgr config path [working-directory]
           cgr config show [--effective [working-directory]]
           cgr config validate [working-directory]

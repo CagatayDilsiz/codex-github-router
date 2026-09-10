@@ -12,6 +12,27 @@ public enum WorkClaimReconciliationRecommendation
 
 public static class WorkClaimReconciliationService
 {
+    /// <summary>
+    /// The pull-request selection the reconciliation default fetch uses. It must be a superset of
+    /// <see cref="ReviewRoutingService.Selection"/> (state, labels, title, isDraft, author,
+    /// reviewRequests, reviews) plus the fields issue-claim evaluation needs (createdAt,
+    /// headRefName, closingIssuesReferences). A default that lacked the review fields would see an
+    /// empty requested-reviewer list and could release a live review claim.
+    /// </summary>
+    public static PullRequestSelection DefaultPullRequestSelection { get; } = new()
+    {
+        Number = true,
+        State = true,
+        Labels = true,
+        Title = true,
+        CreatedAt = true,
+        HeadRefName = true,
+        ClosingIssuesReferences = true,
+        IsDraft = true,
+        Author = true,
+        ReviewRequests = true,
+        Reviews = true
+    };
     public static bool ShouldRelease(WorkClaim claim, Issue issue, PullRequest? claimedPullRequest, RouterConfiguration configuration)
     {
         if (string.Equals(issue.State, "closed", StringComparison.OrdinalIgnoreCase)) return true;
@@ -118,15 +139,15 @@ public static class WorkClaimReconciliationService
         var occupied = new List<OccupiedWorkClaim>();
         foreach (var claim in otherWorktreeClaims)
         {
-            var conflicts = taskList.Any(task =>
-                task.IssueNumber == claim.IssueNumber ||
-                (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value));
+            var conflicts = taskList.Any(task => OccupiesTask(claim, task));
             if (conflicts)
             {
                 occupied.Add(new OccupiedWorkClaim
                 {
                     IssueNumber = claim.IssueNumber,
                     PullRequestNumber = claim.PullRequestNumber,
+                    ReviewerLogin = claim.ReviewerLogin,
+                    WorkType = claim.WorkType,
                     WorktreeId = claim.WorktreeId,
                     WorktreePath = claim.WorktreePath,
                     OwnerSessionId = claim.OwnerSessionId
@@ -135,6 +156,27 @@ public static class WorkClaimReconciliationService
         }
 
         return occupied;
+    }
+
+    /// <summary>
+    /// Occupancy is work-type aware: a review claim occupies only the same
+    /// (pull request, reviewer) review work, and never implementation or change-request work on
+    /// the same pull request (those may legitimately overlap review work). Non-review claims do not
+    /// occupy review tasks — a review requested on a claimed implementation PR is distinct work.
+    /// </summary>
+    private static bool OccupiesTask(WorkClaim claim, WorkflowItem task)
+    {
+        if (claim.WorkType == WorkClaimType.Review || task.Type == WorkflowItemType.PullRequestReview)
+        {
+            return claim.WorkType == WorkClaimType.Review &&
+                task.Type == WorkflowItemType.PullRequestReview &&
+                claim.PullRequestNumber.HasValue &&
+                task.PullRequestNumber == claim.PullRequestNumber.Value &&
+                string.Equals(task.ReviewerLogin, claim.ReviewerLogin, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return task.IssueNumber == claim.IssueNumber ||
+            (claim.PullRequestNumber.HasValue && task.PullRequestNumber == claim.PullRequestNumber.Value);
     }
 
     /// <summary>
@@ -162,12 +204,23 @@ public static class WorkClaimReconciliationService
         }
 
         getIssue ??= number => GitHubCliService.GetIssueByNumberAsync(workingDirectory, number, cancellationToken);
-        getPullRequest ??= number => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, number, new PullRequestSelection { Number = true, State = true, Labels = true, CreatedAt = true, HeadRefName = true, ClosingIssuesReferences = true }, cancellationToken);
+        getPullRequest ??= number => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, number, DefaultPullRequestSelection, cancellationToken);
+
+        if (claim.WorkType == WorkClaimType.Review)
+        {
+            return await DetermineReviewAsync(claim, configuration, getPullRequest);
+        }
+
+        if (claim.IssueNumber is not { } claimIssueNumber)
+        {
+            // A non-review claim without an issue identity was written by a malformed client.
+            return WorkClaimReconciliationRecommendation.WouldRelease;
+        }
 
         Issue issue;
         try
         {
-            issue = await getIssue(claim.IssueNumber);
+            issue = await getIssue(claimIssueNumber);
         }
         catch (GitHubItemNotFoundException)
         {
@@ -225,6 +278,47 @@ public static class WorkClaimReconciliationService
             : WorkClaimReconciliationRecommendation.WouldKeep;
     }
 
+    /// <summary>
+    /// Releases review claims whose pull request no longer requests the reviewer. Mirrors
+    /// <see cref="WorkflowService.EvaluateClaimedReviewWork"/>: terminal/draft PRs, reviewer
+    /// removals and stale review cycles release the claim, while CGR pull-request states that
+    /// contradict review work (ChangesRequested, AwaitingMerge, Deferred) also release it.
+    /// Unverifiable GitHub state returns <see cref="WorkClaimReconciliationRecommendation.UnableToDetermine"/>
+    /// so the shared fail-closed contract is preserved.
+    /// </summary>
+    public static async Task<WorkClaimReconciliationRecommendation> DetermineReviewAsync(
+        WorkClaim claim,
+        RouterConfiguration configuration,
+        Func<int, Task<PullRequest>> getPullRequest)
+    {
+        if (!claim.PullRequestNumber.HasValue)
+        {
+            // A review claim without a pull request identity was written by a malformed client.
+            return WorkClaimReconciliationRecommendation.WouldRelease;
+        }
+
+        PullRequest pullRequest;
+        try
+        {
+            pullRequest = await getPullRequest(claim.PullRequestNumber.Value);
+        }
+        catch (GitHubItemNotFoundException)
+        {
+            return WorkClaimReconciliationRecommendation.WouldRelease;
+        }
+        catch
+        {
+            return WorkClaimReconciliationRecommendation.UnableToDetermine;
+        }
+
+        var evaluated = WorkflowService.EvaluateClaimedReviewWork(configuration, claim, pullRequest);
+        return evaluated.IsSuccessful && evaluated.Tasks.Any(task => task.Type == WorkflowItemType.AwaitingReview)
+            ? WorkClaimReconciliationRecommendation.WouldRelease
+            : evaluated.IsSuccessful
+                ? WorkClaimReconciliationRecommendation.WouldKeep
+                : WorkClaimReconciliationRecommendation.UnableToDetermine;
+    }
+
     public static List<PullRequest> SelectCurrentClaimPullRequests(WorkClaim claim, Issue issue, IEnumerable<PullRequest> pullRequests) =>
         pullRequests.Where(pullRequest => WorkflowService.IsCurrentClaimPullRequest(claim, issue, pullRequest)).ToList();
 
@@ -256,8 +350,10 @@ public sealed class WorkClaimReconcileAllResult
 /// </summary>
 public sealed class OccupiedWorkClaim
 {
-    public int IssueNumber { get; init; }
+    public int? IssueNumber { get; init; }
     public int? PullRequestNumber { get; init; }
+    public string? ReviewerLogin { get; init; }
+    public WorkClaimType WorkType { get; init; }
     public string WorktreeId { get; init; } = string.Empty;
     public string? WorktreePath { get; init; }
     public string OwnerSessionId { get; init; } = string.Empty;

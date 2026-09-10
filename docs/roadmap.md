@@ -16,7 +16,7 @@ Use native GitHub signals — reviews, status checks, mergeable state — in wor
 
 ## Pull-request review as a claimable work type
 
-Today change requests on linked pull requests are routed, but PR review itself is not a claimable work type. A future capability is claiming and performing review work explicitly.
+Pull-request review is now a claimable work type under `policies.reviewRouting.enabled`, claimed per (pull request, reviewer) with a submitted-review cycle marker, fail-closed release, and diagnostics through `cgr work list`, `cgr explain --pr`, and `cgr work reconcile`. Remaining gaps are team-review membership resolution (team review requests are exposed for diagnostics but not claimable) and review routing across the local identity's aliases when those aliases are not the authenticated GitHub account.
 
 ## Richer configuration editing commands
 

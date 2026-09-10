@@ -207,6 +207,26 @@ Eligibility summary (`me` = any issue assignee within the current identity's use
 
 Ranking is deterministic: within a task type the hook selects the task with the lowest rank; ranks are equal when assignment routing is disabled, so existing ordering is preserved. Assignment-aware candidate discovery is tiered so that priority is applied over the whole discoverable set, not just a capped window: first it searches issues assigned to the current identity directly (`assignee:` for each configured username; `prefer` and `require`), then unassigned issues when `unassigned: allow` (`no:assignee`), and only last falls back to a general scan bounded by `MaxDiscoveryScanLimit`. Each tier scans until it finds an eligible candidate under the combined worker+assignment policy or provably runs out of results, and merged results across multiple identity usernames retain the configured issue sort. This guarantees that, for example, an unassigned issue is always preferred over another developer's issue in `prefer`, and an assigned-to-me issue is preferred over unassigned in `require`. `ignore` mode activates none of the assignment tiers, so assignment state is ignored and existing generic discovery ordering is preserved. Assignment joins worker routing by intersection (an issue must be eligible under both), and applies to issue-derived developer work: new issues, in-progress resumes, change requests, completed-issue recovery, current-pull-request recovery, pull-request-to-issue linking, and the `ClosedWithoutMerge` / `UnknownPullRequestState` blocker states, so another developer's broken issue cannot block a strict-routing session. Repository gates and active-claim continuation are exempt. `cgr doctor` reports the resolved identity and its source.
 
+### `reviewRouting`
+
+Opt-in pull-request review routing. When enabled, GitHub review requests for the review-work identity become claimable work.
+
+```json
+{
+  "policies": {
+    "reviewRouting": {
+      "enabled": true
+    }
+  }
+}
+```
+
+- `enabled`: `false` (default) or `true`.
+
+The review-work identity is the authenticated GitHub CLI account (`gh`), constrained to the local identity's usernames when `assignmentRouting` resolves one: CGR only acts as a GitHub account the local identity owns. A review request is claimable when the pull request is open, not draft, not authored by the reviewer, carries no contradictory CGR pull-request state (a merged/closed pull request and conflicting `changesRequested`/`awaitingMerge`/`deferred` states are not claimable), and the reviewer is a directly requested user reviewer — team requests are exposed for diagnostics but not claimable.
+
+Review work is claimed per (pull request, reviewer) and conflicts with other worktrees only on the same pair. The claim's cycle marker is the node ID of the reviewer's latest submitted review captured at claim time; submitting a new review (even followed by a fast re-request) completes the old claim, which is released and re-claimed on the new cycle. Review claims fail closed: an unknown GitHub pull-request state or an ambiguous CGR state neither routes review work nor releases the claim, so a live review claim is never silently dropped. Merge/close a pull request to release its review claims, or run `cgr work release --pr <number>`.
+
 ### `repositoryGate`
 
 Orthogonal gate policy that can block unrelated work.
@@ -289,7 +309,7 @@ The checked-out working tree is the source of the repository override. Invalid J
 
 ## Built-in defaults (global file missing)
 
-When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), and `diagnostics` enabled with `retentionDays` 7.
+When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), `reviewRouting` disabled (`enabled` false), and `diagnostics` enabled with `retentionDays` 7.
 
 ## Effective diagnostics policy
 

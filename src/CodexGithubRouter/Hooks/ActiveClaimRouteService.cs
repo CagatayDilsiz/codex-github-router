@@ -119,7 +119,7 @@ public sealed class ActiveClaimRouteService
 
             if (IsReleaseCandidate(claimedWork))
             {
-                return new HookTaskDecision { BlockReason = $"Active work claim for issue #{currentClaim.IssueNumber}{FormatPullRequest(currentClaim.PullRequestNumber)} remains passive or terminal, but could not be released safely. No unrelated work will be routed." };
+                return new HookTaskDecision { BlockReason = $"Active work claim for {FormatWorkIdentity(currentClaim)} remains passive or terminal, but could not be released safely. No unrelated work will be routed." };
             }
         }
 
@@ -139,7 +139,14 @@ public sealed class ActiveClaimRouteService
                 OwnerSessionId = sessionId,
                 IssueNumber = decision.SelectedTask.IssueNumber,
                 PullRequestNumber = decision.SelectedTask.PullRequestNumber,
-                WorkType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest ? WorkClaimType.ChangeRequest : WorkClaimType.Implementation,
+                WorkType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
+                    ? WorkClaimType.ChangeRequest
+                    : decision.SelectedTask.Type == WorkflowItemType.PullRequestReview
+                        ? WorkClaimType.Review
+                        : WorkClaimType.Implementation,
+                ReviewerLogin = decision.SelectedTask.ReviewerLogin,
+                ReviewCycleId = decision.SelectedTask.ReviewCycleId,
+                ReviewBaselineCaptured = decision.SelectedTask.Type == WorkflowItemType.PullRequestReview,
                 Model = currentModel
             });
             if (!acquisition.Acquired)
@@ -161,7 +168,7 @@ public sealed class ActiveClaimRouteService
                     return null;
                 }
 
-                return new HookTaskDecision { BlockReason = $"Active work claim for issue #{currentClaim.IssueNumber}{FormatPullRequest(currentClaim.PullRequestNumber)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed." };
+                return new HookTaskDecision { BlockReason = $"Active work claim for {FormatWorkIdentity(currentClaim)} changed to a passive or terminal state but could not be released safely. No unrelated work will be routed." };
             }
 
             decision = HookTaskRouter.RouteClaimedWork(
@@ -180,6 +187,11 @@ public sealed class ActiveClaimRouteService
             WorkflowItemType.Deferred or
             WorkflowItemType.CloseIssue or
             WorkflowItemType.ClosedWithoutMerge;
+
+    private static string FormatWorkIdentity(WorkClaim claim) =>
+        claim.WorkType == WorkClaimType.Review
+            ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
+            : $"issue #{claim.IssueNumber}{FormatPullRequest(claim.PullRequestNumber)}";
 
     private static string FormatPullRequest(int? pullRequestNumber) =>
         pullRequestNumber.HasValue ? $" / pull request #{pullRequestNumber.Value}" : string.Empty;
