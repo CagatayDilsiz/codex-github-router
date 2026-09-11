@@ -40,6 +40,8 @@ public static class RoutingExplanationService
         stages.Add(workflowStage);
         isEligible &= workflowStage.Verdict != RoutingVerdict.HardIneligible;
 
+        stages.Add(ExplainNativeSignals(plan, issue));
+
         stages.Add(ExplainDiscovery(plan, issue));
 
         var workerStage = plan.HasRepositoryGate
@@ -337,6 +339,52 @@ public static class RoutingExplanationService
         return selected
             ? $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' and was selected by the production routing decision."
             : $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' but was not selected by this routing decision.";
+    }
+
+    private static RoutingStage ExplainNativeSignals(RoutingEvaluationResult plan, Issue issue)
+    {
+        if (!GitHubSignalEvaluationService.IsEnabled(plan.Configuration))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Disabled,
+                Message = "Native GitHub signals are disabled (policies.nativeSignals.enabled is false); workflow state is label-driven only and no additional check, review or mergeability data are fetched."
+            };
+        }
+
+        var issueTasks = plan.WorkflowTasks
+            .Where(task => task.IssueNumber == issue.Number && task.PullRequestNumber.HasValue)
+            .ToList();
+        if (issueTasks.Count == 0)
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Issue #{issue.Number} has no linked pull request in the production routing decision; native GitHub signals do not participate and label-driven routing applies."
+            };
+        }
+
+        var nativeTasks = issueTasks
+            .Where(task => task.Status.Message.Contains(GitHubSignalEvaluationService.NoLabelNativeClassificationMarker, StringComparison.Ordinal))
+            .ToList();
+        if (nativeTasks.Count > 0)
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Native GitHub signals classified the linked work for issue #{issue.Number}: {string.Join(" ", nativeTasks.Select(task => task.Status.Message))}"
+            };
+        }
+
+        return new RoutingStage
+        {
+            Name = "Native GitHub Signals",
+            Verdict = RoutingVerdict.Pass,
+            Message = $"Linked pull requests for issue #{issue.Number} carry CGR workflow labels, which take precedence over evaluative native signals; label-driven routing was not overridden."
+        };
     }
 
     private static RoutingStage ExplainWorkflowState(RouterConfiguration configuration, Issue issue)

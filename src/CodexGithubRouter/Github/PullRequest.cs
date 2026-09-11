@@ -50,6 +50,25 @@ public sealed class PullRequest
     [JsonConverter(typeof(PullRequestReviewsConverter))]
     public List<PullRequestReview> Reviews { get; init; } = new();
 
+    [JsonPropertyName("statusCheckRollup")]
+    [JsonConverter(typeof(StatusCheckRollupConverter))]
+    public List<CheckRun> StatusCheckRollup { get; init; } = new();
+
+    /// <summary>
+    /// Native GitHub mergeability signal: <c>MERGEABLE</c>, <c>UNMERGEABLE</c> or <c>UNKNOWN</c>.
+    /// An absent/unknown value is intentionally conservative: the router never advances work on an
+    /// unverifiable merge state.
+    /// </summary>
+    [JsonPropertyName("mergeable")]
+    public string Mergeable { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Native GitHub review decision for the pull request: <c>APPROVED</c>, <c>CHANGES_REQUESTED</c>
+    /// or <c>REVIEW_REQUIRED</c>. An absent/unknown value is treated as no review signal.
+    /// </summary>
+    [JsonPropertyName("reviewDecision")]
+    public string ReviewDecision { get; init; } = string.Empty;
+
     /// <summary>
     /// Logins of directly requested user reviewers (teams are excluded).
     /// </summary>
@@ -111,6 +130,34 @@ public sealed class PullRequestReviewRequest
     public string ReviewerSlug { get; init; } = string.Empty;
 
     public bool IsTeam { get; init; }
+}
+
+/// <summary>
+/// A single check or status entry on a pull request, normalized from <c>gh pr view --json statusCheckRollup</c>.
+/// Both GraphQL shapes are folded into one model: <c>__typename == "CheckRun"</c> entries carry
+/// <c>name</c>/<c>status</c>/<c>conclusion</c>, while <c>__typename == "StatusContext"</c> entries
+/// carry <c>context</c>/<c>state</c>. <see cref="StatusCheckRollupConverter"/> normalizes status
+/// contexts into this same shape so the native-signal evaluator has a single, deterministic view.
+/// </summary>
+public sealed class CheckRun
+{
+    public string Name { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Normalized run status: <c>QUEUED</c>, <c>IN_PROGRESS</c> or <c>COMPLETED</c>. Status contexts
+    /// map <c>PENDING</c>/<c>EXPECTED</c> to <c>QUEUED</c> and unknown states to <c>QUEUED</c> so the
+    /// evaluator fails conservative on any non-completed run.
+    /// </summary>
+    public string Status { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Normalized conclusion for completed runs: <c>SUCCESS</c>, <c>FAILURE</c>, <c>NEUTRAL</c>,
+    /// <c>CANCELLED</c>, <c>SKIPPED</c>, <c>TIMED_OUT</c>, <c>ACTION_REQUIRED</c> or <c>ERROR</c>.
+    /// Empty when the run has not completed.
+    /// </summary>
+    public string Conclusion { get; init; } = string.Empty;
+
+    public bool IsRequired { get; init; }
 }
 
 /// <summary>
@@ -351,5 +398,135 @@ public sealed class PullRequestReviewsConverter : JsonConverter<List<PullRequest
         }
 
         return string.Empty;
+    }
+}
+
+/// <summary>
+/// Tolerant deserializer for <c>gh</c> <c>statusCheckRollup</c> output. Production <c>gh pr view --json statusCheckRollup</c>
+/// exports a flat array of <c>{ "__typename": "CheckRun", ... }</c> and <c>{ "__typename": "StatusContext", ... }</c>
+/// entries; a GraphQL connection shape (<c>{ "nodes": [...] }</c>) is also accepted. Status contexts are normalized
+/// into <see cref="CheckRun"/> using <see cref="NormalizeStatusContextState"/> so a single conservative evaluator
+/// consumes both.
+/// </summary>
+public sealed class StatusCheckRollupConverter : JsonConverter<List<CheckRun>>
+{
+    public override List<CheckRun> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var document = JsonDocument.ParseValue(ref reader);
+        var root = document.RootElement;
+
+        IEnumerable<JsonElement> items;
+        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("nodes", out var nodes) && nodes.ValueKind == JsonValueKind.Array)
+        {
+            items = nodes.EnumerateArray().ToList();
+        }
+        else if (root.ValueKind == JsonValueKind.Array)
+        {
+            items = root.EnumerateArray().ToList();
+        }
+        else
+        {
+            return new List<CheckRun>();
+        }
+
+        var runs = new List<CheckRun>();
+        foreach (var item in items)
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var typename = TryReadString(item, "__typename");
+            if (string.Equals(typename, "StatusContext", StringComparison.OrdinalIgnoreCase))
+            {
+                var (status, conclusion) = NormalizeStatusContextState(TryReadString(item, "state"));
+                runs.Add(new CheckRun
+                {
+                    Name = TryReadString(item, "context"),
+                    Status = status,
+                    Conclusion = conclusion,
+                    IsRequired = TryReadBool(item, "isRequired")
+                });
+                continue;
+            }
+
+            runs.Add(new CheckRun
+            {
+                Name = TryReadString(item, "name"),
+                Status = TryReadString(item, "status"),
+                Conclusion = TryReadString(item, "conclusion"),
+                IsRequired = TryReadBool(item, "isRequired")
+            });
+        }
+
+        return runs;
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<CheckRun> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var run in value)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("__typename", "CheckRun");
+            writer.WriteString("name", run.Name);
+            writer.WriteString("status", run.Status);
+            writer.WriteString("conclusion", run.Conclusion);
+            writer.WriteBoolean("isRequired", run.IsRequired);
+            writer.WriteEndObject();
+        }
+
+        writer.WriteEndArray();
+    }
+
+    /// <summary>
+    /// Normalizes a StatusContext <c>state</c> into (status, conclusion). <c>SUCCESS</c> becomes a
+    /// completed passing run, <c>FAILURE</c>/<c>ERROR</c> become completed failures, and every
+    /// non-consumed state (including <c>PENDING</c>/<c>EXPECTED</c> and unknown values) becomes
+    /// queued so the evaluator fails conservative on anything that is not demonstrably complete.
+    /// </summary>
+    private static (string Status, string Conclusion) NormalizeStatusContextState(string state)
+    {
+        if (string.Equals(state, "SUCCESS", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("COMPLETED", "SUCCESS");
+        }
+
+        if (string.Equals(state, "FAILURE", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(state, "ERROR", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("COMPLETED", "FAILURE");
+        }
+
+        return ("QUEUED", string.Empty);
+    }
+
+    private static string TryReadString(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String)
+        {
+            return property.GetString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryReadBool(JsonElement element, string propertyName)
+    {
+        if (element.TryGetProperty(propertyName, out var property))
+        {
+            if (property.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+
+            if (property.ValueKind == JsonValueKind.False)
+            {
+                return false;
+            }
+        }
+
+        return false;
     }
 }

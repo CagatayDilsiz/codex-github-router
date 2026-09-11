@@ -116,9 +116,21 @@ public sealed class RouterPolicies
     public DiagnosticsPolicy Diagnostics { get; init; } = new();
 
     public ReviewRoutingPolicy? ReviewRouting { get; init; }
+
+    public NativeSignalsPolicy NativeSignals { get; init; } = new();
 }
 
 public sealed class ReviewRoutingPolicy
+{
+    public bool Enabled { get; init; }
+}
+
+/// <summary>
+/// Enables GitHub-native review/check/mergeability signals in workflow evaluation. Disabled by
+/// default so repositories that want label-driven workflows only keep the historical behavior:
+/// without this policy, workflow state is derived exclusively from CGR workflow labels.
+/// </summary>
+public sealed class NativeSignalsPolicy
 {
     public bool Enabled { get; init; }
 }

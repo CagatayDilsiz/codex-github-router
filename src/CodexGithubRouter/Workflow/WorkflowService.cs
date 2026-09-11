@@ -17,7 +17,7 @@ public static class WorkflowService
         var response = await EvaluateClaimedWorkAsync(configuration, claim, issue, pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
             workingDirectory,
             pullRequestNumber,
-            new PullRequestSelection
+            WithNativeSignalsWhenEnabled(configuration, new PullRequestSelection
             {
                 Number = true,
                 State = true,
@@ -25,7 +25,7 @@ public static class WorkflowService
                 CreatedAt = true,
                 HeadRefName = true,
                 ClosingIssuesReferences = true
-            },
+            }),
             CancellationToken.None), currentModel, issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
         if (response.ConsideredIssues.Count == 0)
         {
@@ -501,6 +501,21 @@ public static class WorkflowService
             return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { new() { Type = WorkflowItemType.Deferred, IssueNumber = claim.IssueNumber, PullRequestNumber = pullRequest.Number } } };
         }
 
+        // No CGR workflow label matched. When native GitHub signals are enabled, resolve the
+        // pull-request state from its review decision, status checks and mergeability
+        // (deterministic, fail-conservative). Only when native signals produce no classification
+        // does the pull request fall through to label-less lifecycle recovery, preserving the
+        // historical behavior for repositories with native signals disabled.
+        var nativeItem = GitHubSignalEvaluationService.CreateWorkflowItem(
+            configuration,
+            pullRequest,
+            claim.IssueNumber,
+            $"({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on pull request #{pullRequest.Number}.)");
+        if (nativeItem is not null)
+        {
+            return new WorkflowResponse { IsSuccessful = true, Tasks = new List<WorkflowItem> { nativeItem } };
+        }
+
         return new WorkflowResponse
         {
             IsSuccessful = true,
@@ -533,7 +548,7 @@ public static class WorkflowService
         var response = await EvaluateInProgressIssuesAsync(
             configuration,
             inProgressIssues,
-            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, WithNativeSignalsWhenEnabled(configuration, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }), CancellationToken.None),
             currentModel,
             pullRequestNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, pullRequestNumber, CancellationToken.None),
             assignmentIdentity);
@@ -659,7 +674,7 @@ public static class WorkflowService
             pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(
                 workingDirectory,
                 pullRequestNumber,
-                new PullRequestSelection { Number = true, State = true, Labels = true },
+                WithNativeSignalsWhenEnabled(configuration, new PullRequestSelection { Number = true, State = true, Labels = true }),
                 CancellationToken.None));
     }
 
@@ -799,6 +814,12 @@ public static class WorkflowService
         }
 
         var unknown = openPullRequests[0];
+        var nativeItem = GitHubSignalEvaluationService.CreateWorkflowItem(configuration, unknown, issue.Number);
+        if (nativeItem is not null)
+        {
+            return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\n{nativeItem.Status.Message}\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
+        }
+
         return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\nPull request #{unknown.Number} is in an unknown state.\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
     }
 
@@ -835,7 +856,7 @@ public static class WorkflowService
             var response = await CheckIssueLinkedPullRequestsAsync(
                 configuration,
                 completedIssues,
-                pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
+                pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, WithNativeSignalsWhenEnabled(configuration, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }), CancellationToken.None),
                 issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
             return AssignmentRoutingService.FilterCodingTasks(configuration, assignmentIdentity, completedIssues, WorkerRoutingService.FilterCodingTasks(configuration, completedIssues, response, currentModel));
         }
@@ -856,7 +877,7 @@ public static class WorkflowService
         return await CheckIssueLinkedPullRequestsAsync(
             configuration,
             completedIssues,
-            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }, CancellationToken.None),
+            pullRequestNumber => GitHubCliService.GetPullRequestByNumberAsync(workingDirectory, pullRequestNumber, WithNativeSignalsWhenEnabled(configuration, new PullRequestSelection { Number = true, State = true, Labels = true, ClosingIssuesReferences = true }), CancellationToken.None),
             issueNumber => GitHubCliService.GetIssueByNumberAsync(workingDirectory, issueNumber, CancellationToken.None));
     }
 
@@ -1041,6 +1062,13 @@ public static class WorkflowService
                 }
 
 
+                var nativeItem = CreateNativeLinkedPullRequestItem(configuration, openPullRequests, issue);
+                if (nativeItem is not null)
+                {
+                    workflowTasks.Add(nativeItem);
+                    continue;
+                }
+
                 workflowTasks.Add(new WorkflowItem()
                 {
                     Type = WorkflowItemType.UnknownPullRequestState,
@@ -1093,6 +1121,32 @@ public static class WorkflowService
             IsSuccessful = true,
             Message = "Workflow check completed successfully.",
             ConsideredIssues = issueList
+        };
+    }
+
+    private static PullRequestSelection WithNativeSignalsWhenEnabled(RouterConfiguration configuration, PullRequestSelection selection) =>
+        GitHubSignalEvaluationService.IsEnabled(configuration) ? selection.WithNativeSignals() : selection;
+
+    private static WorkflowItem? CreateNativeLinkedPullRequestItem(RouterConfiguration configuration, IReadOnlyList<PullRequest> openPullRequests, Issue issue)
+    {
+        var unlabeledNative = openPullRequests
+            .Select(openPullRequest => GitHubSignalEvaluationService.CreateWorkflowItem(configuration, openPullRequest, issue.Number))
+            .FirstOrDefault(item => item is not null);
+        if (unlabeledNative is null)
+        {
+            return null;
+        }
+
+        return new WorkflowItem
+        {
+            Type = unlabeledNative.Type,
+            IssueNumber = issue.Number,
+            PullRequestNumber = unlabeledNative.PullRequestNumber,
+            Status = new WorkflowTaskStatus
+            {
+                Message = $"{unlabeledNative.Status.Message} ({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on linked pull request #{unlabeledNative.PullRequestNumber}.)",
+                LinkedPullRequests = openPullRequests.Select(pr => pr.Number).ToList()
+            }
         };
     }
 
