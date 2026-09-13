@@ -587,6 +587,47 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.RepositoryGateBlock, task.Type);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
+        Assert.Equal(21, task.PullRequestNumber);
+    }
+
+    [Theory]
+    [InlineData(new[] { 21, 22 })]
+    [InlineData(new[] { 22, 21 })]
+    public async Task Gated_label_less_native_preference_is_order_independent_and_prioritizes_change_request(int[] references)
+    {
+        var issue = GatedIssue(11, WorkflowState.Completed, references);
+        var passive = Pull(number: 21, claim: Claim(), reviewDecision: "APPROVED", mergeable: "MERGEABLE", checks: Completed("build", "SUCCESS"));
+        var actionable = Pull(number: 22, claim: Claim(), reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "FAILURE"));
+        var byNumber = new Dictionary<int, PullRequest> { [21] = passive, [22] = actionable };
+
+        var result = await WorkflowService.EvaluateRepositoryGateAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            number => Task.FromResult(byNumber[number]));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(22, task.PullRequestNumber);
+    }
+
+    [Fact]
+    public async Task Gated_labeled_pull_request_is_excluded_from_native_classification()
+    {
+        var issue = GatedIssue(12, WorkflowState.Completed, 21, 22);
+        var deferred = Pull(number: 21, claim: Claim(), label: "codex:deferred", reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "FAILURE"));
+        var labelLess = Pull(number: 22, claim: Claim(), reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "SUCCESS"));
+        var byNumber = new Dictionary<int, PullRequest> { [21] = deferred, [22] = labelLess };
+
+        var result = await WorkflowService.EvaluateRepositoryGateAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            number => Task.FromResult(byNumber[number]));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(22, task.PullRequestNumber);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -653,6 +694,27 @@ public sealed class GitHubSignalEvaluationTests
         var stage = Assert.Single(explanation.Stages, s => s.Name == "Native GitHub Signals");
         Assert.Equal(RoutingVerdict.Pass, stage.Verdict);
         Assert.Contains("no usable native signal data", stage.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Explain_reports_native_signal_classification_for_passive_gate_decision()
+    {
+        var issue = GatedIssue(12, WorkflowState.Completed, 21);
+        var result = await WorkflowService.EvaluateRepositoryGateAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            _ => Task.FromResult(Pull(claim: Claim(), reviewDecision: "REVIEW_REQUIRED", checks: new CheckRun { Name = "build", Status = "IN_PROGRESS", Conclusion = "" })));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.RepositoryGateBlock, task.Type);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
+        Assert.True(task.PullRequestNumber.HasValue);
+
+        var explanation = RoutingExplanationService.Explain(Plan(issue, configuration: NativeConfiguration(), workItems: result.Tasks), issue);
+
+        var stage = Assert.Single(explanation.Stages, s => s.Name == "Native GitHub Signals");
+        Assert.Equal(RoutingVerdict.Pass, stage.Verdict);
+        Assert.Contains("native GitHub signals classified", stage.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -758,7 +820,7 @@ public sealed class GitHubSignalEvaluationTests
         ClosingPullRequestsReferences = referenceNumbers.Select(number => new ClosingIssueReference { Number = number }).ToList()
     };
 
-    private static Issue GatedIssue(int number, WorkflowState state, int pullRequestNumber) => new()
+    private static Issue GatedIssue(int number, WorkflowState state, params int[] pullRequestNumbers) => new()
     {
         Number = number,
         State = "open",
@@ -767,7 +829,7 @@ public sealed class GitHubSignalEvaluationTests
             new() { Name = new RouterConfiguration().States[state].Single().Values.Single() },
             new() { Name = "codex:gate" }
         },
-        ClosingPullRequestsReferences = new List<ClosingIssueReference> { new() { Number = pullRequestNumber } }
+        ClosingPullRequestsReferences = pullRequestNumbers.Select(pullRequestNumber => new ClosingIssueReference { Number = pullRequestNumber }).ToList()
     };
 
     private static RouterConfiguration NativeConfiguration() => new()

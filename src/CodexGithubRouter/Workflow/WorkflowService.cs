@@ -814,8 +814,11 @@ public static class WorkflowService
             return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\nPull request #{deferred.Number} is deferred.\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
         }
 
-        var unknown = openPullRequests[0];
-        var nativeItem = GitHubSignalEvaluationService.CreateWorkflowItem(configuration, unknown, issue.Number, $"({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on pull request #{unknown.Number}; repository workflow is gated by issue #{issue.Number}.)");
+        // Label-less native aggregation reuses the shared linked-PR helper: resolved CGR workflow
+        // labels are never native-classified, and the deterministic outcome (actionable change
+        // request wins over passive states, tie-broken by pull-request number) is independent of
+        // the order the pull requests were collected in.
+        var nativeItem = CreateNativeLinkedPullRequestItem(configuration, openPullRequests, issue, $"(repository workflow is gated by issue #{issue.Number}.)");
         if (nativeItem is not null)
         {
             // Native signals mirror the label-driven gate semantics: a change-request state is
@@ -826,10 +829,26 @@ public static class WorkflowService
                 return new List<WorkflowItem> { nativeItem };
             }
 
-            return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\n{nativeItem.Status.Message}\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
+            // Passive native decisions stay a gate block but carry the structured provenance and PR
+            // identity from the native classifier, so cgr explain can attribute the block to native
+            // signal classification rather than a generic gate.
+            return new List<WorkflowItem>
+            {
+                new()
+                {
+                    Type = WorkflowItemType.RepositoryGateBlock,
+                    IssueNumber = issue.Number,
+                    PullRequestNumber = nativeItem.PullRequestNumber,
+                    Source = WorkflowItemSource.NativeSignals,
+                    Status = new WorkflowTaskStatus
+                    {
+                        Message = $"Repository workflow is gated by issue #{issue.Number}.\n{nativeItem.Status.Message}\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work."
+                    }
+                }
+            };
         }
 
-        return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\nPull request #{unknown.Number} is in an unknown state.\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
+        return new List<WorkflowItem> { CreateGateBlock(issue, $"Repository workflow is gated by issue #{issue.Number}.\nPull request #{openPullRequests[0].Number} is in an unknown state.\nRemove {RepositoryGateService.FormatGateLabel(configuration)} from issue #{issue.Number} to allow unrelated work.") };
     }
 
     private static WorkflowItem CreateGateBlock(Issue issue, string message) => new()
@@ -1141,7 +1160,7 @@ public static class WorkflowService
     private static PullRequestSelection WithNativeSignalsWhenEnabled(RouterConfiguration configuration, PullRequestSelection selection) =>
         GitHubSignalEvaluationService.IsEnabled(configuration) ? selection.WithNativeSignals() : selection;
 
-    private static WorkflowItem? CreateNativeLinkedPullRequestItem(RouterConfiguration configuration, IReadOnlyList<PullRequest> openPullRequests, Issue issue)
+    private static WorkflowItem? CreateNativeLinkedPullRequestItem(RouterConfiguration configuration, IReadOnlyList<PullRequest> openPullRequests, Issue issue, string? messageSuffix = null)
     {
         // Only label-less pull requests participate: a resolved CGR workflow label wins over
         // evaluative native signals, so native classification never leaks onto labeled work.
@@ -1164,6 +1183,12 @@ public static class WorkflowService
             .ThenBy(item => item.PullRequestNumber)
             .First();
 
+        var message = $"{selected.Status.Message} ({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on linked pull request #{selected.PullRequestNumber}.)";
+        if (!string.IsNullOrWhiteSpace(messageSuffix))
+        {
+            message += " " + messageSuffix;
+        }
+
         return new WorkflowItem
         {
             Type = selected.Type,
@@ -1172,7 +1197,7 @@ public static class WorkflowService
             Source = WorkflowItemSource.NativeSignals,
             Status = new WorkflowTaskStatus
             {
-                Message = $"{selected.Status.Message} ({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on linked pull request #{selected.PullRequestNumber}.)",
+                Message = message,
                 LinkedPullRequests = openPullRequests.Select(pr => pr.Number).ToList()
             }
         };
