@@ -69,12 +69,37 @@ public sealed class GitHubSignalEvaluationTests
     [Theory]
     [InlineData("NEUTRAL")]
     [InlineData("SKIPPED")]
-    [InlineData("CANCELLED")]
-    public void Evaluate_informational_conclusions_do_not_fail_the_pull_request(string conclusion)
+    public void Evaluate_informational_conclusions_count_as_passing(string conclusion)
     {
         var signals = GitHubSignalEvaluationService.Evaluate(Pull(checks: Completed("build", conclusion)));
 
         Assert.Equal(NativeCheckState.Passed, signals.CheckState);
+    }
+
+    [Theory]
+    [InlineData("CANCELLED")]
+    public void Evaluate_cancelled_conclusion_is_failing_like_gh(string conclusion)
+    {
+        var pullRequest = Pull(mergeable: "MERGEABLE", checks: Completed("build", conclusion));
+
+        var signals = GitHubSignalEvaluationService.Evaluate(pullRequest);
+
+        Assert.Equal(NativeCheckState.Failed, signals.CheckState);
+        Assert.Equal(WorkflowItemType.ChangeRequest, NativeClassify(pullRequest));
+    }
+
+    [Theory]
+    [InlineData("STALE")]
+    [InlineData("STARTUP_FAILURE")]
+    [InlineData("UNRECOGNIZED-CONCLUSION")]
+    public void Evaluate_unreliable_or_unrecognized_conclusions_stay_pending(string conclusion)
+    {
+        var pullRequest = Pull(mergeable: "MERGEABLE", checks: Completed("build", conclusion));
+
+        var signals = GitHubSignalEvaluationService.Evaluate(pullRequest);
+
+        Assert.Equal(NativeCheckState.Pending, signals.CheckState);
+        Assert.Equal(WorkflowItemType.AwaitingReview, NativeClassify(pullRequest));
     }
 
     [Theory]
@@ -333,6 +358,7 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
         Assert.Contains(GitHubSignalEvaluationService.NoLabelNativeClassificationMarker, task.Status.Message, StringComparison.Ordinal);
     }
 
@@ -353,6 +379,7 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.AwaitingReview, task.Type);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
     }
 
     [Fact]
@@ -385,6 +412,43 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.RecoverCurrentPullRequest, task.Type);
+        Assert.Equal(WorkflowItemSource.Recovery, task.Source);
+    }
+
+    [Fact]
+    public async Task Claimed_draft_pull_request_is_never_native_classified()
+    {
+        var claim = Claim();
+        var issue = WorkingIssueWithPullRequestReference();
+
+        var result = await WorkflowService.EvaluateClaimedWorkAsync(
+            NativeConfiguration(),
+            claim,
+            issue,
+            _ => Task.FromResult(Pull(
+                branch: "codex/issue-4-current",
+                claim: claim,
+                isDraft: true,
+                reviewDecision: "CHANGES_REQUESTED",
+                mergeable: "MERGEABLE",
+                checks: Completed("build", "SUCCESS"))));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.RecoverCurrentPullRequest, task.Type);
+    }
+
+    [Fact]
+    public async Task Linked_draft_pull_request_is_never_native_classified()
+    {
+        var issue = CompletedIssue();
+
+        var result = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            _ => Task.FromResult(Pull(claim: Claim(), isDraft: true, reviewDecision: "APPROVED", mergeable: "MERGEABLE", checks: Completed("build", "SUCCESS"))));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.UnknownPullRequestState, task.Type);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -434,6 +498,7 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.UnknownPullRequestState, task.Type);
+        Assert.Equal(WorkflowItemSource.Recovery, task.Source);
     }
 
     [Fact]
@@ -453,6 +518,75 @@ public sealed class GitHubSignalEvaluationTests
 
         var task = Assert.Single(result.Tasks);
         Assert.Equal(WorkflowItemType.Deferred, task.Type);
+        Assert.Equal(WorkflowItemSource.Labels, task.Source);
+    }
+
+    [Fact]
+    public async Task Linked_labeled_pull_request_is_excluded_from_native_classification()
+    {
+        var issue = MultiPullRequestIssue(new[] { 21, 22 });
+        var deferred = Pull(number: 21, claim: Claim(), label: "codex:deferred", reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "FAILURE"));
+        var labelLess = Pull(number: 22, claim: Claim(), reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "SUCCESS"));
+        var byNumber = new Dictionary<int, PullRequest> { [21] = deferred, [22] = labelLess };
+
+        var result = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            number => Task.FromResult(byNumber[number]));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(22, task.PullRequestNumber);
+    }
+
+    [Theory]
+    [InlineData(new[] { 21, 22 })]
+    [InlineData(new[] { 22, 21 })]
+    public async Task Linked_native_preference_is_order_independent_and_prioritizes_change_request(int[] references)
+    {
+        var issue = MultiPullRequestIssue(references);
+        var passive = Pull(number: 21, claim: Claim(), reviewDecision: "APPROVED", mergeable: "MERGEABLE", checks: Completed("build", "SUCCESS"));
+        var actionable = Pull(number: 22, claim: Claim(), reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "FAILURE"));
+        var byNumber = new Dictionary<int, PullRequest> { [21] = passive, [22] = actionable };
+
+        var result = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            number => Task.FromResult(byNumber[number]));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(22, task.PullRequestNumber);
+    }
+
+    [Fact]
+    public async Task Gated_label_less_pull_request_with_failed_checks_is_actionable_when_native_enabled()
+    {
+        var issue = GatedIssue(11, WorkflowState.Completed, 21);
+
+        var result = await WorkflowService.EvaluateRepositoryGateAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            _ => Task.FromResult(Pull(claim: Claim(), reviewDecision: "CHANGES_REQUESTED", checks: Completed("build", "FAILURE"))));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.ChangeRequest, task.Type);
+        Assert.Equal(WorkflowItemSource.NativeSignals, task.Source);
+        Assert.Contains(GitHubSignalEvaluationService.NoLabelNativeClassificationMarker, task.Status.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Gated_label_less_pull_request_with_pending_checks_stays_a_gate_block_when_native_enabled()
+    {
+        var issue = GatedIssue(12, WorkflowState.Completed, 21);
+
+        var result = await WorkflowService.EvaluateRepositoryGateAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            _ => Task.FromResult(Pull(claim: Claim(), reviewDecision: "REVIEW_REQUIRED", checks: new CheckRun { Name = "build", Status = "IN_PROGRESS", Conclusion = "" })));
+
+        var task = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemType.RepositoryGateBlock, task.Type);
     }
 
     // --------------------------------------------------------------------------------------------
@@ -478,10 +612,8 @@ public sealed class GitHubSignalEvaluationTests
             Type = WorkflowItemType.ChangeRequest,
             IssueNumber = 4,
             PullRequestNumber = 21,
-            Status = new WorkflowTaskStatus
-            {
-                Message = $"GitHub checks on pull request #21 have failed. ({GitHubSignalEvaluationService.NoLabelNativeClassificationMarker} on pull request #21.)"
-            }
+            Source = WorkflowItemSource.NativeSignals,
+            Status = new WorkflowTaskStatus { Message = "GitHub checks on pull request #21 have failed." }
         };
         var explanation = RoutingExplanationService.Explain(Plan(issue, configuration: NativeConfiguration(), workItems: new[] { task }), issue);
 
@@ -495,12 +627,32 @@ public sealed class GitHubSignalEvaluationTests
     public void Explain_reports_label_driven_routing_not_overridden()
     {
         var issue = ReadyIssue(4);
-        var task = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 4, PullRequestNumber = 21 };
+        var task = new WorkflowItem { Type = WorkflowItemType.AwaitingMerge, IssueNumber = 4, PullRequestNumber = 21, Source = WorkflowItemSource.Labels };
         var explanation = RoutingExplanationService.Explain(Plan(issue, configuration: NativeConfiguration(), workItems: new[] { task }), issue);
 
         var stage = Assert.Single(explanation.Stages, s => s.Name == "Native GitHub Signals");
         Assert.Equal(RoutingVerdict.Pass, stage.Verdict);
-        Assert.Contains("carry CGR workflow labels", stage.Message, StringComparison.Ordinal);
+        Assert.Contains("CGR workflow labels", stage.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Explain_reports_no_usable_native_signal_data_from_production_linked_evaluation()
+    {
+        var issue = CompletedIssue();
+        var result = await WorkflowService.CheckIssueLinkedPullRequestsAsync(
+            NativeConfiguration(),
+            new[] { issue },
+            _ => Task.FromResult(Pull(claim: Claim())));
+
+        var recoveryTask = Assert.Single(result.Tasks);
+        Assert.Equal(WorkflowItemSource.Recovery, recoveryTask.Source);
+        Assert.Equal(WorkflowItemType.UnknownPullRequestState, recoveryTask.Type);
+
+        var explanation = RoutingExplanationService.Explain(Plan(issue, configuration: NativeConfiguration(), workItems: result.Tasks), issue);
+
+        var stage = Assert.Single(explanation.Stages, s => s.Name == "Native GitHub Signals");
+        Assert.Equal(RoutingVerdict.Pass, stage.Verdict);
+        Assert.Contains("no usable native signal data", stage.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -530,6 +682,7 @@ public sealed class GitHubSignalEvaluationTests
         string? label = null,
         string state = "open",
         bool isDraft = false,
+        int? number = null,
         string? reviewDecision = null,
         string? mergeable = null,
         CheckRun? checks = null,
@@ -549,7 +702,7 @@ public sealed class GitHubSignalEvaluationTests
 
         return new PullRequest
         {
-            Number = 21,
+            Number = number ?? 21,
             State = state,
             IsDraft = isDraft,
             CreatedAt = claim.ClaimedIssueUpdatedAt,
@@ -596,6 +749,25 @@ public sealed class GitHubSignalEvaluationTests
     {
         Number = number,
         Labels = new List<GithubLabel> { new() { Name = "codex:ready" } }
+    };
+
+    private static Issue MultiPullRequestIssue(IReadOnlyList<int> referenceNumbers) => new()
+    {
+        Number = 4,
+        Labels = new List<GithubLabel> { new() { Name = "codex:done" } },
+        ClosingPullRequestsReferences = referenceNumbers.Select(number => new ClosingIssueReference { Number = number }).ToList()
+    };
+
+    private static Issue GatedIssue(int number, WorkflowState state, int pullRequestNumber) => new()
+    {
+        Number = number,
+        State = "open",
+        Labels = new List<GithubLabel>
+        {
+            new() { Name = new RouterConfiguration().States[state].Single().Values.Single() },
+            new() { Name = "codex:gate" }
+        },
+        ClosingPullRequestsReferences = new List<ClosingIssueReference> { new() { Number = pullRequestNumber } }
     };
 
     private static RouterConfiguration NativeConfiguration() => new()

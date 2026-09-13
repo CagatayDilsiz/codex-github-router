@@ -163,6 +163,7 @@ public static class GitHubSignalEvaluationService
             Type = type.Value,
             IssueNumber = issueNumber,
             PullRequestNumber = pullRequest.Number,
+            Source = WorkflowItemSource.NativeSignals,
             Status = new WorkflowTaskStatus { Message = message }
         };
     }
@@ -230,6 +231,31 @@ public static class GitHubSignalEvaluationService
         return NativeReviewState.None;
     }
 
+    /// <summary>
+    /// A completed check passes only when its conclusion is on the explicit pass allow-list. Every
+    /// other completed conclusion is either failing (see <see cref="IsFailed"/>) or, when it is not
+    /// verifiable evidence of health (STALE, STARTUP_FAILURE, unrecognized), stays pending through
+    /// <see cref="IsPending"/> — fail-conservative, never advancing work.
+    /// </summary>
+    private static bool IsPassed(CheckRun check) =>
+        check.Conclusion is not null &&
+        (string.Equals(check.Conclusion, "SUCCESS", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "NEUTRAL", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "SKIPPED", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A completed check fails on conclusions that require attention. This mirrors how gh reports
+    /// conclusions: cancelled runs are treated as failing while stale and startup-failure runs are
+    /// treated as pending (handled by <see cref="IsPending"/>).
+    /// </summary>
+    private static bool IsFailed(CheckRun check) =>
+        check.Conclusion is not null &&
+        (string.Equals(check.Conclusion, "FAILURE", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "TIMED_OUT", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "ACTION_REQUIRED", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "ERROR", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(check.Conclusion, "CANCELLED", StringComparison.OrdinalIgnoreCase));
+
     private static NativeCheckState EvaluateCheckRollup(IReadOnlyList<CheckRun> checks)
     {
         if (checks is null || checks.Count == 0)
@@ -237,8 +263,8 @@ public static class GitHubSignalEvaluationService
             return NativeCheckState.Unknown;
         }
 
-        // Pending dominates the whole rollup: an unfinished run means the pull request has not
-        // advanced, regardless of what other checks report.
+        // Pending dominates the whole rollup: an unfinished or unverifiable run means the pull
+        // request has not advanced, regardless of what other checks report.
         foreach (var check in checks)
         {
             if (IsPending(check))
@@ -247,40 +273,28 @@ public static class GitHubSignalEvaluationService
             }
         }
 
-        var anyCompleted = false;
         foreach (var check in checks)
         {
             if (IsFailed(check))
             {
                 return NativeCheckState.Failed;
             }
-
-            anyCompleted = true;
         }
 
-        // Every entry completed without a failure conclusion. An entry with no verifiable state is
-        // classified pending (see IsPending), so reaching here only happens with coherent data.
-        return anyCompleted ? NativeCheckState.Passed : NativeCheckState.Unknown;
+        // Every entry completed with an explicit pass conclusion.
+        return NativeCheckState.Passed;
     }
 
     /// <summary>
-    /// A check is pending when it has not completed or its conclusion is not verifiable. Queued,
-    /// in-progress, and succeeded-without-a-conclusion runs keep the pull request in progress so
-    /// pending work is never rushed.
+    /// A check is pending when it has not completed, its conclusion is missing, or its conclusion is
+    /// not an explicit pass/fail conclusion (e.g. STALE, STARTUP_FAILURE or an unrecognized value).
+    /// Queued, in-progress, and unverifiable runs keep the pull request in progress so pending and
+    /// unreliable states are never rushed or mistaken for success.
     /// </summary>
     private static bool IsPending(CheckRun check) =>
         !string.Equals(check.Status, "COMPLETED", StringComparison.OrdinalIgnoreCase) ||
-        string.IsNullOrWhiteSpace(check.Conclusion);
-
-    /// <summary>
-    /// A completed check fails on any non-success conclusion that requires attention. Neutral,
-    /// cancelled and skipped runs are informational and do not fail the pull request.
-    /// </summary>
-    private static bool IsFailed(CheckRun check) =>
-        string.Equals(check.Conclusion, "FAILURE", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(check.Conclusion, "TIMED_OUT", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(check.Conclusion, "ACTION_REQUIRED", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(check.Conclusion, "ERROR", StringComparison.OrdinalIgnoreCase);
+        string.IsNullOrWhiteSpace(check.Conclusion) ||
+        (!IsPassed(check) && !IsFailed(check));
 
     private static NativeMergeState EvaluateMergeable(string mergeable)
     {

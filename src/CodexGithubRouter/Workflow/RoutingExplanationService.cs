@@ -353,10 +353,10 @@ public static class RoutingExplanationService
             };
         }
 
-        var issueTasks = plan.WorkflowTasks
+        var linkedTasks = plan.WorkflowTasks
             .Where(task => task.IssueNumber == issue.Number && task.PullRequestNumber.HasValue)
             .ToList();
-        if (issueTasks.Count == 0)
+        if (linkedTasks.Count == 0)
         {
             return new RoutingStage
             {
@@ -366,8 +366,10 @@ public static class RoutingExplanationService
             };
         }
 
-        var nativeTasks = issueTasks
-            .Where(task => task.Status.Message.Contains(GitHubSignalEvaluationService.NoLabelNativeClassificationMarker, StringComparison.Ordinal))
+        // Structured provenance lives on the routed tasks (WorkflowItem.Source), so the explanation
+        // reflects exactly what the production evaluation classified — never inferred from message text.
+        var nativeTasks = linkedTasks
+            .Where(task => task.Source == WorkflowItemSource.NativeSignals)
             .ToList();
         if (nativeTasks.Count > 0)
         {
@@ -379,11 +381,31 @@ public static class RoutingExplanationService
             };
         }
 
+        if (linkedTasks.Any(task => task.Source == WorkflowItemSource.Recovery))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"No usable native signal data was available on the label-less linked pull request(s) of issue #{issue.Number}; lifecycle recovery / unknown-state handling classified the work."
+            };
+        }
+
+        if (linkedTasks.Any(task => task.Source == WorkflowItemSource.Labels))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Linked pull requests for issue #{issue.Number} are classified by CGR workflow labels (including ambiguous or invalid label combinations); evaluative native signals did not override the labels."
+            };
+        }
+
         return new RoutingStage
         {
             Name = "Native GitHub Signals",
             Verdict = RoutingVerdict.Pass,
-            Message = $"Linked pull requests for issue #{issue.Number} carry CGR workflow labels, which take precedence over evaluative native signals; label-driven routing was not overridden."
+            Message = $"Linked pull requests for issue #{issue.Number} are in a structural state (merged or closed); evaluative native signals did not participate."
         };
     }
 

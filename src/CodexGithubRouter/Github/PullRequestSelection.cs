@@ -54,9 +54,12 @@ public sealed class PullRequestSelection
 
     /// <summary>
     /// A copy of this selection augmented with the GitHub-native signals (status check rollup,
-    /// mergeability and review decision). Native signal evaluation is opt-in through
+    /// mergeability and review decision) plus the structural fields the native classifier depends on
+    /// (<c>state</c> and <c>isDraft</c>). Native signal evaluation is opt-in through
     /// <c>policies.nativeSignals</c>, so production callers apply this only when that policy is
-    /// enabled — keeping the default fetch small and rate-limit friendly.
+    /// enabled — keeping the default fetch small and rate-limit friendly. Without an explicit draft
+    /// fetch a real draft pull request would deserialize with the default <c>false</c> and could be
+    /// misclassified as native change-request or awaiting-merge work.
     /// </summary>
     public PullRequestSelection WithNativeSignals() => new()
     {
@@ -64,14 +67,14 @@ public sealed class PullRequestSelection
         Number = Number,
         Title = Title,
         Body = Body,
-        State = State,
+        State = true,
         Labels = Labels,
         Comments = Comments,
         ClosingIssuesReferences = ClosingIssuesReferences,
         CreatedAt = CreatedAt,
         HeadRefName = HeadRefName,
         UpdatedAt = UpdatedAt,
-        IsDraft = IsDraft,
+        IsDraft = true,
         Author = Author,
         ReviewRequests = ReviewRequests,
         Reviews = Reviews,

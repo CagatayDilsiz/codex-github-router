@@ -13,6 +13,14 @@ public sealed class WorkflowItem
     public int? PullRequestNumber { get; init; }
     public WorkflowTaskStatus Status { get; init; } = new WorkflowTaskStatus();
 
+    /// <summary>
+    /// Deterministic provenance of the workflow-state classification for pull-request-linked tasks.
+    /// Carried into the routing plan so the read-only explanation can attribute a task to CGR labels,
+    /// native GitHub signals, or label-less lifecycle recovery without parsing message text.
+    /// <c>null</c> for structural tasks (merged/closed) that carry no evaluative classification.
+    /// </summary>
+    public WorkflowItemSource? Source { get; init; }
+
     public int SelectionRank { get; set; }
 
     /// <summary>
@@ -54,4 +62,20 @@ public class WorkflowTaskStatus
     public List<int> LinkedPullRequests { get; init; } = new List<int>(); 
 
     public string Message { get; init; } = "";
+}
+
+/// <summary>
+/// The source that classified a pull-request-linked workflow task. Used by <c>cgr explain</c> to
+/// report exactly why a task reached its state instead of inferring provenance from message text.
+/// </summary>
+public enum WorkflowItemSource
+{
+    /// <summary>CGR workflow labels classified the task; evaluative native signals did not override them.</summary>
+    Labels,
+
+    /// <summary>No CGR workflow label was present and GitHub-native signals classified the task.</summary>
+    NativeSignals,
+
+    /// <summary>Label-less work with no usable native signal data fell through to lifecycle recovery / unknown-state handling.</summary>
+    Recovery
 }
