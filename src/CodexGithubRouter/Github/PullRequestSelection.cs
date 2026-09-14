@@ -22,6 +22,10 @@ public sealed class PullRequestSelection
     public bool ReviewRequests { get; init; } = false;
     public bool Reviews { get; init; } = false;
 
+    public bool StatusCheckRollup { get; init; } = false;
+    public bool Mergeable { get; init; } = false;
+    public bool ReviewDecision { get; init; } = false;
+
     public string ToSelectionString()
     {
         var selectedFields = new List<string>();
@@ -41,9 +45,43 @@ public sealed class PullRequestSelection
         if (Author) selectedFields.Add("author");
         if (ReviewRequests) selectedFields.Add("reviewRequests");
         if (Reviews) selectedFields.Add("reviews");
+        if (StatusCheckRollup) selectedFields.Add("statusCheckRollup");
+        if (Mergeable) selectedFields.Add("mergeable");
+        if (ReviewDecision) selectedFields.Add("reviewDecision");
 
         return string.Join(',', selectedFields);
     }
+
+    /// <summary>
+    /// A copy of this selection augmented with the GitHub-native signals (status check rollup,
+    /// mergeability and review decision) plus the structural fields the native classifier depends on
+    /// (<c>state</c> and <c>isDraft</c>). Native signal evaluation is opt-in through
+    /// <c>policies.nativeSignals</c>, so production callers apply this only when that policy is
+    /// enabled — keeping the default fetch small and rate-limit friendly. Without an explicit draft
+    /// fetch a real draft pull request would deserialize with the default <c>false</c> and could be
+    /// misclassified as native change-request or awaiting-merge work.
+    /// </summary>
+    public PullRequestSelection WithNativeSignals() => new()
+    {
+        Id = Id,
+        Number = Number,
+        Title = Title,
+        Body = Body,
+        State = true,
+        Labels = Labels,
+        Comments = Comments,
+        ClosingIssuesReferences = ClosingIssuesReferences,
+        CreatedAt = CreatedAt,
+        HeadRefName = HeadRefName,
+        UpdatedAt = UpdatedAt,
+        IsDraft = true,
+        Author = Author,
+        ReviewRequests = ReviewRequests,
+        Reviews = Reviews,
+        StatusCheckRollup = true,
+        Mergeable = true,
+        ReviewDecision = true
+    };
 
     public static PullRequestSelection SelectionWithAllFields()
     {
@@ -63,7 +101,10 @@ public sealed class PullRequestSelection
             IsDraft = true,
             Author = true,
             ReviewRequests = true,
-            Reviews = true
+            Reviews = true,
+            StatusCheckRollup = true,
+            Mergeable = true,
+            ReviewDecision = true
         };
     }
 

@@ -40,6 +40,8 @@ public static class RoutingExplanationService
         stages.Add(workflowStage);
         isEligible &= workflowStage.Verdict != RoutingVerdict.HardIneligible;
 
+        stages.Add(ExplainNativeSignals(plan, issue));
+
         stages.Add(ExplainDiscovery(plan, issue));
 
         var workerStage = plan.HasRepositoryGate
@@ -337,6 +339,74 @@ public static class RoutingExplanationService
         return selected
             ? $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' and was selected by the production routing decision."
             : $"Pull request #{pullRequest.Number} is claimable review work for '{reviewerLogin}' but was not selected by this routing decision.";
+    }
+
+    private static RoutingStage ExplainNativeSignals(RoutingEvaluationResult plan, Issue issue)
+    {
+        if (!GitHubSignalEvaluationService.IsEnabled(plan.Configuration))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Disabled,
+                Message = "Native GitHub signals are disabled (policies.nativeSignals.enabled is false); workflow state is label-driven only and no additional check, review or mergeability data are fetched."
+            };
+        }
+
+        var linkedTasks = plan.WorkflowTasks
+            .Where(task => task.IssueNumber == issue.Number && task.PullRequestNumber.HasValue)
+            .ToList();
+        if (linkedTasks.Count == 0)
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Issue #{issue.Number} has no linked pull request in the production routing decision; native GitHub signals do not participate and label-driven routing applies."
+            };
+        }
+
+        // Structured provenance lives on the routed tasks (WorkflowItem.Source), so the explanation
+        // reflects exactly what the production evaluation classified — never inferred from message text.
+        var nativeTasks = linkedTasks
+            .Where(task => task.Source == WorkflowItemSource.NativeSignals)
+            .ToList();
+        if (nativeTasks.Count > 0)
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Native GitHub signals classified the linked work for issue #{issue.Number}: {string.Join(" ", nativeTasks.Select(task => task.Status.Message))}"
+            };
+        }
+
+        if (linkedTasks.Any(task => task.Source == WorkflowItemSource.Recovery))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"No usable native signal data was available on the label-less linked pull request(s) of issue #{issue.Number}; lifecycle recovery / unknown-state handling classified the work."
+            };
+        }
+
+        if (linkedTasks.Any(task => task.Source == WorkflowItemSource.Labels))
+        {
+            return new RoutingStage
+            {
+                Name = "Native GitHub Signals",
+                Verdict = RoutingVerdict.Pass,
+                Message = $"Linked pull requests for issue #{issue.Number} are classified by CGR workflow labels (including ambiguous or invalid label combinations); evaluative native signals did not override the labels."
+            };
+        }
+
+        return new RoutingStage
+        {
+            Name = "Native GitHub Signals",
+            Verdict = RoutingVerdict.Pass,
+            Message = $"Linked pull requests for issue #{issue.Number} are in a structural state (merged or closed); evaluative native signals did not participate."
+        };
     }
 
     private static RoutingStage ExplainWorkflowState(RouterConfiguration configuration, Issue issue)

@@ -227,6 +227,50 @@ The review-work identity is the authenticated GitHub CLI account (`gh`), constra
 
 Review work is claimed per (pull request, reviewer) and conflicts with other worktrees only on the same pair. The claim's cycle marker is the node ID of the reviewer's latest submitted review captured at claim time; submitting a new review (even followed by a fast re-request) completes the old claim, which is released and re-claimed on the new cycle. Review claims fail closed: an unknown GitHub pull-request state or an ambiguous CGR state neither routes review work nor releases the claim, so a live review claim is never silently dropped. Merge/close a pull request to release its review claims, or run `cgr work release --pr <number>`.
 
+### `nativeSignals`
+
+Opt-in evaluation of GitHub-native review, status-check, and mergeability signals in workflow state. When enabled, an open, non-draft pull request with **no matching CGR workflow label** has its state resolved from GitHub's own signals instead of falling through to label-less recovery. When disabled (or when the pull request has a CGR workflow label), the historical label-driven behavior is unchanged.
+
+```json
+{
+  "policies": {
+    "nativeSignals": {
+      "enabled": true
+    }
+  }
+}
+```
+
+- `enabled`: `false` (default) or `true`.
+
+When enabled, CGR additionally reads `statusCheckRollup`, `mergeable` and `reviewDecision` on the pull requests it already fetches for workflow evaluation. Nothing is fetched that was not fetched before — the extra fields ride on the same `gh pr view` calls — so the enabling repository pays only the JSON payload cost, and disabling the policy keeps the fetch footprint identical to today.
+
+**Precedence.** Native signals never override an explicit workflow decision:
+
+1. **Structural GitHub state always applies**: a merged, closed, or draft pull request keeps its existing routing (merge/close recovery, draft passthrough) regardless of labels.
+2. **Unambiguous CGR workflow labels win**: a pull request carrying a CGR pull-request label (for example `codex:cr`, `codex:rr`, `codex:merge-ready`, `codex:deferred`) is routed exactly as before; native signals are not consulted for the conflicting decision.
+3. **Native evaluative signals fill in only when no CGR pull-request label is present**: the classifier below decides the pull-request state deterministically. Ambiguous label sets still fail closed exactly as today.
+
+**Deterministic classification (open, non-draft, no CGR workflow label).** One shared, centralized rule set (`GitHubSignalEvaluationService`) drives the hook, `cgr explain`, and future daemon polling, evaluated in this order:
+
+| Priority | Signal evidence | Workflow outcome |
+| --- | --- | --- |
+| 1 | Review decision `CHANGES_REQUESTED` | `ChangeRequest` |
+| 2 | Any completed check failed (`FAILURE`/`TIMED_OUT`/`ACTION_REQUIRED`/`ERROR`/`CANCELLED`) | `ChangeRequest` |
+| 3 | Any check is queued/in-progress or its completion is unverifiable (`STALE`, `STARTUP_FAILURE`, missing or unrecognized conclusion) | `AwaitingReview` (passive) |
+| 4 | Review decision `REVIEW_REQUIRED` | `AwaitingReview` (passive) |
+| 5 | All checks passed and mergeability `MERGEABLE` | `AwaitingMerge` (passive) |
+| 6 | All checks passed but mergeability `UNMERGEABLE` | `ChangeRequest` (resolve conflicts) |
+| 7 | Any other defined-but-unconfirmable combination (for example checks passed with `UNKNOWN`/absent mergeability) | `AwaitingReview` (passive) |
+
+The evaluator is fail-conservative: no native signal data, unknown mergeability, or an unverifiable check conclusion never advances work. Pending dominates the entire rollup: even one in-progress check keeps the pull request passive, because an unfinished run means the work has not advanced. A check only counts as passing on an explicit allow-list (`SUCCESS`, `NEUTRAL`, `SKIPPED`); every other completed conclusion is either failing (`FAILURE`, `TIMED_OUT`, `ACTION_REQUIRED`, `ERROR`, `CANCELLED` — mirroring how `gh` reports cancelled runs) or treated conservatively as pending (for example `STALE` and `STARTUP_FAILURE`), so an unreliable or unrecognized conclusion can never advance work. Conflicts are deterministic (see the table) and `cgr explain` reports the evaluated native signals on a dedicated `Native GitHub Signals` stage so every decision is observable.
+
+**Multiple linked pull requests.** For issue-linked work the native classifier runs on the label-less open pull requests only (a resolved CGR pull-request label always wins, so native signals never leak onto labeled pull requests). The issue outcome is aggregated deterministically: actionable `ChangeRequest` work wins over passive `AwaitingReview`/`AwaitingMerge` states, and equal states tie-break by pull-request number — the outcome never depends on collection order and a passive pull request never hides actionable work. The repository-gate path uses the same shared label-less aggregation.
+
+**Repository gates.** A label-less gated pull request whose native signals classify as `ChangeRequest` produces the same actionable corrective `ChangeRequest` work as the label-driven gate path (claimable, not a passive block), while passive native states (`AwaitingReview`/`AwaitingMerge`) keep unrelated work blocked as a gate until the pull request advances. Passive native gate blocks retain their structured provenance and pull-request identity, so `cgr explain` attributes the block to native signal classification instead of a generic gate.
+
+Note: native signals resolve *pull-request workflow state only*. They do not take over issue-level routing, worker/assignment eligibility, review routing, or branch protection, and they do not remove the need for the lifecycle labels on issues.
+
 ### `repositoryGate`
 
 Orthogonal gate policy that can block unrelated work.
@@ -309,7 +353,7 @@ The checked-out working tree is the source of the repository override. Invalid J
 
 ## Built-in defaults (global file missing)
 
-When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), `reviewRouting` disabled (`enabled` false), and `diagnostics` enabled with `retentionDays` 7.
+When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), `reviewRouting` disabled (`enabled` false), `nativeSignals` disabled (`enabled` false), and `diagnostics` enabled with `retentionDays` 7.
 
 ## Effective diagnostics policy
 
