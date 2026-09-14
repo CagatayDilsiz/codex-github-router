@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using CodexGithubRouter.Autonomous;
+using CodexGithubRouter.Daemon;
 using CodexGithubRouter.Doctor;
 using CodexGithubRouter.Explain;
 using CodexGithubRouter.GitHub;
@@ -33,6 +34,7 @@ return args[0].ToLowerInvariant() switch
     "config" => await ConfigCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "doctor" => await DoctorCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     "pull-request" or "pr" => await PullRequestCommandHandler.HandleAsync(args.Skip(1).ToArray()),
+    "daemon" => await DaemonCommandHandler.HandleAsync(args.Skip(1).ToArray()),
     _ => UnknownCommand(args[0])
 };
 
@@ -63,6 +65,7 @@ static int PrintHelp()
           cgr doctor [working-directory] [--model <model>]
           cgr init [--force]
           cgr pull-request|pr <list|transition> <options> [working-directory]
+          cgr daemon <start|stop|status|restart|run --once> [working-directory]
 
         Commands:
           hook        Run the hook service to process incoming codex payloads.
@@ -75,6 +78,7 @@ static int PrintHelp()
           doctor      Run read-only diagnostics for the environment and repository.
           init        Initialize the configuration for the Codex Github Router.
           pull-request|pr  Manage pull requests in the repository.
+          daemon      Run or manage the background poller for daemon execution ownership.
         """);
 
     return 0;

@@ -305,6 +305,62 @@ Controls the structured hook diagnostic trail.
 - `enabled`: `true` (default) writes one record per hook invocation.
 - `retentionDays`: must be at least `1` (validation); expired records are pruned during each invocation.
 
+### `execution`
+
+Names the single owner that decides when CGR acquires work for a repository, so two independent
+actors can never race for the same work item.
+
+```json
+{
+  "policies": {
+    "execution": {
+      "mode": "hook"
+    }
+  }
+}
+```
+
+- `mode`: `"hook"` (default) runs inside a Codex session through the prompt hook; `"daemon"` runs a
+  background poller (`cgr daemon start`) that detects, claims and launches Codex sessions for
+  eligible work. In daemon mode the hook deterministically bypasses user prompts for the repository
+  so hook and daemon never both acquire work.
+
+### `daemon`
+
+Polling and session-launch behavior for daemon execution ownership. Only consumed when
+`policies.execution.mode` is `"daemon"`; ignored otherwise.
+
+```json
+{
+  "policies": {
+    "execution": {
+      "mode": "daemon"
+    },
+    "daemon": {
+      "intervalSeconds": 60,
+      "model": "gpt-5",
+      "command": "codex",
+      "args": ["exec", "--skip-git-repo-check"],
+      "failureThreshold": 5
+    }
+  }
+}
+```
+
+- `intervalSeconds`: seconds between polling cycles. Must be greater than zero (validation).
+- `model`: optional model label recorded on daemon claims and passed to launched sessions. Empty by
+  default, which lets the launched Codex CLI use its own defaults.
+- `command`: executable used to launch Codex execution sessions. Defaults to `codex`.
+- `args`: arguments passed before the generated work prompt when launching a session. Defaults to
+  `["exec", "--skip-git-repo-check"]`.
+- `failureThreshold`: consecutive failed polling cycles before the daemon reports itself unhealthy.
+  Must be greater than zero (validation).
+
+The daemon reuses the same routing, claim, reconciliation, and diagnostic pipeline as the hook. A
+stable persisted daemon session id (see `codex-github-router.daemon.json` in the Git common
+directory) is reused across restarts so claims the daemon already holds are continued, never
+re-acquired. See the roadmap section on daemon execution for the current caveats.
+
 ## Merge semantics (global + repository override)
 
 A repository can override only the fields that differ from the global configuration by adding `.codex-github-router/workflow.json` at the repository root.
@@ -350,10 +406,11 @@ The checked-out working tree is the source of the repository override. Invalid J
 - `assignmentRouting`, when present, must satisfy the routing validation described above.
 - Labels must not conflict: a label cannot map to multiple states within the same domain (issue or pull request); repository gate labels must not also be workflow labels; worker labels must not be workflow or gate labels; label names must not have leading/trailing whitespace.
 - `diagnostics.retentionDays` must be at least one.
+- When `execution.mode` is `daemon`: `daemon.intervalSeconds` and `daemon.failureThreshold` must be greater than zero, `daemon.command` must not be empty, and `daemon.args` must begin with a non-empty subcommand.
 
 ## Built-in defaults (global file missing)
 
-When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), `reviewRouting` disabled (`enabled` false), `nativeSignals` disabled (`enabled` false), and `diagnostics` enabled with `retentionDays` 7.
+When the global workflow file does not exist, the effective configuration equals the built-in defaults: the default state and pull-request label mappings, `defaultIssueSelection` limit `1`, `autonomousActivation` mode `always`, `repositoryGate` label `codex:gate`, `workerRouting` disabled (no object), `assignmentRouting` disabled (no object), `reviewRouting` disabled (`enabled` false), `nativeSignals` disabled (`enabled` false), `execution` mode `hook`, and `diagnostics` enabled with `retentionDays` 7.
 
 ## Effective diagnostics policy
 

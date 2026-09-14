@@ -100,6 +100,16 @@ public static class HookService
 
             var configuration = await dependencies.LoadConfigurationAsync(payload.Cwd);
             scope.SetDiagnosticsPolicy(configuration.Policies.Diagnostics);
+
+            // Daemon execution ownership deterministically bypasses the hook: exactly one owner
+            // (the background poller) decides when work is acquired for this repository, so a user
+            // prompt inside the repository must never race the daemon for claims.
+            if (ExecutionModeService.IsDaemonOwned(configuration))
+            {
+                scope.Bypass();
+                return 0;
+            }
+
             var activationMode = ResolveActivationMode(configuration);
             var activated = AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt);
             scope.SetActivation(activationMode, activated);

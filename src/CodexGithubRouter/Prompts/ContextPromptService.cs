@@ -1,3 +1,5 @@
+using CodexGithubRouter.Workflow;
+
 namespace CodexGithubRouter.Prompts;
 
 public static class ContextPromptService
@@ -130,6 +132,21 @@ public static class ContextPromptService
 
         """;
     }
+
+    public static string GetPromptForTask(WorkflowItem task) =>
+        task.Type switch
+        {
+            WorkflowItemType.NewIssue when task.IssueNumber.HasValue => GetNewIssuePrompt(task.IssueNumber.Value),
+            WorkflowItemType.ResumeInProgressIssue when task.IssueNumber.HasValue => GetInProgressIssuePrompt(task.IssueNumber.Value),
+            WorkflowItemType.LinkPullRequestsToIssues when task.IssueNumber.HasValue => GetIssuesNeedPRLinkPrompt(new[] { task.IssueNumber.Value }),
+            WorkflowItemType.RecoverCompletedIssue when task.IssueNumber.HasValue => GetCompletedIssueRecoveryPrompt(task.IssueNumber.Value),
+            WorkflowItemType.RecoverCurrentPullRequest when task.IssueNumber.HasValue && task.PullRequestNumber.HasValue =>
+                GetCurrentPullRequestRecoveryPrompt(task.IssueNumber.Value, task.PullRequestNumber.Value),
+            WorkflowItemType.PullRequestReview => GetPullRequestReviewPrompt(task.PullRequestNumber, task.ReviewerLogin),
+            WorkflowItemType.ChangeRequest when task.PullRequestNumber.HasValue && task.IssueNumber.HasValue =>
+                GetChangeRequestPrompt(task.IssueNumber.Value, task.PullRequestNumber.Value),
+            _ => string.Empty
+        };
 }
 
 /*2. If there is a pull request associated with the issue, please review the pull request and provide feedback on whether it can be merged or not. Do not merge it. please just leave a review comment and run `cgr issue transition {number} reviewed` to indicate that the pull request has been reviewed.*/

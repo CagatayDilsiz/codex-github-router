@@ -58,6 +58,7 @@ cgr explain
 cgr explain --issue 12
 cgr config validate
 cgr doctor
+cgr daemon status
 ```
 
 `cgr work list` and `cgr explain` are strictly read-only. They run the same production routing scan as the hook (repository gate, then completed, in-progress, and ready discovery) and explain *why* each issue was eligible, blocked, or selected — including workflow state, candidate discovery, worker and assignment routing, repository-gate handling, the active work claim, and the final production routing decision. A claim owned by a worktree that no longer exists is excluded with the same stale-worktree evaluation production pruning uses, without writing, so a deleted worktree never occupies work in diagnostics. `cgr work list --model <model>` asks "what would this model route?" the same way `cgr explain --model <model>` does. Assignment identity is resolved by the same fail-closed plan stage the hook uses, and a claim that production reconciliation would release (blocked/needs-info/abandoned/closed/missing issue, or a missing/passive/terminal claimed pull request — including a passive pull request production would first associate with a claim that has no PR number yet) is reported as "would be released, ordinary routing continues" without ever modifying the claim file.
@@ -101,6 +102,7 @@ Workflow and pull-request labels, worker routing, assignee-aware routing, reposi
 - Autonomous mode is repository-specific and stored in the shared Git common directory.
 - The router relies on GitHub labels to model state; conflicting labels are treated as an ambiguous state and block the hook.
 - PR review itself is not a claimable work type yet; change requests on linked pull requests are.
+- Daemon execution (`cgr daemon start`) runs the poller in the foreground of that CLI process; it is not yet daemonized into a background OS service. Keep it running with a process manager such as `systemd` or a terminal multiplexer.
 
 See [docs/roadmap.md](docs/roadmap.md) for the intended future capabilities.
 
