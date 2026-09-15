@@ -127,6 +127,20 @@ public sealed class DaemonExecutionDependencies
     /// </summary>
     public Func<Task> BeforeSessionLaunchAsync { get; init; } = () => Task.CompletedTask;
 
+    /// <summary>
+    /// Bounded window the <c>stop</c>/<c>restart</c> commands give a live supervisor to acknowledge a
+    /// durable stop request before the command force-terminates it. The acknowledgement is the
+    /// supervisor's own graceful-shutdown write (<see cref="DaemonExecutionService.ShutdownGracefullyAsync"/>
+    /// records <see cref="DaemonExecutionState.StoppedAt"/> only after it has left the launch critical
+    /// section and stopped every supervised session, including any child that appeared in the
+    /// unavoidable spawn boundary). Long enough to clear that boundary, short enough that stopping a
+    /// wedged or idle supervisor stays bounded.
+    /// </summary>
+    public TimeSpan SupervisorShutdownAckTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Poll interval used while waiting for the supervisor's shutdown acknowledgement.</summary>
+    public TimeSpan SupervisorShutdownAckPollInterval { get; init; } = TimeSpan.FromMilliseconds(50);
+
     private static async Task<RoutingEvaluationResult> EvaluatePlanDefaultAsync(
         RouterConfiguration configuration, string workingDirectory, string? currentModel, IReadOnlyList<WorkClaim> otherWorktreeClaims)
     {
@@ -884,7 +898,7 @@ public static class DaemonExecutionService
             }
         }
 
-        return (runningState, session, StopRequested: false);
+        return (runningState, session, StopRequested: runningState.StopRequested);
     }
 
     private static bool IsDaemonOwnedClaim(WorkClaim claim, string daemonSessionId) =>

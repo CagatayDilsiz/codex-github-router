@@ -121,38 +121,60 @@ public static class DaemonCommandHandler
             return 0;
         }
 
-        var stopped = state with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow };
-        await dependencies.WriteStateAsync(gitCommonDir, stopped);
+        // Persist the durable stop request WITHOUT pre-stamping StoppedAt: the supervisor's own
+        // graceful-shutdown write is the acknowledgement this command waits for, so pre-stamping
+        // would make every later acknowledgement indistinguishable from the request itself. The
+        // supervisor observes the durable stop before any further spawn on its launch critical path.
+        await dependencies.WriteStateAsync(gitCommonDir, state with { StopRequested = true });
 
-        var pollerAlive = state.Pid > 0 &&
-            await dependencies.IsProcessAliveAsync(state.Pid, state.PidStartTimeUtc);
-        if (pollerAlive && state.Pid != Environment.ProcessId)
+        if (state.Pid == Environment.ProcessId)
         {
-            await StopActiveSessionsAsync(state, dependencies);
-            await dependencies.TerminateProcessAsync(state.Pid, state.PidStartTimeUtc);
-            Console.WriteLine($"Stop requested; stopped daemon session(s) and terminated poller process {state.Pid}.");
-        }
-        else if (!pollerAlive && state.ActiveSessions.Count > 0)
-        {
-            // The poller is gone (crashed or its PID was reused) but orphaned sessions may remain;
-            // stop them so no Codex process keeps running outside a supervisor.
-            await StopActiveSessionsAsync(state, dependencies);
-            Console.WriteLine("Stop requested; the poller is not running, but orphaned Codex session(s) were stopped.");
+            // In-process stop request (used by the poller itself / tests): this command must never
+            // kill its own process. The running supervisor observes the durable stop on its next
+            // cycle and performs its own graceful shutdown (stopping its sessions and recording
+            // StoppedAt), so only the request is recorded here.
+            Console.WriteLine("Stop requested; the daemon will exit on its next polling cycle.");
         }
         else
         {
-            Console.WriteLine("Stop requested; the daemon will exit on its next polling cycle.");
+            // Bounded graceful acknowledgement window: the supervisor is given time to observe the
+            // stop, leave the launch critical section, deterministically stop any child that appeared
+            // in the unavoidable spawn boundary, and exit recording its own StoppedAt. Only when the
+            // window expires without an acknowledgement is the supervisor force-terminated.
+            var acknowledged = await WaitForShutdownAcknowledgedAsync(gitCommonDir, state.Pid, state.PidStartTimeUtc, dependencies);
+            if (acknowledged)
+            {
+                Console.WriteLine("Stop requested; the daemon acknowledged and shut down gracefully.");
+            }
+            else
+            {
+                // The supervisor stayed alive through the window without acknowledging: it never left
+                // the launch critical section / stopped its boundary child / exited. Stop every
+                // session in the latest durable state (a boundary Running record that materialized on
+                // the same worktree key the snapshot already held as Launching is covered here) and
+                // force-terminate so no child can survive without a supervisor.
+                var latest = await dependencies.ReadStateAsync(gitCommonDir) ?? state;
+                await StopActiveSessionsAsync(latest, dependencies);
+                await dependencies.TerminateProcessAsync(state.Pid, state.PidStartTimeUtc);
+                Console.WriteLine($"Stop requested; stopped daemon session(s) and terminated poller process {state.Pid}.");
+            }
         }
 
-        // Re-read durable state after the stop request (and termination if applicable): a session
-        // the poller registered between the initial snapshot and its exit is not covered above, so
-        // stop sessions that appeared after the snapshot too. Stopping is idempotent and
-        // best-effort, and only sessions absent from the snapshot are re-stopped, which prevents
-        // a launch that completed just before the poller exited from surviving as an orphan.
-        var refreshedState = await dependencies.ReadStateAsync(gitCommonDir);
-        if (refreshedState is not null)
+        // Final sweep against the post-window durable state: a session that materialized around the
+        // shutdown boundary must not survive the stop command, and StoppedAt is recorded when the
+        // supervisor did not already record its own graceful acknowledgement.
+        var refreshed = await dependencies.ReadStateAsync(gitCommonDir);
+        if (refreshed is not null)
         {
-            await StopNewSessionsAsync(state, refreshedState, dependencies);
+            if (state.Pid != Environment.ProcessId)
+            {
+                await StopActiveSessionsAsync(refreshed, dependencies);
+            }
+
+            if (!refreshed.StoppedAt.HasValue)
+            {
+                await dependencies.WriteStateAsync(gitCommonDir, refreshed with { StoppedAt = DateTimeOffset.UtcNow });
+            }
         }
 
         // The supervisor is (requested to be) gone, so the repository lease is free for a later
@@ -240,13 +262,29 @@ public static class DaemonCommandHandler
             await dependencies.IsProcessAliveAsync(state.Pid, state.PidStartTimeUtc);
         if (pollerAlive)
         {
-            // Graceful restart: request the stop, stop active sessions, then terminate the poller
-            // so the previous supervisor cannot race the new one. Claims are preserved and resumed.
-            await dependencies.WriteStateAsync(gitCommonDir, state! with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
-            await StopActiveSessionsAsync(state!, dependencies);
-            await dependencies.TerminateProcessAsync(state!.Pid, state.PidStartTimeUtc);
+            // Persist the durable stop request WITHOUT pre-stamping StoppedAt, then give the previous
+            // supervisor a bounded graceful acknowledgement window to leave the launch critical
+            // section / stop any boundary child / exit itself. Only force-terminate after the window:
+            // that lets the poller's Phase 2 durably stop a child appearing in the spawn boundary
+            // instead of orphaning it under an overlapping force-kill.
+            await dependencies.WriteStateAsync(gitCommonDir, state! with { StopRequested = true });
+            var acknowledged = await WaitForShutdownAcknowledgedAsync(gitCommonDir, state!.Pid, state.PidStartTimeUtc, dependencies);
+            if (!acknowledged)
+            {
+                // Stop every session in the latest durable state (covering a boundary Running record
+                // that materialized on a worktree key the snapshot already held as Launching) before
+                // terminating the unacknowledging supervisor.
+                var latest = await dependencies.ReadStateAsync(gitCommonDir) ?? state;
+                await StopActiveSessionsAsync(latest, dependencies);
+                await dependencies.TerminateProcessAsync(state.Pid, state.PidStartTimeUtc);
+                Console.WriteLine($"Terminated previous daemon process {state.Pid}.");
+            }
+            else
+            {
+                Console.WriteLine($"Previous daemon process {state.Pid} acknowledged the stop and shut down.");
+            }
+
             await dependencies.ReleaseSupervisorLeaseAsync(gitCommonDir, state.DaemonSessionId, state.Pid);
-            Console.WriteLine($"Terminated previous daemon process {state.Pid}.");
         }
 
         // A session the previous supervisor registered between its snapshot and exit would not have
@@ -362,6 +400,53 @@ public static class DaemonCommandHandler
         return 1;
     }
 
+    /// <summary>
+    /// Waits a bounded window for a live supervisor to acknowledge a durable stop request. The
+    /// acknowledgement is either the supervisor's own graceful-shutdown write (it records
+    /// <see cref="DaemonExecutionState.StoppedAt"/> only after leaving the launch critical section
+    /// and stopping every supervised session, including any child created in the spawn boundary) or
+    /// the supervisor process exiting on its own. Returns <see langword="true"/> when acknowledged
+    /// within the window; <see langword="false"/> when the supervisor remained alive without
+    /// acknowledging, in which case the caller force-terminates it.
+    /// </summary>
+    private static async Task<bool> WaitForShutdownAcknowledgedAsync(
+        string gitCommonDir,
+        int pollerPid,
+        DateTimeOffset? pollerStartTimeUtc,
+        DaemonExecutionDependencies dependencies)
+    {
+        if (pollerPid <= 0 || pollerPid == Environment.ProcessId)
+        {
+            // No separate supervisor to wait for (nothing recorded, or the command is running inside
+            // the supervisor itself and must never kill its own process).
+            return true;
+        }
+
+        var polls = Math.Max(1, (int)Math.Ceiling(
+            dependencies.SupervisorShutdownAckTimeout.TotalMilliseconds /
+            dependencies.SupervisorShutdownAckPollInterval.TotalMilliseconds));
+        for (var poll = 0; poll < polls; poll++)
+        {
+            var state = await dependencies.ReadStateAsync(gitCommonDir);
+            if (state?.StoppedAt is not null)
+            {
+                // The supervisor recorded its own graceful shutdown (stopping its sessions before
+                // writing StoppedAt) — an acknowledgement.
+                return true;
+            }
+
+            if (!await dependencies.IsProcessAliveAsync(pollerPid, pollerStartTimeUtc))
+            {
+                // The supervisor exited on its own (graceful ack or crash); nothing left to protect.
+                return true;
+            }
+
+            await dependencies.DelayAsync((int)dependencies.SupervisorShutdownAckPollInterval.TotalMilliseconds, CancellationToken.None);
+        }
+
+        return false;
+    }
+
     private static async Task StopActiveSessionsAsync(DaemonExecutionState state, DaemonExecutionDependencies dependencies)
     {
         foreach (var session in state.ActiveSessions.Values)
@@ -377,6 +462,13 @@ public static class DaemonCommandHandler
         }
     }
 
+    /// <summary>
+    /// Stops sessions that appeared after <paramref name="snapshot"/> but were not present in it, used
+    /// by <c>restart</c> after the previous supervisor's shutdown boundary: sessions the snapshot
+    /// already held were stopped in the bounded acknowledgement window (or are deliberately re-adopted
+    /// by the successor), while sessions that materialized on a worktree key the snapshot did not yet
+    /// hold are unsupervised and must be stopped so the successor never adopts an orphaned child.
+    /// </summary>
     private static async Task StopNewSessionsAsync(DaemonExecutionState snapshot, DaemonExecutionState refreshed, DaemonExecutionDependencies dependencies)
     {
         foreach (var entry in refreshed.ActiveSessions)

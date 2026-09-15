@@ -30,7 +30,9 @@ public class DaemonCommandHandlerTests
 
         Assert.Equal(0, exitCode);
         Assert.Contains(pollerPid, terminatedPids);
-        Assert.Equal(new[] { "issue #12" }, fakeHost.Stops);
+        // The known session is stopped both when the acknowledgement window expires and again by the
+        // final post-window sweep that guarantees nothing materialized around the boundary survives.
+        Assert.Equal(2, fakeHost.Stops.Count(stop => stop == "issue #12"));
 
         var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
         Assert.NotNull(state);
@@ -99,7 +101,6 @@ public class DaemonCommandHandlerTests
         var fakeHost = new FakeSessionHost();
         var terminatedPids = new List<int>();
         using var cancellation = new CancellationTokenSource();
-        var delayCount = 0;
 
         var handlerDependencies = HandlerDependencies(
             sandbox,
@@ -110,10 +111,11 @@ public class DaemonCommandHandlerTests
                 terminatedPids.Add(pid);
                 return Task.CompletedTask;
             },
-            delayAsync: (_, _) =>
+            // Cancel only once the new poller reaches its own polling-interval delay; the stop/restart
+            // acknowledgement window polls at a sub-second interval and must not be mistaken for it.
+            delayAsync: (milliseconds, _) =>
             {
-                delayCount++;
-                if (delayCount >= 1)
+                if (milliseconds > 1000)
                 {
                     cancellation.Cancel();
                 }
@@ -216,12 +218,130 @@ public class DaemonCommandHandlerTests
         Assert.Equal(SessionLaunchState.Launching, state.ActiveSessions.Values.Single().LaunchState);
     }
 
+    [Fact]
+    public async Task Stop_DoesNotForceTerminate_WhenSupervisorAcknowledges_DuringSpawnBoundary()
+    {
+        using var sandbox = new TestSandbox();
+        var pollerPid = PickUnusedPid();
+        var childPid = pollerPid == 98765 ? 98766 : 98767;
+        await SeedStateAsync(sandbox, pollerPid, sessionWorkIdentity: "issue #12", launchState: SessionLaunchState.Launching);
+
+        var fakeHost = new FakeSessionHost();
+        var terminatedPids = new List<int>();
+        var simulationRan = false;
+
+        // Simulate the supervisor finishing the spawn boundary deterministically on the first durable
+        // read that observes the stop request: it materializes the child as a Running record (Phase 2),
+        // stops that boundary child itself, then acknowledges by recording its own StoppedAt — all of
+        // which fits inside the bounded acknowledgement window.
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            fakeHost,
+            isProcessAliveAsync: (_, _) => Task.FromResult(true),
+            terminateProcessAsync: (pid, _) =>
+            {
+                terminatedPids.Add(pid);
+                return Task.CompletedTask;
+            },
+            readStateAsync: async gitCommonDir =>
+            {
+                var current = await DaemonStateStore.ReadAsync(gitCommonDir);
+                if (current is { StopRequested: true, StoppedAt: null } && !simulationRan)
+                {
+                    simulationRan = true;
+                    var materialized = current.ActiveSessions[WorkClaimStore.MainWorktreeIdentity] with
+                    {
+                        LaunchState = SessionLaunchState.Running,
+                        ProcessId = childPid,
+                        ProcessStartTimeUtc = DateTimeOffset.UtcNow
+                    };
+                    var sessions = new Dictionary<string, ActiveDaemonSession>(current.ActiveSessions)
+                    {
+                        [WorkClaimStore.MainWorktreeIdentity] = materialized
+                    };
+                    // The supervisor's Phase 2 writes the durable running record...
+                    await DaemonStateStore.WriteAsync(gitCommonDir, current with { ActiveSessions = sessions });
+                    // ...stops the boundary child that appeared in the unavoidable spawn boundary...
+                    await fakeHost.StopAsync(materialized, CancellationToken.None);
+                    // ...and acknowledges by recording its own graceful shutdown.
+                    var acknowledged = current with { ActiveSessions = sessions, StoppedAt = DateTimeOffset.UtcNow };
+                    await DaemonStateStore.WriteAsync(gitCommonDir, acknowledged);
+                    return acknowledged;
+                }
+
+                return current;
+            });
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["stop", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(0, exitCode);
+        // The supervisor acknowledged within the bounded window, so it was never force-terminated.
+        Assert.Empty(terminatedPids);
+        // The child that appeared in the spawn boundary was deterministically stopped: no orphan survives.
+        Assert.Contains("issue #12", fakeHost.Stops);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+        // The durable running record survives so a later restart can resolve/resume the session.
+        Assert.Equal(SessionLaunchState.Running, state.ActiveSessions.Values.Single().LaunchState);
+        Assert.Equal(childPid, state.ActiveSessions.Values.Single().ProcessId);
+    }
+
+    [Fact]
+    public async Task Stop_ForceTerminatesSupervisor_WhenNoAcknowledgement_WithinBoundedWindow()
+    {
+        using var sandbox = new TestSandbox();
+        var pollerPid = PickUnusedPid();
+        await SeedStateAsync(sandbox, pollerPid, sessionWorkIdentity: "issue #12", launchState: SessionLaunchState.Launching);
+
+        var fakeHost = new FakeSessionHost();
+        var terminatedPids = new List<int>();
+        var acknowledgementPollDelays = 0;
+
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            fakeHost,
+            isProcessAliveAsync: (_, _) => Task.FromResult(true),
+            terminateProcessAsync: (pid, _) =>
+            {
+                terminatedPids.Add(pid);
+                return Task.CompletedTask;
+            },
+            delayAsync: (_, _) =>
+            {
+                acknowledgementPollDelays++;
+                return Task.CompletedTask;
+            });
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["stop", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(0, exitCode);
+        // The supervisor never acknowledged, so the stop waited out a non-empty bounded window before
+        // force-terminating it (rather than killing it immediately while it was inside the spawn
+        // boundary and could still fork a child).
+        Assert.True(acknowledgementPollDelays > 0, "stop must wait for an acknowledgement before force-terminating");
+        Assert.Contains(pollerPid, terminatedPids);
+        Assert.Contains("issue #12", fakeHost.Stops);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+        Assert.Equal(SessionLaunchState.Launching, state.ActiveSessions.Values.Single().LaunchState);
+    }
+
     private static DaemonExecutionDependencies HandlerDependencies(
         TestSandbox sandbox,
         FakeSessionHost sessionHost,
         Func<int, DateTimeOffset?, Task<bool>>? isProcessAliveAsync = null,
         Func<int, DateTimeOffset?, Task>? terminateProcessAsync = null,
-        Func<int, CancellationToken, Task>? delayAsync = null) => new()
+        Func<int, CancellationToken, Task>? delayAsync = null,
+        Func<string, Task<DaemonExecutionState?>>? readStateAsync = null,
+        Func<string, DaemonExecutionState, Task>? writeStateAsync = null,
+        TimeSpan? supervisorShutdownAckTimeout = null,
+        TimeSpan? supervisorShutdownAckPollInterval = null) => new()
         {
             LoadConfigurationAsync = _ => Task.FromResult(new RouterConfiguration
             {
@@ -250,10 +370,12 @@ public class DaemonCommandHandlerTests
             }),
             CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse()),
             CloseIssueAsync = (_, _) => Task.CompletedTask,
-            ReadStateAsync = gitCommonDir => DaemonStateStore.ReadAsync(gitCommonDir),
-            WriteStateAsync = (gitCommonDir, state) => DaemonStateStore.WriteAsync(gitCommonDir, state),
+            ReadStateAsync = readStateAsync ?? (gitCommonDir => DaemonStateStore.ReadAsync(gitCommonDir)),
+            WriteStateAsync = writeStateAsync ?? ((gitCommonDir, state) => DaemonStateStore.WriteAsync(gitCommonDir, state)),
             SessionHost = sessionHost,
-            DelayAsync = delayAsync ?? ((_, _) => Task.CompletedTask)
+            DelayAsync = delayAsync ?? ((_, _) => Task.CompletedTask),
+            SupervisorShutdownAckTimeout = supervisorShutdownAckTimeout ?? TimeSpan.FromMilliseconds(500),
+            SupervisorShutdownAckPollInterval = supervisorShutdownAckPollInterval ?? TimeSpan.FromMilliseconds(10)
         };
 
     private static async Task SeedStateAsync(TestSandbox sandbox, int pollerPid, string? sessionWorkIdentity,

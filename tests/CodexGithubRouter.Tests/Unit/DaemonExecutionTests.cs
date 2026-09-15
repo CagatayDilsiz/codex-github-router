@@ -754,6 +754,9 @@ public class DaemonExecutionTests
         // The child that appeared in the unavoidable boundary was deterministically stopped.
         Assert.Single(context.SessionHost.Launches);
         Assert.Contains(context.SessionHost.Launches[0].Session.WorkIdentity, context.SessionHost.Stops);
+        // The stop observed by the boundary child's Phase 2 must terminate the tick immediately: the
+        // worktree pass propagates StopRequested so no further worktree is started in the same tick.
+        Assert.True(tick.StopRequested);
 
         var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
         Assert.NotNull(state);
@@ -761,6 +764,64 @@ public class DaemonExecutionTests
         Assert.True(state.StoppedAt.HasValue);
         // The durable Running record exists so a later restart can resolve/resume the session.
         Assert.Equal(SessionLaunchState.Running, state.ActiveSessions.Values.Single().LaunchState);
+    }
+
+    [Fact]
+    public async Task RunOnce_StopDuringSpawnBoundary_DoesNotStartLaterWorktrees()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedGitDirectory = sandbox.CreateLinkedWorktree("linked");
+        var linkedDirectory = Path.Combine(sandbox.Root, "linked");
+        Directory.CreateDirectory(linkedDirectory);
+
+        var context = new DaemonTestContext(sandbox);
+        context.WorktreeDirectories = new List<string> { sandbox.RepositoryDirectory, linkedDirectory };
+        context.WorktreeIdentityByDirectory[sandbox.RepositoryDirectory] = sandbox.MainWorktreeId;
+        context.WorktreeIdentityByDirectory[linkedDirectory] = linkedGitDirectory;
+        context.PlanResolver = directory =>
+            string.Equals(directory, sandbox.RepositoryDirectory, StringComparison.Ordinal)
+                ? SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 10 })
+                : SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 20 });
+
+        var spawnBoundary = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var spawnStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstLaunch = true;
+        // Only the first worktree's launch pauses inside the spawn boundary; a launch for a later
+        // worktree (the bug this guards against) would pass straight through.
+        context.SessionHost.BeforeLaunchAsync = () =>
+        {
+            if (!firstLaunch)
+            {
+                return Task.CompletedTask;
+            }
+
+            firstLaunch = false;
+            spawnStarted.TrySetResult();
+            return spawnBoundary.Task;
+        };
+
+        var tickTask = Task.Run(() =>
+            DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None));
+
+        // A stop lands while the first worktree's child is inside the spawn boundary.
+        await spawnStarted.Task;
+        var snapshot = (await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory))!;
+        await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, snapshot with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
+
+        spawnBoundary.SetResult();
+        var tick = await tickTask;
+
+        // The boundary child was stopped and the StopRequested propagated out of LaunchSessionAsync
+        // terminated the tick, so the later worktree was never evaluated or started.
+        Assert.True(tick.StopRequested);
+        Assert.Single(context.SessionHost.Launches);
+        Assert.Equal(10, context.SessionHost.Launches[0].Claim.IssueNumber);
+        Assert.Contains(context.SessionHost.Launches[0].Session.WorkIdentity, context.SessionHost.Stops);
+        Assert.Equal(1, context.AcquireCalls);
+
+        var claims = await WorkClaimStore.ReadAllAsync(sandbox.GitCommonDirectory);
+        Assert.Single(claims);
+        Assert.Equal(10, claims[0].IssueNumber);
     }
 
     [Fact]
