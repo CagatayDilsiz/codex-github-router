@@ -314,7 +314,14 @@ public static class DaemonCommandHandler
                 StartedAt = DateTimeOffset.UtcNow,
                 StopRequested = false,
                 StoppedAt = null,
-                ActiveSessions = state?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
+                // Adopt the session records from the LATEST durable state so a session that the
+                // previous supervisor resolved Launching -> Running (with persisted identity) during
+                // its shutdown/force phase is inherited as Running, not rolled back to the ambiguous
+                // Launching marker captured in the pre-shutdown snapshot. A record that is still
+                // Launching here fails closed exactly as before.
+                ActiveSessions = refreshedState?.ActiveSessions
+                    ?? state?.ActiveSessions
+                    ?? new Dictionary<string, ActiveDaemonSession>()
             };
             await dependencies.WriteStateAsync(gitCommonDir, startState);
 

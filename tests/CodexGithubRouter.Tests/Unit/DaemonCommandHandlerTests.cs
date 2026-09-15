@@ -332,6 +332,100 @@ public class DaemonCommandHandlerTests
         Assert.Equal(SessionLaunchState.Launching, state.ActiveSessions.Values.Single().LaunchState);
     }
 
+    [Fact]
+    public async Task Restart_DuringSpawnBoundary_UsesLatestDurableSessionState()
+    {
+        using var sandbox = new TestSandbox();
+        var pollerPid = PickUnusedPid();
+        var childPid = pollerPid == 98765 ? 98766 : 98767;
+        await SeedStateAsync(sandbox, pollerPid, sessionWorkIdentity: "issue #12", launchState: SessionLaunchState.Launching);
+
+        var fakeHost = new FakeSessionHost();
+        var terminatedPids = new List<int>();
+        var simulationRan = false;
+        DaemonExecutionState? successorStartState = null;
+        using var cancellation = new CancellationTokenSource();
+
+        // The old supervisor finishes the spawn boundary deterministically on the first read that
+        // observes the stop request: it materializes the child as a Running record with persisted
+        // identity, stops that boundary child itself, then acknowledges with its own StoppedAt.
+        // Restart must inherit that LATEST durable Running record, never roll it back to the
+        // ambiguous Launching marker held by the pre-shutdown snapshot.
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            fakeHost,
+            isProcessAliveAsync: (_, _) => Task.FromResult(true),
+            terminateProcessAsync: (pid, _) =>
+            {
+                terminatedPids.Add(pid);
+                return Task.CompletedTask;
+            },
+            // Cancel only once the new poller reaches its own polling-interval delay; the stop/restart
+            // acknowledgement window polls at a sub-second interval and must not be mistaken for it.
+            delayAsync: (milliseconds, _) =>
+            {
+                if (milliseconds > 1000)
+                {
+                    cancellation.Cancel();
+                }
+
+                return Task.CompletedTask;
+            },
+            readStateAsync: async gitCommonDir =>
+            {
+                var current = await DaemonStateStore.ReadAsync(gitCommonDir);
+                if (current is { StopRequested: true, StoppedAt: null } && !simulationRan)
+                {
+                    simulationRan = true;
+                    var materialized = current.ActiveSessions[WorkClaimStore.MainWorktreeIdentity] with
+                    {
+                        LaunchState = SessionLaunchState.Running,
+                        ProcessId = childPid,
+                        ProcessStartTimeUtc = DateTimeOffset.UtcNow
+                    };
+                    var sessions = new Dictionary<string, ActiveDaemonSession>(current.ActiveSessions)
+                    {
+                        [WorkClaimStore.MainWorktreeIdentity] = materialized
+                    };
+                    await DaemonStateStore.WriteAsync(gitCommonDir, current with { ActiveSessions = sessions });
+                    await fakeHost.StopAsync(materialized, CancellationToken.None);
+                    var acknowledged = current with { ActiveSessions = sessions, StoppedAt = DateTimeOffset.UtcNow };
+                    await DaemonStateStore.WriteAsync(gitCommonDir, acknowledged);
+                    return acknowledged;
+                }
+
+                return current;
+            },
+            writeStateAsync: (gitCommonDir, state) =>
+            {
+                // The successor's freshly-written start state carries the adopted session records; on
+                // the successor's own later tick-writes the sessions have been cleared back out.
+                if (successorStartState is null
+                    && state.Pid == Environment.ProcessId
+                    && state.StopRequested == false
+                    && state.ActiveSessions.Count > 0)
+                {
+                    successorStartState = state;
+                }
+
+                return DaemonStateStore.WriteAsync(gitCommonDir, state);
+            });
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["restart", sandbox.RepositoryDirectory], handlerDependencies, cancellation.Token);
+
+        Assert.Equal(0, exitCode);
+        // The supervisor acknowledged within the bounded window, so it was never force-terminated.
+        Assert.Empty(terminatedPids);
+        // The boundary child was stopped by the old supervisor before it acknowledged.
+        Assert.Contains("issue #12", fakeHost.Stops);
+        // The successor adopted the LATEST durable record: a Running session with the persisted
+        // child identity, not the stale pre-shutdown Launching marker that would otherwise fail
+        // closed and strand work awaiting manual repair.
+        Assert.NotNull(successorStartState);
+        Assert.Equal(SessionLaunchState.Running, successorStartState!.ActiveSessions.Values.Single().LaunchState);
+        Assert.Equal(childPid, successorStartState.ActiveSessions.Values.Single().ProcessId);
+    }
+
     private static DaemonExecutionDependencies HandlerDependencies(
         TestSandbox sandbox,
         FakeSessionHost sessionHost,
