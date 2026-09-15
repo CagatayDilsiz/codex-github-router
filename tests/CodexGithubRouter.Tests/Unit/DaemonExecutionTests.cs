@@ -610,6 +610,202 @@ public class DaemonExecutionTests
         Assert.True(state.StoppedAt.HasValue);
     }
 
+    [Fact]
+    public async Task RunOnce_AbortsInFlightLaunch_WhenStopIsRequested_BetweenIntentAndSpawn()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox);
+        context.Plan = SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 });
+
+        var launchGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var intentPersisted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.BeforeSessionLaunchAsync = () => launchGate.Task;
+        context.WriteStateInterceptor = async (_, gitCommonDir, state) =>
+        {
+            await DaemonStateStore.WriteAsync(gitCommonDir, state);
+            if (state.ActiveSessions.Values.Any(session => session.LaunchState == SessionLaunchState.Launching))
+            {
+                intentPersisted.TrySetResult();
+            }
+        };
+
+        var tickTask = Task.Run(() =>
+            DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None));
+
+        // Wait until the launch intent is durably persisted, then have a stop arrive while the
+        // launch is held between the intent write and the spawn decision.
+        await intentPersisted.Task;
+        var snapshot = (await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory))!;
+        await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, snapshot with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
+
+        launchGate.SetResult();
+        var tick = await tickTask;
+
+        // The launch was aborted before spawning: no child process was ever created.
+        Assert.True(tick.StopRequested);
+        Assert.Empty(context.SessionHost.Launches);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        // The interrupted-launch marker is preserved so a later start fails closed on it.
+        Assert.Single(state.ActiveSessions);
+        Assert.Equal(SessionLaunchState.Launching, state.ActiveSessions.Values.Single().LaunchState);
+    }
+
+    [Fact]
+    public async Task RunOnce_AbortsInFlightLaunch_WhenStopCommandRunsConcurrently()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox);
+        context.Plan = SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 });
+
+        var launchGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var intentPersisted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.BeforeSessionLaunchAsync = () => launchGate.Task;
+        context.WriteStateInterceptor = async (_, gitCommonDir, state) =>
+        {
+            await DaemonStateStore.WriteAsync(gitCommonDir, state);
+            if (state.ActiveSessions.Values.Any(session => session.LaunchState == SessionLaunchState.Launching))
+            {
+                intentPersisted.TrySetResult();
+            }
+        };
+
+        var tickTask = Task.Run(() =>
+            DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None));
+
+        await intentPersisted.Task;
+
+        // Exercise the production stop command against the in-flight launch. Because the poller
+        // runs inside this test process, the command writes the durable stop request and sweeps
+        // sessions without terminating its own process, matching the "exit on next cycle" path.
+        var stopDependencies = new DaemonExecutionDependencies
+        {
+            LoadConfigurationAsync = _ => Task.FromResult(context.Configuration),
+            ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(sandbox.GitCommonDirectory),
+            ResolveWorktreeDirectoriesAsync = _ => Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>()),
+            ResolveWorktreeIdAsync = _ => Task.FromResult<string?>(null),
+            IsAutonomousAsync = _ => Task.FromResult(true),
+            IsProcessAliveAsync = (_, _) => Task.FromResult(true),
+            TerminateProcessAsync = (pid, _) => Task.CompletedTask,
+            ReconcileAsync = (_, _, _, _) => Task.FromResult(true),
+            ReadClaimAsync = (_, _) => Task.FromResult<WorkClaim?>(null),
+            ReadAllClaimsAsync = _ => Task.FromResult<IReadOnlyList<WorkClaim>>(Array.Empty<WorkClaim>()),
+            ReleaseClaimIfMatchesAsync = (_, _, _) => Task.FromResult(true),
+            AcquireClaimAsync = _ => Task.FromResult(new WorkClaimAcquisitionOutcome()),
+            EvaluatePlanAsync = (_, _, _, _) => Task.FromResult(new RoutingEvaluationResult
+            {
+                IsSuccessful = true,
+                Decision = null,
+                ActionableTasks = Array.Empty<WorkflowItem>()
+            }),
+            CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(new WorkflowResponse()),
+            CloseIssueAsync = (_, _) => Task.CompletedTask,
+            SessionHost = new FakeSessionHost(),
+            ReadStateAsync = gitCommonDir => DaemonStateStore.ReadAsync(gitCommonDir),
+            WriteStateAsync = (gitCommonDir, state) => DaemonStateStore.WriteAsync(gitCommonDir, state),
+            ReleaseSupervisorLeaseAsync = (gitCommonDir, sessionId, pid) => DaemonSupervisorLeaseStore.ReleaseAsync(gitCommonDir, sessionId, pid),
+            DelayAsync = (_, token) => Task.Delay(TimeSpan.FromSeconds(60), token)
+        };
+
+        var stopExit = await DaemonCommandHandler.HandleAsync(["stop", sandbox.RepositoryDirectory], stopDependencies);
+        Assert.Equal(0, stopExit);
+
+        launchGate.SetResult();
+        var tick = await tickTask;
+
+        // The in-flight launch observed the stop before spawning: no child was created concurrently.
+        Assert.True(tick.StopRequested);
+        Assert.Empty(context.SessionHost.Launches);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+    }
+
+    [Fact]
+    public async Task RunOnce_StopsChild_WhenStopArrives_DuringTheSpawnBoundary()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox);
+        context.Plan = SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 });
+
+        var spawnBoundary = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var spawnStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        context.SessionHost.BeforeLaunchAsync = () =>
+        {
+            spawnStarted.TrySetResult();
+            return spawnBoundary.Task;
+        };
+
+        var tickTask = Task.Run(() =>
+            DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None));
+
+        // A stop lands after the process has begun spawning but before its durable record is written.
+        await spawnStarted.Task;
+        var snapshot = (await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory))!;
+        await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, snapshot with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
+
+        spawnBoundary.SetResult();
+        var tick = await tickTask;
+
+        // The child that appeared in the unavoidable boundary was deterministically stopped.
+        Assert.Single(context.SessionHost.Launches);
+        Assert.Contains(context.SessionHost.Launches[0].Session.WorkIdentity, context.SessionHost.Stops);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+        // The durable Running record exists so a later restart can resolve/resume the session.
+        Assert.Equal(SessionLaunchState.Running, state.ActiveSessions.Values.Single().LaunchState);
+    }
+
+    [Fact]
+    public async Task RunAsync_CancellationDuringFailureBackoff_IsPromptAndStillShutsDown()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox)
+        {
+            Configuration = new RouterConfiguration
+            {
+                Policies = new RouterPolicies
+                {
+                    Execution = new ExecutionPolicy { Mode = ExecutionMode.Daemon },
+                    Daemon = new DaemonPolicy { IntervalSeconds = 60, FailureThreshold = 5 }
+                }
+            },
+            ResolveWorktreesException = new InvalidOperationException("worktree discovery failed")
+        };
+
+        using var cancellation = new CancellationTokenSource();
+        // The failure-path backoff must actually observe the cancellation token: with a 60s interval
+        // the old token-less delay would make Ctrl+C wait the full interval before shutting down.
+        context.Delay = (_, token) => Task.Delay(TimeSpan.FromSeconds(60), token);
+
+        var cancelTask = Task.Run(async () =>
+        {
+            await Task.Delay(100);
+            cancellation.Cancel();
+        });
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        await DaemonExecutionService.RunAsync(sandbox.RepositoryDirectory, context.Dependencies, cancellation.Token);
+        stopwatch.Stop();
+
+        await cancelTask;
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(30), $"Shutdown should interrupt the backoff promptly; took {stopwatch.Elapsed}.");
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.ConsecutiveFailures >= 1);
+        // The single graceful-shutdown path still ran regardless of where cancellation arrived.
+        Assert.True(state.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+    }
+
     private static RoutingEvaluationResult SuccessfulPlan(params WorkflowItem[] tasks)
     {
         var selected = tasks.FirstOrDefault(task => task.Type != WorkflowItemType.CloseIssue) ?? tasks[0];
@@ -687,6 +883,12 @@ public class DaemonExecutionTests
         public int DelayCount { get; private set; }
         public Action? AfterDelay { get; set; }
 
+        /// <summary>Takes over the poller delay when set (used to make backoff actually cancellable).</summary>
+        public Func<int, CancellationToken, Task>? Delay { get; set; }
+
+        /// <summary>Optional pause on the launch critical path between the intent write and the spawn decision.</summary>
+        public Func<Task>? BeforeSessionLaunchAsync { get; set; }
+
         public DaemonExecutionDependencies Dependencies => new()
         {
             LoadConfigurationAsync = directory => Task.FromResult(
@@ -725,13 +927,18 @@ public class DaemonExecutionTests
                     ? DaemonStateStore.WriteAsync(gitCommonDir, state)
                     : WriteStateInterceptor(WriteStateCalls, gitCommonDir, state);
             },
-            DelayAsync = (_, _) =>
-            {
-                DelayCount++;
-                AfterDelay?.Invoke();
-                return Task.CompletedTask;
-            }
+            BeforeSessionLaunchAsync = BeforeSessionLaunchAsync ?? (() => Task.CompletedTask),
+            DelayAsync = (milliseconds, cancellationToken) =>
+                Delay?.Invoke(milliseconds, cancellationToken)
+                ?? DefaultDelay(milliseconds, cancellationToken)
         };
+
+        private Task DefaultDelay(int milliseconds, CancellationToken cancellationToken)
+        {
+            DelayCount++;
+            AfterDelay?.Invoke();
+            return Task.CompletedTask;
+        }
 
         public WorkClaimAcquisitionDependencies AcquisitionDependencies => new()
         {
@@ -752,7 +959,10 @@ public class DaemonExecutionTests
         public List<string> Stops { get; } = new();
         public bool Alive { get; set; } = true;
 
-        public Task<ActiveDaemonSession> LaunchAsync(
+        /// <summary>Optional pause inside the spawn itself, used to race a stop against the boundary.</summary>
+        public Func<Task>? BeforeLaunchAsync { get; set; }
+
+        public async Task<ActiveDaemonSession> LaunchAsync(
             string worktreeDirectory,
             WorkClaim claim,
             string workIdentity,
@@ -762,6 +972,11 @@ public class DaemonExecutionTests
             string daemonSessionId,
             CancellationToken cancellationToken)
         {
+            if (BeforeLaunchAsync is not null)
+            {
+                await BeforeLaunchAsync();
+            }
+
             var session = new ActiveDaemonSession
             {
                 ClaimId = claim.ClaimId,
@@ -775,7 +990,7 @@ public class DaemonExecutionTests
                 StartedAt = DateTimeOffset.UtcNow
             };
             Launches.Add((session, claim, prompt, daemonSessionId));
-            return Task.FromResult(session);
+            return session;
         }
 
         public Task<bool> IsAliveAsync(ActiveDaemonSession session, CancellationToken cancellationToken) =>

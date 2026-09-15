@@ -73,6 +73,13 @@ public sealed class CodexSessionHost : ISessionHost
         }
         catch (Win32Exception)
         {
+            // The process exited between spawn and reading its identity; fall back to the
+            // recorded spawn time so the launch never fails on a short-lived child.
+            processStartTimeUtc = DateTimeOffset.UtcNow;
+        }
+        catch (InvalidOperationException)
+        {
+            // .NET 10 surfaces the same race as InvalidOperationException for a just-exited child.
             processStartTimeUtc = DateTimeOffset.UtcNow;
         }
 

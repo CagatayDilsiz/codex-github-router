@@ -144,6 +144,17 @@ public static class DaemonCommandHandler
             Console.WriteLine("Stop requested; the daemon will exit on its next polling cycle.");
         }
 
+        // Re-read durable state after the stop request (and termination if applicable): a session
+        // the poller registered between the initial snapshot and its exit is not covered above, so
+        // stop sessions that appeared after the snapshot too. Stopping is idempotent and
+        // best-effort, and only sessions absent from the snapshot are re-stopped, which prevents
+        // a launch that completed just before the poller exited from surviving as an orphan.
+        var refreshedState = await dependencies.ReadStateAsync(gitCommonDir);
+        if (refreshedState is not null)
+        {
+            await StopNewSessionsAsync(state, refreshedState, dependencies);
+        }
+
         // The supervisor is (requested to be) gone, so the repository lease is free for a later
         // start or single-cycle run; releasing with the recorded owner identity never deletes a
         // lease a different supervisor has since taken.
@@ -236,6 +247,14 @@ public static class DaemonCommandHandler
             await dependencies.TerminateProcessAsync(state!.Pid, state.PidStartTimeUtc);
             await dependencies.ReleaseSupervisorLeaseAsync(gitCommonDir, state.DaemonSessionId, state.Pid);
             Console.WriteLine($"Terminated previous daemon process {state.Pid}.");
+        }
+
+        // A session the previous supervisor registered between its snapshot and exit would not have
+        // been covered above; stop it so the new supervisor never adopts an unsupervised child.
+        var refreshedState = await dependencies.ReadStateAsync(gitCommonDir);
+        if (refreshedState is not null && state is not null)
+        {
+            await StopNewSessionsAsync(state, refreshedState, dependencies);
         }
 
         var daemonSessionId = state?.DaemonSessionId ?? Guid.NewGuid().ToString("N");
@@ -350,6 +369,28 @@ public static class DaemonCommandHandler
             try
             {
                 await dependencies.SessionHost.StopAsync(session, CancellationToken.None);
+            }
+            catch
+            {
+                // Best-effort: an already-exited or unknown session must not abort the shutdown.
+            }
+        }
+    }
+
+    private static async Task StopNewSessionsAsync(DaemonExecutionState snapshot, DaemonExecutionState refreshed, DaemonExecutionDependencies dependencies)
+    {
+        foreach (var entry in refreshed.ActiveSessions)
+        {
+            // Sessions present in the snapshot were already stopped; only stop sessions that
+            // appeared after the snapshot (registered by the poller between its snapshot and exit).
+            if (snapshot.ActiveSessions.ContainsKey(entry.Key))
+            {
+                continue;
+            }
+
+            try
+            {
+                await dependencies.SessionHost.StopAsync(entry.Value, CancellationToken.None);
             }
             catch
             {

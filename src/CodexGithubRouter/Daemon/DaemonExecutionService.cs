@@ -119,6 +119,14 @@ public sealed class DaemonExecutionDependencies
     public Func<int, CancellationToken, Task> DelayAsync { get; init; }
         = (milliseconds, cancellationToken) => Task.Delay(milliseconds, cancellationToken);
 
+    /// <summary>
+    /// Launch-critical-path seam invoked after the durable launch intent is persisted and before
+    /// the durable stop-request re-check that precedes spawning a session process. Production is a
+    /// no-op; tests pause here to interleave a concurrent stop/restart deterministically against an
+    /// in-flight launch.
+    /// </summary>
+    public Func<Task> BeforeSessionLaunchAsync { get; init; } = () => Task.CompletedTask;
+
     private static async Task<RoutingEvaluationResult> EvaluatePlanDefaultAsync(
         RouterConfiguration configuration, string workingDirectory, string? currentModel, IReadOnlyList<WorkClaim> otherWorktreeClaims)
     {
@@ -241,8 +249,35 @@ public static class DaemonExecutionService
             {
                 summaries.Add(pass.Summary);
             }
+
+            if (pass.StopRequested)
+            {
+                // Shutdown coordination on the launch critical path: once a worktree observed a
+                // concurrent stop, no further worktree may spawn a session. Acknowledge the stop,
+                // persist the tick health, and let the poller shut down.
+                if (summaries.Count == 0)
+                {
+                    summaries.Add("Stop requested during polling; no further work was started.");
+                }
+
+                return await FinalizeTickAsync(
+                    dependencies, gitCommonDir, configuration, readState, currentState, summaries, failuresThisTick);
+            }
         }
 
+        return await FinalizeTickAsync(
+            dependencies, gitCommonDir, configuration, readState, currentState, summaries, failuresThisTick);
+    }
+
+    private static async Task<DaemonTickResult> FinalizeTickAsync(
+        DaemonExecutionDependencies dependencies,
+        string gitCommonDir,
+        RouterConfiguration configuration,
+        DaemonExecutionState readState,
+        DaemonExecutionState currentState,
+        List<string> summaries,
+        int failuresThisTick)
+    {
         var consecutiveFailures = failuresThisTick > 0 ? readState.ConsecutiveFailures + failuresThisTick : 0;
         var finalState = currentState with
         {
@@ -257,7 +292,8 @@ public static class DaemonExecutionService
         {
             Summary = finalState.LastTickSummary,
             ConsecutiveFailures = finalState.ConsecutiveFailures,
-            Unhealthy = finalState.Unhealthy
+            Unhealthy = finalState.Unhealthy,
+            StopRequested = finalState.StopRequested
         };
     }
 
@@ -284,13 +320,22 @@ public static class DaemonExecutionService
             catch (Exception exception)
             {
                 // Bounded exception-path polling: an unexpected tick failure is surfaced in
-                // persisted health (so status never hides it) and the poller always obeys the
-                // configured cadence/backoff before retrying instead of hot-looping. The retry
-                // delay uses an independent token so cancellation during it cannot escape this
-                // catch block; the loop then exits and falls through to the graceful shutdown below.
+                // persisted health (so status never hides it) and the poller obeys the configured
+                // cadence/backoff before retrying instead of hot-looping. The backoff is also
+                // cancellation-aware: Ctrl+C during it interrupts promptly instead of waiting out
+                // the full interval, and the cancellation is caught locally so the OperationCanceledException
+                // cannot escape this catch block; the loop then exits and falls through to the
+                // single graceful-shutdown path below.
                 Console.Error.WriteLine($"Daemon tick failed: {exception.Message}");
                 await PublishTickFailureAsync(workingDirectory, dependencies, exception);
-                await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, CancellationToken.None);
+                try
+                {
+                    await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    shouldShutdown = true;
+                }
             }
         }
 
@@ -538,6 +583,16 @@ public static class DaemonExecutionService
 
         var launched = await LaunchSessionAsync(
             dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, claimedWork, cancellationToken);
+        if (launched.StopRequested || launched.Session is null)
+        {
+            return new WorktreePassResult
+            {
+                State = launched.State,
+                Summary = "Stop requested while resuming the claim; the session was not launched.",
+                StopRequested = true
+            };
+        }
+
         return new WorktreePassResult
         {
             State = launched.State,
@@ -598,6 +653,16 @@ public static class DaemonExecutionService
 
         var resumed = await LaunchSessionAsync(
             dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, claimedWork, cancellationToken);
+        if (resumed.StopRequested || resumed.Session is null)
+        {
+            return new WorktreePassResult
+            {
+                State = resumed.State,
+                Summary = "Stop requested while resuming the session; the session was not launched.",
+                StopRequested = true
+            };
+        }
+
         return new WorktreePassResult
         {
             State = resumed.State,
@@ -710,6 +775,16 @@ public static class DaemonExecutionService
 
         var launched = await LaunchSessionAsync(
             dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, refreshedWork, cancellationToken);
+        if (launched.StopRequested || launched.Session is null)
+        {
+            return new WorktreePassResult
+            {
+                State = launched.State,
+                Summary = "Stop requested after acquiring the claim; the session was not launched.",
+                StopRequested = true
+            };
+        }
+
         return new WorktreePassResult
         {
             State = launched.State,
@@ -717,7 +792,7 @@ public static class DaemonExecutionService
         };
     }
 
-    private static async Task<(DaemonExecutionState State, ActiveDaemonSession Session)> LaunchSessionAsync(
+    private static async Task<(DaemonExecutionState State, ActiveDaemonSession? Session, bool StopRequested)> LaunchSessionAsync(
         DaemonExecutionDependencies dependencies,
         string worktreeDirectory,
         string gitCommonDir,
@@ -733,26 +808,46 @@ public static class DaemonExecutionService
         var prompt = selectedTask is not null ? ContextPromptService.GetPromptForTask(selectedTask) : string.Empty;
         var model = configuration.Policies.Daemon.Model;
         var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId);
+        var launchingSession = new ActiveDaemonSession
+        {
+            ClaimId = claim.ClaimId,
+            WorktreeId = claim.WorktreeId,
+            WorktreeDirectory = worktreeDirectory,
+            WorkIdentity = workIdentity,
+            WorkItemType = (selectedTask?.Type ?? WorkflowItemType.Unknown).ToString(),
+            Model = model,
+            StartedAt = DateTimeOffset.UtcNow,
+            LaunchState = SessionLaunchState.Launching
+        };
 
-        // Phase 1: persist the launch INTENT before the process exists. A crash after acquisition
+        // Phase 1: persist the launch INTENT before the process exists. We merge into the durable
+        // state as it is on disk rather than overwriting from the tick-start snapshot, so a concurrent
+        // stop's StopRequested flag is never lost under the intent write. A crash after acquisition
         // but before the spawn leaves a plain daemon-owned claim (safe to resume on restart), while
         // a crash between the spawn and the durable running record below leaves this ambiguous
         // Launching marker, so a restart can never launch a duplicate process for the same claim.
-        var launchingSessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions)
+        var beforeIntent = await dependencies.ReadStateAsync(gitCommonDir) ?? baseState;
+        var intentSessions = new Dictionary<string, ActiveDaemonSession>(beforeIntent.ActiveSessions)
         {
-            [key] = new ActiveDaemonSession
-            {
-                ClaimId = claim.ClaimId,
-                WorktreeId = claim.WorktreeId,
-                WorktreeDirectory = worktreeDirectory,
-                WorkIdentity = workIdentity,
-                WorkItemType = (selectedTask?.Type ?? WorkflowItemType.Unknown).ToString(),
-                Model = model,
-                StartedAt = DateTimeOffset.UtcNow,
-                LaunchState = SessionLaunchState.Launching
-            }
+            [key] = launchingSession
         };
-        await dependencies.WriteStateAsync(gitCommonDir, baseState with { ActiveSessions = launchingSessions });
+        var intentState = beforeIntent with { ActiveSessions = intentSessions };
+        await dependencies.WriteStateAsync(gitCommonDir, intentState);
+
+        // Launch-critical-path seam (production no-op, testable pause).
+        await dependencies.BeforeSessionLaunchAsync();
+
+        // Shutdown coordination on the launch critical path: request stop → the supervisor observes
+        // the stop before any further spawn. Re-read durable state immediately before spawning and
+        // abort when a concurrent stop/restart persisted StopRequested after the intent write above.
+        // This guarantees no child can be created after a stop has been durably requested, except in
+        // the unavoidable spawn boundary between the check and SessionHost.LaunchAsync, where a
+        // child that does appear is deterministically stopped in Phase 2 below.
+        var preSpawn = await dependencies.ReadStateAsync(gitCommonDir) ?? intentState;
+        if (preSpawn.StopRequested)
+        {
+            return (preSpawn, null, StopRequested: true);
+        }
 
         var session = await dependencies.SessionHost.LaunchAsync(
             worktreeDirectory,
@@ -764,16 +859,32 @@ public static class DaemonExecutionService
             daemonSessionId,
             cancellationToken);
 
-        // Phase 2: persist the durable running record (PID + start time) once the spawn succeeded,
-        // closing the crash window in which a claim is daemon-owned but no session existed on disk.
-        var runningSessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions)
+        // Phase 2: persist the durable running record (PID + start time) once the spawn succeeded.
+        // We re-read and merge into the current durable state so concurrent state (most importantly
+        // a StopRequested that arrived while the child was starting) is never lost under this write;
+        // if a stop did arrive, the child was created in the unavoidable spawn boundary and is
+        // stopped deterministically before the supervisor can exit.
+        var postSpawn = await dependencies.ReadStateAsync(gitCommonDir) ?? preSpawn;
+        var runningSessions = new Dictionary<string, ActiveDaemonSession>(postSpawn.ActiveSessions)
         {
             [key] = session with { LaunchState = SessionLaunchState.Running }
         };
-        var runningState = baseState with { ActiveSessions = runningSessions };
+        var runningState = postSpawn with { ActiveSessions = runningSessions };
         await dependencies.WriteStateAsync(gitCommonDir, runningState);
 
-        return (runningState, session);
+        if (runningState.StopRequested)
+        {
+            try
+            {
+                await dependencies.SessionHost.StopAsync(session, cancellationToken);
+            }
+            catch
+            {
+                // Best-effort: stopping the child in the shutdown boundary must not fail the launch path.
+            }
+        }
+
+        return (runningState, session, StopRequested: false);
     }
 
     private static bool IsDaemonOwnedClaim(WorkClaim claim, string daemonSessionId) =>
@@ -809,5 +920,6 @@ public static class DaemonExecutionService
         public DaemonExecutionState State { get; init; } = null!;
         public string Summary { get; init; } = string.Empty;
         public bool IsFailure { get; init; }
+        public bool StopRequested { get; init; }
     }
 }
