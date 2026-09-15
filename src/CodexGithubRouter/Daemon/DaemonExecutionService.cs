@@ -28,11 +28,23 @@ public sealed class DaemonExecutionDependencies
     public Func<string, Task<string?>> ResolveWorktreeIdAsync { get; init; }
         = workingDirectory => GitRepositoryService.GetWorktreeIdAsync(workingDirectory);
 
+    /// <summary>
+    /// Resolves the working directories of every Git worktree the supervisor should drive. The
+    /// production default enumerates the repository worktrees so the daemon preserves (rather than
+    /// collapses) the parallel-work contract for linked worktrees.
+    /// </summary>
+    public Func<string, Task<IReadOnlyList<string>>> ResolveWorktreeDirectoriesAsync { get; init; }
+        = workingDirectory => GitRepositoryService.ListWorktreesAsync(workingDirectory);
+
     public Func<string, Task<bool>> IsAutonomousAsync { get; init; }
         = workingDirectory => AutonomousService.IsAutonomousAsync(workingDirectory);
 
-    public Func<string, string, WorkClaim, Task<WorkClaimAcquisitionResult>> TryAcquireClaimAsync { get; init; }
-        = (gitCommonDir, worktreeId, claimed) => WorkClaimStore.TryAcquireAsync(gitCommonDir, worktreeId, claimed);
+    /// <summary>
+    /// Shared acquisition path (issue refresh + worker/assignment revalidation + claim metadata)
+    /// used identically by the hook and the daemon.
+    /// </summary>
+    public Func<WorkClaimAcquisitionRequest, Task<WorkClaimAcquisitionOutcome>> AcquireClaimAsync { get; init; }
+        = request => WorkClaimAcquisitionService.AcquireAsync(request, CancellationToken.None);
 
     public Func<string, string, Task<WorkClaim?>> ReadClaimAsync { get; init; }
         = (gitCommonDir, worktreeId) => WorkClaimStore.ReadAsync(gitCommonDir, worktreeId);
@@ -63,6 +75,41 @@ public sealed class DaemonExecutionDependencies
 
     public Func<string, DaemonExecutionState, Task> WriteStateAsync { get; init; }
         = (gitCommonDir, state) => DaemonStateStore.WriteAsync(gitCommonDir, state);
+
+    /// <summary>PID-liveness check that also verifies the expected process start time (identity).</summary>
+    public Func<int, DateTimeOffset?, Task<bool>> IsProcessAliveAsync { get; init; }
+        = (pid, startTimeUtc) => Task.FromResult(ProcessIdentity.IsAlive(pid, startTimeUtc));
+
+    /// <summary>Identity-verified termination of a daemon supervisor process (never a kill-tree).</summary>
+    public Func<int, DateTimeOffset?, Task> TerminateProcessAsync { get; init; }
+        = (pid, startTimeUtc) =>
+        {
+            if (!ProcessIdentity.IsAlive(pid, startTimeUtc))
+            {
+                return Task.CompletedTask;
+            }
+
+            try
+            {
+                using var process = System.Diagnostics.Process.GetProcessById(pid);
+                if (!process.HasExited)
+                {
+                    // The supervisor is terminated directly; its sessions are stopped gracefully
+                    // via SessionHost.StopAsync first, so we never kill-tree unrelated work.
+                    process.Kill();
+                }
+            }
+            catch (ArgumentException)
+            {
+                // Already gone.
+            }
+            catch (InvalidOperationException)
+            {
+                // Exited while being inspected.
+            }
+
+            return Task.CompletedTask;
+        };
 
     public Func<int, CancellationToken, Task> DelayAsync { get; init; }
         = (milliseconds, cancellationToken) => Task.Delay(milliseconds, cancellationToken);
@@ -103,35 +150,26 @@ public static class DaemonExecutionService
 
         var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory)
             ?? throw new InvalidOperationException("Not a valid Git repository.");
-        var worktreeId = await dependencies.ResolveWorktreeIdAsync(workingDirectory)
-            ?? throw new InvalidOperationException("Not a valid Git repository.");
-
-        try
-        {
-            await dependencies.ReconcileAsync(workingDirectory, gitCommonDir, worktreeId, configuration);
-        }
-        catch
-        {
-            // Non-destructive: a failed reconciliation must never block the poller.
-        }
 
         var readState = await dependencies.ReadStateAsync(gitCommonDir);
-        var daemonSessionId = readState?.DaemonSessionId;
-        if (string.IsNullOrWhiteSpace(daemonSessionId))
-        {
-            daemonSessionId = Guid.NewGuid().ToString("N");
-        }
+        var daemonSessionId = string.IsNullOrWhiteSpace(readState?.DaemonSessionId)
+            ? Guid.NewGuid().ToString("N")
+            : readState!.DaemonSessionId;
 
-        readState = readState is null
-            ? new DaemonExecutionState
-            {
-                DaemonSessionId = daemonSessionId,
-                Pid = Environment.ProcessId,
-                StartedAt = DateTimeOffset.UtcNow
-            }
-            : string.IsNullOrWhiteSpace(readState.DaemonSessionId)
-                ? readState with { DaemonSessionId = daemonSessionId }
-                : readState;
+        readState ??= new DaemonExecutionState
+        {
+            DaemonSessionId = daemonSessionId,
+            Pid = Environment.ProcessId,
+            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+            StartedAt = DateTimeOffset.UtcNow
+        };
+        readState = readState with
+        {
+            DaemonSessionId = string.IsNullOrWhiteSpace(readState.DaemonSessionId) ? daemonSessionId : readState.DaemonSessionId,
+            Pid = Environment.ProcessId,
+            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+            ActiveSessions = readState.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
+        };
 
         if (readState.StopRequested)
         {
@@ -139,74 +177,49 @@ public static class DaemonExecutionService
             return new DaemonTickResult { Summary = "Stop requested; daemon shut down cleanly.", StopRequested = true };
         }
 
-        if (readState.ActiveSession is { } activeSession)
+        var worktreeDirectories = await dependencies.ResolveWorktreeDirectoriesAsync(workingDirectory);
+        if (worktreeDirectories.Count == 0)
         {
-            return await HandleActiveSessionAsync(
-                dependencies, workingDirectory, gitCommonDir, worktreeId, configuration, daemonSessionId, readState, activeSession, cancellationToken);
-        }
-
-        var allClaims = await dependencies.ReadAllClaimsAsync(gitCommonDir);
-        var otherWorktreeClaims = allClaims
-            .Where(claim => !IsDaemonOwnedClaim(claim, gitCommonDir, worktreeId, daemonSessionId))
-            .ToList();
-
-        var plan = await dependencies.EvaluatePlanAsync(configuration, workingDirectory, configuration.Policies.Daemon.Model, otherWorktreeClaims);
-        if (!plan.IsSuccessful)
-        {
-            var failed = readState with
+            var noWorktrees = readState with
             {
-                ConsecutiveFailures = readState.ConsecutiveFailures + 1,
-                Unhealthy = readState.ConsecutiveFailures + 1 >= configuration.Policies.Daemon.FailureThreshold,
                 LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = plan.DiscoveryFailureMessage ?? "Routing evaluation failed."
+                LastTickSummary = "No Git worktrees were discovered for this repository."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, failed);
-            return new DaemonTickResult { Summary = failed.LastTickSummary, ConsecutiveFailures = failed.ConsecutiveFailures, Unhealthy = failed.Unhealthy };
+            await dependencies.WriteStateAsync(gitCommonDir, noWorktrees);
+            return new DaemonTickResult { Summary = noWorktrees.LastTickSummary };
         }
 
-        if (plan.Decision?.SelectedTask is null || !string.IsNullOrWhiteSpace(plan.BlockReason))
+        var currentState = readState;
+        var summaries = new List<string>();
+        var failuresThisTick = 0;
+        foreach (var worktreeDirectory in worktreeDirectories)
         {
-            var idle = readState with
+            var pass = await RunWorktreePassAsync(
+                dependencies, worktreeDirectory, gitCommonDir, configuration, daemonSessionId, currentState, cancellationToken);
+            currentState = pass.State;
+            failuresThisTick += pass.IsFailure ? 1 : 0;
+            if (!string.IsNullOrWhiteSpace(pass.Summary))
             {
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = string.IsNullOrWhiteSpace(plan.BlockReason) ? "No actionable workflow tasks found." : plan.BlockReason
-            };
-            await dependencies.WriteStateAsync(gitCommonDir, idle);
-            return new DaemonTickResult { Summary = idle.LastTickSummary };
-        }
-
-        // Idempotent mechanical actions: close issues marked for closure before evaluating claims
-        // so newly-closed work never stalls routing.
-        foreach (var closingTask in plan.ActionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue && task.IssueNumber.HasValue))
-        {
-            try
-            {
-                await dependencies.CloseIssueAsync(workingDirectory, closingTask.IssueNumber!.Value);
-            }
-            catch
-            {
-                // Non-destructive: a failing close must not prevent the daemon from routing other work.
+                summaries.Add(pass.Summary);
             }
         }
 
-        var selectedTask = plan.Decision.SelectedTask;
-        if (!HookTaskRouter.RequiresWorkClaim(selectedTask))
+        var consecutiveFailures = failuresThisTick > 0 ? readState.ConsecutiveFailures + failuresThisTick : 0;
+        var finalState = currentState with
         {
-            var skipped = readState with
-            {
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = $"Actionable task ({selectedTask.Type}) does not require a claim; skipped for safety."
-            };
-            await dependencies.WriteStateAsync(gitCommonDir, skipped);
-            return new DaemonTickResult { Summary = skipped.LastTickSummary };
-        }
+            ConsecutiveFailures = consecutiveFailures,
+            Unhealthy = consecutiveFailures >= configuration.Policies.Daemon.FailureThreshold,
+            LastTickAt = DateTimeOffset.UtcNow,
+            LastTickSummary = summaries.Count == 0 ? "No actionable workflow tasks found." : string.Join("; ", summaries)
+        };
+        await dependencies.WriteStateAsync(gitCommonDir, finalState);
 
-        return await AcquireAndLaunchAsync(
-            dependencies, workingDirectory, gitCommonDir, worktreeId, configuration, daemonSessionId, readState, selectedTask, cancellationToken);
+        return new DaemonTickResult
+        {
+            Summary = finalState.LastTickSummary,
+            ConsecutiveFailures = finalState.ConsecutiveFailures,
+            Unhealthy = finalState.Unhealthy
+        };
     }
 
     public static async Task RunAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken cancellationToken)
@@ -218,199 +231,435 @@ public static class DaemonExecutionService
                 var tick = await RunOnceAsync(workingDirectory, dependencies, cancellationToken);
                 if (tick.StopRequested || cancellationToken.IsCancellationRequested)
                 {
+                    await ShutdownGracefullyAsync(workingDirectory, dependencies, cancellationToken);
                     break;
                 }
 
-                var intervalSeconds = 60;
-                try
-                {
-                    var configuration = await dependencies.LoadConfigurationAsync(workingDirectory);
-                    intervalSeconds = Math.Clamp(configuration.Policies.Daemon.IntervalSeconds, 1, 3600);
-                }
-                catch
-                {
-                    // Best-effort: fall back to the default interval when configuration cannot be reloaded.
-                }
-
-                await dependencies.DelayAsync(intervalSeconds * 1000, cancellationToken);
+                await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                await ShutdownGracefullyAsync(workingDirectory, dependencies, CancellationToken.None);
                 break;
             }
             catch (Exception exception)
             {
+                // Bounded exception-path polling: an unexpected tick failure is surfaced in
+                // persisted health (so status never hides it) and the poller always obeys the
+                // configured cadence/backoff before retrying instead of hot-looping.
                 Console.Error.WriteLine($"Daemon tick failed: {exception.Message}");
+                await PublishTickFailureAsync(workingDirectory, dependencies, exception);
+                await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, cancellationToken);
             }
         }
     }
 
-    private static async Task<DaemonTickResult> HandleActiveSessionAsync(
+    /// <summary>
+    /// Graceful daemon shutdown: stops every supervised Codex session through the session host
+    /// (never a kill-tree of the daemon process) and records the clean stop in persisted state.
+    /// Claims are deliberately preserved so a later restart resumes, rather than duplicates, the
+    /// interrupted work. Best-effort: an exiting daemon must never throw on bookkeeping.
+    /// </summary>
+    public static async Task ShutdownGracefullyAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
+            if (gitCommonDir is null)
+            {
+                return;
+            }
+
+            var state = await dependencies.ReadStateAsync(gitCommonDir);
+            if (state is null)
+            {
+                return;
+            }
+
+            foreach (var session in state.ActiveSessions.Values)
+            {
+                try
+                {
+                    await dependencies.SessionHost.StopAsync(session, cancellationToken);
+                }
+                catch
+                {
+                    // Best-effort per-session shutdown; one stubborn process must not abort the rest.
+                }
+            }
+
+            await dependencies.WriteStateAsync(gitCommonDir, state with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
+        }
+        catch
+        {
+            // The daemon is exiting anyway; never let shutdown bookkeeping throw.
+        }
+    }
+
+    private static async Task<int> ResolveIntervalAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
+    {
+        try
+        {
+            var configuration = await dependencies.LoadConfigurationAsync(workingDirectory);
+            return Math.Clamp(configuration.Policies.Daemon.IntervalSeconds, 1, 3600);
+        }
+        catch
+        {
+            return 60;
+        }
+    }
+
+    private static async Task PublishTickFailureAsync(string workingDirectory, DaemonExecutionDependencies dependencies, Exception exception)
+    {
+        try
+        {
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory);
+            if (gitCommonDir is null)
+            {
+                return;
+            }
+
+            var readState = await dependencies.ReadStateAsync(gitCommonDir);
+            readState ??= new DaemonExecutionState
+            {
+                DaemonSessionId = Guid.NewGuid().ToString("N"),
+                Pid = Environment.ProcessId,
+                PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+                StartedAt = DateTimeOffset.UtcNow
+            };
+
+            var threshold = 5;
+            try
+            {
+                var configuration = await dependencies.LoadConfigurationAsync(workingDirectory);
+                threshold = configuration.Policies.Daemon.FailureThreshold;
+            }
+            catch
+            {
+                // Default threshold applies when configuration cannot be reloaded.
+            }
+
+            var failures = readState.ConsecutiveFailures + 1;
+            await dependencies.WriteStateAsync(gitCommonDir, readState with
+            {
+                Pid = Environment.ProcessId,
+                PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+                ConsecutiveFailures = failures,
+                Unhealthy = failures >= threshold,
+                LastTickAt = DateTimeOffset.UtcNow,
+                LastTickSummary = $"Unexpected tick failure: {exception.Message}"
+            });
+        }
+        catch
+        {
+            // Best-effort: never let health bookkeeping obscure the original tick failure.
+        }
+    }
+
+    private static async Task<WorktreePassResult> RunWorktreePassAsync(
         DaemonExecutionDependencies dependencies,
-        string workingDirectory,
+        string worktreeDirectory,
+        string gitCommonDir,
+        RouterConfiguration configuration,
+        string daemonSessionId,
+        DaemonExecutionState baseState,
+        CancellationToken cancellationToken)
+    {
+        var worktreeId = await dependencies.ResolveWorktreeIdAsync(worktreeDirectory);
+        if (string.IsNullOrWhiteSpace(worktreeId))
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = $"Worktree '{worktreeDirectory}' could not be identified; skipped this cycle."
+            };
+        }
+
+        try
+        {
+            await dependencies.ReconcileAsync(worktreeDirectory, gitCommonDir, worktreeId, configuration);
+        }
+        catch
+        {
+            // Non-destructive: a failed reconciliation must never block the poller.
+        }
+
+        var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, worktreeId);
+        var claim = await dependencies.ReadClaimAsync(gitCommonDir, worktreeId);
+        var session = baseState.ActiveSessions.TryGetValue(key, out var existing) ? existing : null;
+
+        if (claim is not null && IsDaemonOwnedClaim(claim, daemonSessionId))
+        {
+            if (session is null || session.ClaimId != claim.ClaimId)
+            {
+                // A stale session record (the claim was released externally and re-acquired, or a
+                // crash happened between acquisition and record) is cleared and the daemon-owned
+                // claim resumes without re-acquiring it.
+                var withoutStaleRecord = session is null
+                    ? baseState
+                    : baseState with { ActiveSessions = RemoveSession(baseState.ActiveSessions, key) };
+                return await HandleOwnerlessClaimAsync(
+                    dependencies, worktreeDirectory, gitCommonDir, worktreeId, configuration, daemonSessionId, withoutStaleRecord, claim, cancellationToken);
+            }
+
+            return await HandleActiveSessionAsync(
+                dependencies, worktreeDirectory, gitCommonDir, worktreeId, configuration, daemonSessionId, baseState, claim, session, cancellationToken);
+        }
+
+        if (claim is not null)
+        {
+            // Another owner holds the claim for this worktree: never touch its work, but drop any
+            // stale daemon session record so this worktree's slot stays clean.
+            var cleared = baseState with { ActiveSessions = RemoveSession(baseState.ActiveSessions, key) };
+            return new WorktreePassResult
+            {
+                State = cleared,
+                Summary = $"Active work claim for {FormatWorkIdentity(claim)} is owned by another Codex session."
+            };
+        }
+
+        if (session is not null)
+        {
+            // The claim was released (GitHub state went passive/terminal or it was released
+            // externally) while a session record remained; clear the stale record and let ordinary
+            // routing decide on the next cycle.
+            var cleared = baseState with { ActiveSessions = RemoveSession(baseState.ActiveSessions, key) };
+            return new WorktreePassResult
+            {
+                State = cleared,
+                Summary = "Active session claim is no longer owned by daemon; cleared active session."
+            };
+        }
+
+        return await EvaluateAndAcquireAsync(
+            dependencies, worktreeDirectory, gitCommonDir, worktreeId, configuration, daemonSessionId, baseState, cancellationToken);
+    }
+
+    private static async Task<WorktreePassResult> HandleOwnerlessClaimAsync(
+        DaemonExecutionDependencies dependencies,
+        string worktreeDirectory,
         string gitCommonDir,
         string worktreeId,
         RouterConfiguration configuration,
         string daemonSessionId,
-        DaemonExecutionState readState,
-        ActiveDaemonSession activeSession,
+        DaemonExecutionState baseState,
+        WorkClaim claim,
         CancellationToken cancellationToken)
     {
-        var claim = await dependencies.ReadClaimAsync(gitCommonDir, worktreeId);
-        var claimOwnedByDaemon = claim is not null &&
-            string.Equals(claim.ClaimId.ToString("N"), activeSession.ClaimId.ToString("N"), StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(claim.OwnerSessionId, daemonSessionId, StringComparison.OrdinalIgnoreCase);
-
-        if (claim is null || !claimOwnedByDaemon)
-        {
-            var cleared = readState with
-            {
-                ActiveSession = null,
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = "Active session claim is no longer owned by daemon; cleared active session."
-            };
-            await dependencies.WriteStateAsync(gitCommonDir, cleared);
-            return new DaemonTickResult { Summary = cleared.LastTickSummary };
-        }
-
-        var isAlive = await dependencies.SessionHost.IsAliveAsync(activeSession, cancellationToken);
-        if (isAlive)
-        {
-            var supervising = readState with
-            {
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = $"Supervising active session for {activeSession.WorkIdentity}."
-            };
-            await dependencies.WriteStateAsync(gitCommonDir, supervising);
-            return new DaemonTickResult { Summary = supervising.LastTickSummary };
-        }
-
-        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, claim, configuration.Policies.Daemon.Model);
+        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, worktreeDirectory, claim, configuration.Policies.Daemon.Model);
         if (!claimedWork.IsSuccessful)
         {
-            var unknown = readState with
+            return new WorktreePassResult
             {
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = claimedWork.Message ?? "Claimed-work refresh failed; retrying next cycle."
+                State = baseState,
+                Summary = claimedWork.Message ?? "Claimed-work refresh failed; retrying next cycle."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, unknown);
-            return new DaemonTickResult { Summary = unknown.LastTickSummary };
         }
 
         if (IsReleaseCandidate(claimedWork))
         {
             if (!await dependencies.ReleaseClaimIfMatchesAsync(gitCommonDir, worktreeId, claim))
             {
-                var failedRelease = readState with
+                return new WorktreePassResult
                 {
-                    LastTickAt = DateTimeOffset.UtcNow,
-                    LastTickSummary = $"Session for {activeSession.WorkIdentity} ended in a passive/terminal state but the claim could not be released safely."
+                    State = baseState,
+                    Summary = $"Claim for {FormatWorkIdentity(claim)} ended in a passive/terminal state but could not be released safely."
                 };
-                await dependencies.WriteStateAsync(gitCommonDir, failedRelease);
-                return new DaemonTickResult { Summary = failedRelease.LastTickSummary };
             }
 
-            var released = readState with
+            return new WorktreePassResult
             {
-                ActiveSession = null,
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = $"Session for {activeSession.WorkIdentity} ended in a passive/terminal state; claim released."
+                State = baseState,
+                Summary = $"Claim for {FormatWorkIdentity(claim)} ended in a passive/terminal state; released."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, released);
-            return new DaemonTickResult { Summary = released.LastTickSummary };
         }
 
-        var resumed = await LaunchSessionAsync(dependencies, workingDirectory, gitCommonDir, configuration, daemonSessionId, claim, claimedWork, cancellationToken);
-        return new DaemonTickResult { Summary = $"Resumed session for {resumed.ActiveSession!.WorkIdentity} after unexpected session exit." };
+        var launched = await LaunchSessionAsync(
+            dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, claimedWork, cancellationToken);
+        return new WorktreePassResult
+        {
+            State = launched.State,
+            Summary = $"Resumed session for {launched.Session.WorkIdentity}."
+        };
     }
 
-    private static async Task<DaemonTickResult> AcquireAndLaunchAsync(
+    private static async Task<WorktreePassResult> HandleActiveSessionAsync(
         DaemonExecutionDependencies dependencies,
-        string workingDirectory,
+        string worktreeDirectory,
         string gitCommonDir,
         string worktreeId,
         RouterConfiguration configuration,
         string daemonSessionId,
-        DaemonExecutionState readState,
-        WorkflowItem selectedTask,
+        DaemonExecutionState baseState,
+        WorkClaim claim,
+        ActiveDaemonSession activeSession,
         CancellationToken cancellationToken)
     {
-        var claimType = selectedTask.Type == WorkflowItemType.ChangeRequest
-            ? WorkClaimType.ChangeRequest
-            : selectedTask.Type == WorkflowItemType.PullRequestReview
-                ? WorkClaimType.Review
-                : WorkClaimType.Implementation;
-
-        var acquisition = await dependencies.TryAcquireClaimAsync(
-            gitCommonDir,
-            worktreeId,
-            new WorkClaim
-            {
-                OwnerSessionId = daemonSessionId,
-                IssueNumber = selectedTask.IssueNumber,
-                PullRequestNumber = selectedTask.PullRequestNumber,
-                WorkType = claimType,
-                ReviewerLogin = selectedTask.ReviewerLogin,
-                ReviewCycleId = selectedTask.ReviewCycleId,
-                ReviewBaselineCaptured = claimType == WorkClaimType.Review,
-                ClaimedIssueUpdatedAt = DateTimeOffset.UtcNow
-            });
-
-        if (!acquisition.Acquired)
+        var isAlive = await dependencies.SessionHost.IsAliveAsync(activeSession, cancellationToken);
+        if (isAlive)
         {
-            var blocked = readState with
+            return new WorktreePassResult
             {
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = acquisition.BlockReason ?? "Could not acquire the work claim."
+                State = baseState,
+                Summary = $"Supervising active session for {activeSession.WorkIdentity}."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, blocked);
-            return new DaemonTickResult { Summary = blocked.LastTickSummary };
         }
 
-        var claim = acquisition.Claim!;
-        var refreshedWork = await dependencies.CheckClaimedWorkAsync(configuration, workingDirectory, claim, configuration.Policies.Daemon.Model);
+        var claimedWork = await dependencies.CheckClaimedWorkAsync(configuration, worktreeDirectory, claim, configuration.Policies.Daemon.Model);
+        if (!claimedWork.IsSuccessful)
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = claimedWork.Message ?? "Claimed-work refresh failed; retrying next cycle."
+            };
+        }
+
+        if (IsReleaseCandidate(claimedWork))
+        {
+            if (!await dependencies.ReleaseClaimIfMatchesAsync(gitCommonDir, worktreeId, claim))
+            {
+                return new WorktreePassResult
+                {
+                    State = baseState,
+                    Summary = $"Session for {activeSession.WorkIdentity} ended in a passive/terminal state but the claim could not be released safely."
+                };
+            }
+
+            var released = baseState with { ActiveSessions = RemoveSession(baseState.ActiveSessions, WorkClaimStore.NormalizeWorktreeId(gitCommonDir, worktreeId)) };
+            return new WorktreePassResult
+            {
+                State = released,
+                Summary = $"Session for {activeSession.WorkIdentity} ended in a passive/terminal state; claim released."
+            };
+        }
+
+        var resumed = await LaunchSessionAsync(
+            dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, claimedWork, cancellationToken);
+        return new WorktreePassResult
+        {
+            State = resumed.State,
+            Summary = $"Resumed session for {resumed.Session.WorkIdentity} after unexpected session exit."
+        };
+    }
+
+    private static async Task<WorktreePassResult> EvaluateAndAcquireAsync(
+        DaemonExecutionDependencies dependencies,
+        string worktreeDirectory,
+        string gitCommonDir,
+        string worktreeId,
+        RouterConfiguration configuration,
+        string daemonSessionId,
+        DaemonExecutionState baseState,
+        CancellationToken cancellationToken)
+    {
+        var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, worktreeId);
+        var allClaims = await dependencies.ReadAllClaimsAsync(gitCommonDir);
+        var otherWorktreeClaims = allClaims
+            .Where(claim => !string.Equals(WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId), key, StringComparison.Ordinal))
+            .ToList();
+
+        var plan = await dependencies.EvaluatePlanAsync(configuration, worktreeDirectory, configuration.Policies.Daemon.Model, otherWorktreeClaims);
+        if (!plan.IsSuccessful)
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = plan.DiscoveryFailureMessage ?? "Routing evaluation failed.",
+                IsFailure = true
+            };
+        }
+
+        if (plan.Decision?.SelectedTask is null || !string.IsNullOrWhiteSpace(plan.BlockReason))
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = string.IsNullOrWhiteSpace(plan.BlockReason) ? "No actionable workflow tasks found." : plan.BlockReason
+            };
+        }
+
+        // Idempotent mechanical actions: close issues marked for closure before evaluating claims
+        // so newly-closed work never stalls routing.
+        foreach (var closingTask in plan.ActionableTasks.Where(task => task.Type == WorkflowItemType.CloseIssue && task.IssueNumber.HasValue))
+        {
+            try
+            {
+                await dependencies.CloseIssueAsync(worktreeDirectory, closingTask.IssueNumber!.Value);
+            }
+            catch
+            {
+                // Non-destructive: a failing close must not prevent the daemon from routing other work.
+            }
+        }
+
+        var selectedTask = plan.Decision.SelectedTask;
+        if (!HookTaskRouter.RequiresWorkClaim(selectedTask))
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = $"Actionable task ({selectedTask.Type}) does not require a claim; skipped for safety."
+            };
+        }
+
+        var acquisition = await dependencies.AcquireClaimAsync(new WorkClaimAcquisitionRequest
+        {
+            WorkingDirectory = worktreeDirectory,
+            GitCommonDirectory = gitCommonDir,
+            WorktreeId = worktreeId,
+            OwnerSessionId = daemonSessionId,
+            Configuration = configuration,
+            AssignmentIdentity = plan.AssignmentIdentity,
+            HasRepositoryGate = plan.HasRepositoryGate,
+            SelectedTask = selectedTask,
+            Model = configuration.Policies.Daemon.Model
+        });
+        if (!acquisition.Acquired || acquisition.Claim is null)
+        {
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = acquisition.BlockReason ?? "Could not acquire the work claim."
+            };
+        }
+
+        var claim = acquisition.Claim;
+        var refreshedWork = await dependencies.CheckClaimedWorkAsync(configuration, worktreeDirectory, claim, configuration.Policies.Daemon.Model);
         if (!refreshedWork.IsSuccessful)
         {
             _ = await dependencies.ReleaseClaimIfMatchesAsync(gitCommonDir, worktreeId, claim);
-            var refreshFailed = readState with
+            return new WorktreePassResult
             {
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = refreshedWork.Message ?? "Claimed-work refresh failed after acquiring the claim; re-acquisition allowed on the next cycle."
+                State = baseState,
+                Summary = refreshedWork.Message ?? "Claimed-work refresh failed after acquiring the claim; re-acquisition allowed on the next cycle."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, refreshFailed);
-            return new DaemonTickResult { Summary = refreshFailed.LastTickSummary };
         }
 
         if (IsReleaseCandidate(refreshedWork))
         {
             _ = await dependencies.ReleaseClaimIfMatchesAsync(gitCommonDir, worktreeId, claim);
-            var released = readState with
+            return new WorktreePassResult
             {
-                ConsecutiveFailures = 0,
-                Unhealthy = false,
-                LastTickAt = DateTimeOffset.UtcNow,
-                LastTickSummary = "Acquired work became passive or terminal during refresh and was released."
+                State = baseState,
+                Summary = "Acquired work became passive or terminal during refresh and was released."
             };
-            await dependencies.WriteStateAsync(gitCommonDir, released);
-            return new DaemonTickResult { Summary = released.LastTickSummary };
         }
 
-        var launched = await LaunchSessionAsync(dependencies, workingDirectory, gitCommonDir, configuration, daemonSessionId, claim, refreshedWork, cancellationToken);
-        return new DaemonTickResult { Summary = $"Launched session for {launched.ActiveSession!.WorkIdentity}." };
+        var launched = await LaunchSessionAsync(
+            dependencies, worktreeDirectory, gitCommonDir, baseState, configuration, daemonSessionId, claim, refreshedWork, cancellationToken);
+        return new WorktreePassResult
+        {
+            State = launched.State,
+            Summary = $"Launched session for {launched.Session.WorkIdentity}."
+        };
     }
 
-    private static async Task<DaemonExecutionState> LaunchSessionAsync(
+    private static async Task<(DaemonExecutionState State, ActiveDaemonSession Session)> LaunchSessionAsync(
         DaemonExecutionDependencies dependencies,
-        string workingDirectory,
+        string worktreeDirectory,
         string gitCommonDir,
+        DaemonExecutionState baseState,
         RouterConfiguration configuration,
         string daemonSessionId,
         WorkClaim claim,
@@ -421,7 +670,7 @@ public static class DaemonExecutionService
         var selectedTask = claimedWork.Tasks.FirstOrDefault();
         var prompt = selectedTask is not null ? ContextPromptService.GetPromptForTask(selectedTask) : string.Empty;
         var session = await dependencies.SessionHost.LaunchAsync(
-            workingDirectory,
+            worktreeDirectory,
             claim,
             workIdentity,
             selectedTask?.Type ?? WorkflowItemType.Unknown,
@@ -430,24 +679,25 @@ public static class DaemonExecutionService
             daemonSessionId,
             cancellationToken);
 
-        var state = new DaemonExecutionState
-        {
-            DaemonSessionId = daemonSessionId,
-            Pid = Environment.ProcessId,
-            StartedAt = DateTimeOffset.UtcNow,
-            ConsecutiveFailures = 0,
-            Unhealthy = false,
-            StopRequested = false,
-            ActiveSession = session,
-            LastTickAt = DateTimeOffset.UtcNow
-        };
-        await dependencies.WriteStateAsync(gitCommonDir, state);
-        return state;
+        var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId);
+        var sessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions) { [key] = session };
+        return (baseState with { ActiveSessions = sessions }, session);
     }
 
-    private static bool IsDaemonOwnedClaim(WorkClaim claim, string gitCommonDir, string worktreeId, string daemonSessionId) =>
-        string.Equals(WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId), WorkClaimStore.NormalizeWorktreeId(gitCommonDir, worktreeId), StringComparison.Ordinal) &&
+    private static bool IsDaemonOwnedClaim(WorkClaim claim, string daemonSessionId) =>
         string.Equals(claim.OwnerSessionId, daemonSessionId, StringComparison.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, ActiveDaemonSession> RemoveSession(IReadOnlyDictionary<string, ActiveDaemonSession> sessions, string key)
+    {
+        if (!sessions.ContainsKey(key))
+        {
+            return sessions;
+        }
+
+        var updated = new Dictionary<string, ActiveDaemonSession>(sessions);
+        updated.Remove(key);
+        return updated;
+    }
 
     private static bool IsReleaseCandidate(WorkflowResponse response) =>
         response.Tasks.Count == 1 && response.Tasks[0].Type is
@@ -461,4 +711,11 @@ public static class DaemonExecutionService
         claim.WorkType == WorkClaimType.Review
             ? $"review of pull request #{claim.PullRequestNumber} (reviewer '{claim.ReviewerLogin}')"
             : $"issue #{claim.IssueNumber}{(claim.PullRequestNumber.HasValue ? $" / pull request #{claim.PullRequestNumber.Value}" : string.Empty)}";
+
+    private sealed record WorktreePassResult
+    {
+        public DaemonExecutionState State { get; init; } = null!;
+        public string Summary { get; init; } = string.Empty;
+        public bool IsFailure { get; init; }
+    }
 }

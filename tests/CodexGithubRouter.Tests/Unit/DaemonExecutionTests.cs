@@ -1,4 +1,5 @@
 using CodexGithubRouter.Daemon;
+using CodexGithubRouter.GitHub;
 using CodexGithubRouter.Hooks;
 using CodexGithubRouter.Work;
 using CodexGithubRouter.Workflow;
@@ -27,8 +28,9 @@ public class DaemonExecutionTests
 
         var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
         Assert.NotNull(state);
-        Assert.NotNull(state!.ActiveSession);
-        Assert.Equal(context.SessionHost.Launches[0].Session.ClaimId, state.ActiveSession.ClaimId);
+        Assert.Single(state!.ActiveSessions);
+        Assert.Equal(context.SessionHost.Launches[0].Session.ClaimId, state.ActiveSessions.Values.Single().ClaimId);
+        Assert.Contains(WorkClaimStore.MainWorktreeIdentity, state.ActiveSessions.Keys);
 
         var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
         Assert.NotNull(claim);
@@ -99,6 +101,40 @@ public class DaemonExecutionTests
     }
 
     [Fact]
+    public async Task RunOnce_ResumesDaemonOwnedClaim_WithoutReacquiring_WhenSessionRecordIsMissing()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox);
+        context.ClaimedWork = new WorkflowResponse
+        {
+            Tasks = { new WorkflowItem { Type = WorkflowItemType.ResumeInProgressIssue, IssueNumber = 12 } }
+        };
+
+        // Crash between acquisition and record: the daemon owns the claim but has no session record.
+        await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, new DaemonExecutionState { DaemonSessionId = "owning-daemon" });
+        await WorkClaimStore.TryAcquireAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId, new WorkClaim
+        {
+            OwnerSessionId = "owning-daemon",
+            IssueNumber = 12,
+            WorkType = WorkClaimType.Implementation
+        });
+
+        var tick = await DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None);
+
+        Assert.False(tick.StopRequested);
+        Assert.StartsWith("Resumed session for issue #12", tick.Summary, StringComparison.Ordinal);
+        Assert.Single(context.SessionHost.Launches);
+        Assert.Equal(0, context.AcquireCalls);
+
+        var claims = await WorkClaimStore.ReadAllAsync(sandbox.GitCommonDirectory);
+        Assert.Single(claims);
+        Assert.Equal("owning-daemon", claims[0].OwnerSessionId);
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.Single(state!.ActiveSessions);
+        Assert.Equal("owning-daemon", state.DaemonSessionId);
+    }
+
+    [Fact]
     public async Task RunOnce_ReleasesClaim_WhenEndedSessionReachesPassiveOrTerminalState()
     {
         using var sandbox = new TestSandbox();
@@ -120,7 +156,7 @@ public class DaemonExecutionTests
 
         var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
         Assert.NotNull(state);
-        Assert.Null(state!.ActiveSession);
+        Assert.Empty(state!.ActiveSessions);
     }
 
     [Fact]
@@ -146,6 +182,83 @@ public class DaemonExecutionTests
         var claims = await WorkClaimStore.ReadAllAsync(sandbox.GitCommonDirectory);
         Assert.Single(claims);
         Assert.Equal("other-session", claims[0].OwnerSessionId);
+    }
+
+    [Fact]
+    public async Task RunOnce_DispatchesIndependentWork_AcrossLinkedWorktrees()
+    {
+        using var sandbox = new TestSandbox();
+        var linkedGitDirectory = sandbox.CreateLinkedWorktree("linked");
+        var linkedDirectory = Path.Combine(sandbox.Root, "linked");
+        Directory.CreateDirectory(linkedDirectory);
+
+        var context = new DaemonTestContext(sandbox);
+        context.WorktreeDirectories = new List<string> { sandbox.RepositoryDirectory, linkedDirectory };
+        context.WorktreeIdentityByDirectory[sandbox.RepositoryDirectory] = sandbox.MainWorktreeId;
+        context.WorktreeIdentityByDirectory[linkedDirectory] = linkedGitDirectory;
+        context.PlanResolver = directory =>
+            string.Equals(directory, sandbox.RepositoryDirectory, StringComparison.Ordinal)
+                ? SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 10 })
+                : SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 20 });
+
+        var tick = await DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None);
+
+        Assert.False(tick.StopRequested);
+        Assert.Equal(2, context.AcquireCalls);
+        Assert.Equal(2, context.SessionHost.Launches.Count);
+        Assert.Contains("issue #10", tick.Summary, StringComparison.Ordinal);
+        Assert.Contains("issue #20", tick.Summary, StringComparison.Ordinal);
+        Assert.Equal(
+            new[] { 10, 20 },
+            context.SessionHost.Launches.Select(launch => launch.Claim.IssueNumber!.Value).OrderBy(number => number).ToArray());
+        Assert.Equal(2, context.SessionHost.Launches.Select(launch => launch.Session.WorktreeDirectory).Distinct().Count());
+
+        var claims = await WorkClaimStore.ReadAllAsync(sandbox.GitCommonDirectory);
+        Assert.Equal(2, claims.Count);
+        Assert.Equal(2, claims.Select(claim => claim.WorktreeId).Distinct().Count());
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.Equal(2, state!.ActiveSessions.Count);
+        Assert.Equal(2, state.ActiveSessions.Values.Select(session => session.ClaimId).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task RunOnce_RecordsSharedAcquisitionMetadata_OnClaimAndSession()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox)
+        {
+            Configuration = new RouterConfiguration
+            {
+                Policies = new RouterPolicies
+                {
+                    Execution = new ExecutionPolicy { Mode = ExecutionMode.Daemon },
+                    Daemon = new DaemonPolicy { IntervalSeconds = 60, FailureThreshold = 5, Model = "codex" },
+                    WorkerRouting = new WorkerRoutingPolicy
+                    {
+                        DefaultWorker = "alice",
+                        Workers = new Dictionary<string, WorkerProfileConfiguration>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["alice"] = new WorkerProfileConfiguration { Labels = { "codex:worker:alice" }, Models = { "codex" } }
+                        }
+                    }
+                }
+            }
+        };
+        context.SandboxIssueLabels.Add(new GithubLabel { Name = "codex:worker:alice" });
+        context.Plan = SuccessfulPlan(new WorkflowItem { Type = WorkflowItemType.NewIssue, IssueNumber = 12 });
+
+        var tick = await DaemonExecutionService.RunOnceAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None);
+
+        Assert.False(tick.StopRequested);
+        var claim = await WorkClaimStore.ReadAsync(sandbox.GitCommonDirectory, sandbox.MainWorktreeId);
+        Assert.NotNull(claim);
+        Assert.NotEqual(default, claim!.ClaimedIssueUpdatedAt);
+        Assert.Equal(context.SandboxIssueUpdatedAt, claim.ClaimedIssueUpdatedAt);
+        Assert.Equal("alice", claim.WorkerProfile);
+        Assert.Equal("codex", claim.Model);
+        Assert.Equal("codex", context.SessionHost.Launches[0].Session.Model);
     }
 
     [Fact]
@@ -239,6 +352,71 @@ public class DaemonExecutionTests
         Assert.Single(context.SessionHost.Launches);
     }
 
+    [Fact]
+    public async Task ShutdownGracefully_StopsActiveSessions_AndRecordsCleanStop()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox);
+        await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, new DaemonExecutionState
+        {
+            DaemonSessionId = "shutdown-session",
+            ActiveSessions = new Dictionary<string, ActiveDaemonSession>
+            {
+                [WorkClaimStore.MainWorktreeIdentity] = new ActiveDaemonSession
+                {
+                    ClaimId = Guid.NewGuid(),
+                    WorkIdentity = "issue #12",
+                    StartedAt = DateTimeOffset.UtcNow
+                }
+            }
+        });
+
+        await DaemonExecutionService.ShutdownGracefullyAsync(sandbox.RepositoryDirectory, context.Dependencies, CancellationToken.None);
+
+        Assert.Single(context.SessionHost.Stops);
+        Assert.Equal("issue #12", context.SessionHost.Stops[0]);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+    }
+
+    [Fact]
+    public async Task RunAsync_BoundsUnexpectedTickFailures_InPersistedHealth()
+    {
+        using var sandbox = new TestSandbox();
+        var context = new DaemonTestContext(sandbox)
+        {
+            Configuration = new RouterConfiguration
+            {
+                Policies = new RouterPolicies
+                {
+                    Execution = new ExecutionPolicy { Mode = ExecutionMode.Daemon },
+                    Daemon = new DaemonPolicy { IntervalSeconds = 1, FailureThreshold = 2 }
+                }
+            },
+            ResolveWorktreesException = new InvalidOperationException("worktree discovery failed")
+        };
+
+        using var cancellation = new CancellationTokenSource();
+        context.AfterDelay = () =>
+        {
+            if (context.DelayCount >= 2)
+            {
+                cancellation.Cancel();
+            }
+        };
+
+        await DaemonExecutionService.RunAsync(sandbox.RepositoryDirectory, context.Dependencies, cancellation.Token);
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.Equal(2, state!.ConsecutiveFailures);
+        Assert.True(state.Unhealthy);
+        Assert.StartsWith("Unexpected tick failure: worktree discovery failed", state.LastTickSummary, StringComparison.Ordinal);
+    }
+
     private static RoutingEvaluationResult SuccessfulPlan(params WorkflowItem[] tasks)
     {
         var selected = tasks.FirstOrDefault(task => task.Type != WorkflowItemType.CloseIssue) ?? tasks[0];
@@ -265,16 +443,26 @@ public class DaemonExecutionTests
                     Daemon = new DaemonPolicy { IntervalSeconds = 60, FailureThreshold = 5 }
                 }
             };
+            WorktreeDirectories = new List<string> { sandbox.RepositoryDirectory };
+            WorktreeIdentityByDirectory = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [sandbox.RepositoryDirectory] = sandbox.MainWorktreeId
+            };
         }
 
         public RouterConfiguration Configuration { get; set; }
         public bool AutonomousEnabled { get; set; } = true;
+        public List<string> WorktreeDirectories { get; set; }
+        public Dictionary<string, string> WorktreeIdentityByDirectory { get; } = new(StringComparer.Ordinal);
+
         public RoutingEvaluationResult Plan { get; set; } = new()
         {
             IsSuccessful = true,
             Decision = new HookTaskDecision(),
             ActionableTasks = Array.Empty<WorkflowItem>()
         };
+
+        public Func<string, RoutingEvaluationResult>? PlanResolver { get; set; }
 
         public WorkflowResponse ClaimedWork { get; set; } = new()
         {
@@ -285,22 +473,35 @@ public class DaemonExecutionTests
         public int AcquireCalls { get; private set; }
         public List<int> ClosedIssueNumbers { get; } = new();
 
+        public DateTimeOffset SandboxIssueUpdatedAt { get; set; } = DateTimeOffset.UtcNow.AddMinutes(-10);
+        public List<GithubLabel> SandboxIssueLabels { get; } = new();
+
+        public Exception? ResolveWorktreesException { get; set; }
+        public int DelayCount { get; private set; }
+        public Action? AfterDelay { get; set; }
+
         public DaemonExecutionDependencies Dependencies => new()
         {
             LoadConfigurationAsync = _ => Task.FromResult(Configuration),
             ResolveGitCommonDirectoryAsync = _ => Task.FromResult<string?>(_sandbox.GitCommonDirectory),
-            ResolveWorktreeIdAsync = _ => Task.FromResult<string?>(_sandbox.MainWorktreeId),
+            ResolveWorktreeIdAsync = directory => Task.FromResult<string?>(
+                WorktreeIdentityByDirectory.TryGetValue(directory, out var identity) ? identity : null),
+            ResolveWorktreeDirectoriesAsync = _ =>
+                ResolveWorktreesException is not null
+                    ? Task.FromException<IReadOnlyList<string>>(ResolveWorktreesException)
+                    : Task.FromResult<IReadOnlyList<string>>(WorktreeDirectories),
             IsAutonomousAsync = _ => Task.FromResult(AutonomousEnabled),
-            TryAcquireClaimAsync = (gitCommonDir, worktreeId, claimed) =>
+            AcquireClaimAsync = request =>
             {
                 AcquireCalls++;
-                return WorkClaimStore.TryAcquireAsync(gitCommonDir, worktreeId, claimed);
+                return WorkClaimAcquisitionService.AcquireAsync(request, AcquisitionDependencies, CancellationToken.None);
             },
             ReadClaimAsync = (gitCommonDir, worktreeId) => WorkClaimStore.ReadAsync(gitCommonDir, worktreeId),
             ReleaseClaimIfMatchesAsync = (gitCommonDir, worktreeId, expected) => WorkClaimStore.ReleaseIfMatchesAsync(gitCommonDir, worktreeId, expected),
             ReadAllClaimsAsync = gitCommonDir => WorkClaimStore.ReadAllAsync(gitCommonDir),
             ReconcileAsync = (_, _, _, _) => Task.FromResult(true),
-            EvaluatePlanAsync = (_, _, _, _) => Task.FromResult(Plan),
+            EvaluatePlanAsync = (_, directory, _, _) =>
+                Task.FromResult(PlanResolver?.Invoke(directory) ?? Plan),
             CheckClaimedWorkAsync = (_, _, _, _) => Task.FromResult(ClaimedWork),
             CloseIssueAsync = (_, issueNumber) =>
             {
@@ -310,13 +511,31 @@ public class DaemonExecutionTests
             SessionHost = SessionHost,
             ReadStateAsync = gitCommonDir => DaemonStateStore.ReadAsync(gitCommonDir),
             WriteStateAsync = (gitCommonDir, state) => DaemonStateStore.WriteAsync(gitCommonDir, state),
-            DelayAsync = (_, _) => Task.CompletedTask
+            DelayAsync = (_, _) =>
+            {
+                DelayCount++;
+                AfterDelay?.Invoke();
+                return Task.CompletedTask;
+            }
+        };
+
+        public WorkClaimAcquisitionDependencies AcquisitionDependencies => new()
+        {
+            FetchIssueAsync = (_, number, _) => Task.FromResult(new Issue
+            {
+                Number = number,
+                UpdatedAt = SandboxIssueUpdatedAt,
+                Labels = SandboxIssueLabels
+            }),
+            TryAcquireClaimAsync = (gitCommonDir, worktreeId, requested, cancellationToken) =>
+                WorkClaimStore.TryAcquireAsync(gitCommonDir, worktreeId, requested, cancellationToken)
         };
     }
 
     private sealed class FakeSessionHost : ISessionHost
     {
         public List<(ActiveDaemonSession Session, WorkClaim Claim, string Prompt, string DaemonSessionId)> Launches { get; } = new();
+        public List<string> Stops { get; } = new();
         public bool Alive { get; set; } = true;
 
         public Task<ActiveDaemonSession> LaunchAsync(
@@ -335,8 +554,10 @@ public class DaemonExecutionTests
                 WorktreeId = claim.WorktreeId,
                 WorktreeDirectory = worktreeDirectory,
                 ProcessId = 4000 + Launches.Count,
+                ProcessStartTimeUtc = DateTimeOffset.UtcNow,
                 WorkIdentity = workIdentity,
                 WorkItemType = workItemType.ToString(),
+                Model = daemonPolicy.Model,
                 StartedAt = DateTimeOffset.UtcNow
             };
             Launches.Add((session, claim, prompt, daemonSessionId));
@@ -346,7 +567,10 @@ public class DaemonExecutionTests
         public Task<bool> IsAliveAsync(ActiveDaemonSession session, CancellationToken cancellationToken) =>
             Task.FromResult(Alive);
 
-        public Task StopAsync(ActiveDaemonSession session, CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+        public Task StopAsync(ActiveDaemonSession session, CancellationToken cancellationToken)
+        {
+            Stops.Add(session.WorkIdentity);
+            return Task.CompletedTask;
+        }
     }
 }

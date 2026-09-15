@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using CodexGithubRouter.Autonomous;
 using CodexGithubRouter.Configurations;
 using CodexGithubRouter.Git;
@@ -10,7 +9,15 @@ public static class DaemonCommandHandler
 {
     public static Task<int> HandleAsync(string[] args) => HandleAsync(args, null);
 
-    public static async Task<int> HandleAsync(string[] args, DaemonExecutionDependencies? dependencies)
+    public static Task<int> HandleAsync(string[] args, DaemonExecutionDependencies? dependencies)
+        => HandleAsync(args, dependencies, CancellationToken.None);
+
+    /// <summary>
+    /// Entry point with an externally supplied cancellation token. Production passes
+    /// <see cref="CancellationToken.None"/> and relies on Ctrl+C; automation (or a hosting
+    /// process) can inject a token to bound the poller loop deterministically.
+    /// </summary>
+    public static async Task<int> HandleAsync(string[] args, DaemonExecutionDependencies? dependencies, CancellationToken cancellationToken)
     {
         dependencies ??= new DaemonExecutionDependencies();
         if (args.Length == 0)
@@ -25,13 +32,19 @@ public static class DaemonCommandHandler
         {
             return command switch
             {
-                "start" => await StartAsync(workingDirectory, dependencies),
+                "start" => await StartAsync(workingDirectory, dependencies, cancellationToken),
                 "stop" => await StopAsync(workingDirectory, dependencies),
                 "status" => await StatusAsync(workingDirectory, dependencies),
-                "restart" => await RestartAsync(workingDirectory, dependencies),
+                "restart" => await RestartAsync(workingDirectory, dependencies, cancellationToken),
                 "run" => await RunAsync(workingDirectory, dependencies, args),
                 _ => Usage()
             };
+        }
+        catch (DaemonStateFileException exception)
+        {
+            Console.Error.WriteLine(exception.Message);
+            Console.Error.WriteLine("Run 'cgr daemon status' after repairing or deleting the state file to resume supervision.");
+            return 1;
         }
         catch (Exception exception)
         {
@@ -40,7 +53,7 @@ public static class DaemonCommandHandler
         }
     }
 
-    private static async Task<int> StartAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
+    private static async Task<int> StartAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken cancellationToken)
     {
         var enforce = await EnforceDaemonPreconditionsAsync(workingDirectory, dependencies);
         if (enforce != 0)
@@ -51,9 +64,10 @@ public static class DaemonCommandHandler
         var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory)
             ?? throw new InvalidOperationException("Not a valid Git repository.");
         var existing = await dependencies.ReadStateAsync(gitCommonDir);
-        if (IsProcessRunning(existing?.Pid) && existing?.Pid != Environment.ProcessId)
+        if (existing is { Pid: > 0 } && existing.Pid != Environment.ProcessId &&
+            await dependencies.IsProcessAliveAsync(existing.Pid, existing.PidStartTimeUtc))
         {
-            Console.Error.WriteLine($"Daemon is already running with pid {existing!.Pid}. Stop it first with 'cgr daemon stop'.");
+            Console.Error.WriteLine($"Daemon is already running with pid {existing.Pid}. Stop it first with 'cgr daemon stop'.");
             return 1;
         }
 
@@ -61,23 +75,16 @@ public static class DaemonCommandHandler
         {
             DaemonSessionId = existing?.DaemonSessionId ?? Guid.NewGuid().ToString("N"),
             Pid = Environment.ProcessId,
+            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
             StartedAt = DateTimeOffset.UtcNow,
             StopRequested = false,
             StoppedAt = null,
-            ActiveSession = existing?.ActiveSession
+            ActiveSessions = existing?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
         };
         await dependencies.WriteStateAsync(gitCommonDir, startState);
 
         Console.WriteLine($"Starting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
-        using var cancellationSource = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
-        {
-            eventArgs.Cancel = true;
-            cancellationSource.Cancel();
-        };
-
-        await DaemonExecutionService.RunAsync(workingDirectory, dependencies, cancellationSource.Token);
-        Console.WriteLine("Daemon stopped.");
+        await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
         return 0;
     }
 
@@ -100,10 +107,20 @@ public static class DaemonCommandHandler
         var stopped = state with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow };
         await dependencies.WriteStateAsync(gitCommonDir, stopped);
 
-        if (state.Pid > 0 && state.Pid != Environment.ProcessId && IsProcessRunning(state.Pid))
+        var pollerAlive = state.Pid > 0 &&
+            await dependencies.IsProcessAliveAsync(state.Pid, state.PidStartTimeUtc);
+        if (pollerAlive && state.Pid != Environment.ProcessId)
         {
-            TerminateProcess(state.Pid);
-            Console.WriteLine($"Stop requested; terminated daemon process {state.Pid}.");
+            await StopActiveSessionsAsync(state, dependencies);
+            await dependencies.TerminateProcessAsync(state.Pid, state.PidStartTimeUtc);
+            Console.WriteLine($"Stop requested; stopped daemon session(s) and terminated poller process {state.Pid}.");
+        }
+        else if (!pollerAlive && state.ActiveSessions.Count > 0)
+        {
+            // The poller is gone (crashed or its PID was reused) but orphaned sessions may remain;
+            // stop them so no Codex process keeps running outside a supervisor.
+            await StopActiveSessionsAsync(state, dependencies);
+            Console.WriteLine("Stop requested; the poller is not running, but orphaned Codex session(s) were stopped.");
         }
         else
         {
@@ -130,7 +147,7 @@ public static class DaemonCommandHandler
         }
 
         Console.WriteLine($"Daemon session: {state.DaemonSessionId}");
-        var pidRunning = state.Pid > 0 && IsProcessRunning(state.Pid);
+        var pidRunning = state.Pid > 0 && await dependencies.IsProcessAliveAsync(state.Pid, state.PidStartTimeUtc);
         Console.WriteLine($"Process: {(state.Pid == 0 ? "not recorded" : state.Pid.ToString())}{(pidRunning ? " (running)" : string.Empty)}");
         Console.WriteLine($"Started: {state.StartedAt:O}");
         if (state.StoppedAt is { } stopTime)
@@ -139,14 +156,15 @@ public static class DaemonCommandHandler
         }
 
         Console.WriteLine($"Stop requested: {(state.StopRequested ? "yes" : "no")}");
-        if (state.ActiveSession is { } session)
+        Console.WriteLine($"Active sessions: {state.ActiveSessions.Count}");
+        if (state.ActiveSessions.Count > 0)
         {
-            var sessionAlive = await dependencies.SessionHost.IsAliveAsync(session, CancellationToken.None);
-            Console.WriteLine($"Active session: {session.WorkIdentity} (pid {session.ProcessId?.ToString() ?? "n/a"}), started {session.StartedAt:O}, running {sessionAlive}");
-        }
-        else
-        {
-            Console.WriteLine("Active session: none");
+            foreach (var entry in state.ActiveSessions)
+            {
+                var session = entry.Value;
+                var sessionAlive = await dependencies.SessionHost.IsAliveAsync(session, CancellationToken.None);
+                Console.WriteLine($"  - [{entry.Key}] {session.WorkIdentity} (pid {session.ProcessId?.ToString() ?? "n/a"}), started {session.StartedAt:O}, running {sessionAlive}");
+            }
         }
 
         Console.WriteLine($"Consecutive failures: {state.ConsecutiveFailures}");
@@ -173,7 +191,7 @@ public static class DaemonCommandHandler
         return 0;
     }
 
-    private static async Task<int> RestartAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
+    private static async Task<int> RestartAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken cancellationToken)
     {
         var enforce = await EnforceDaemonPreconditionsAsync(workingDirectory, dependencies);
         if (enforce != 0)
@@ -184,9 +202,16 @@ public static class DaemonCommandHandler
         var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory)
             ?? throw new InvalidOperationException("Not a valid Git repository.");
         var state = await dependencies.ReadStateAsync(gitCommonDir);
-        if (state is { Pid: > 0 } && state.Pid != Environment.ProcessId && IsProcessRunning(state.Pid))
+
+        var pollerAlive = state is { Pid: > 0 } && state.Pid != Environment.ProcessId &&
+            await dependencies.IsProcessAliveAsync(state.Pid, state.PidStartTimeUtc);
+        if (pollerAlive)
         {
-            TerminateProcess(state.Pid);
+            // Graceful restart: request the stop, stop active sessions, then terminate the poller
+            // so the previous supervisor cannot race the new one. Claims are preserved and resumed.
+            await dependencies.WriteStateAsync(gitCommonDir, state! with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
+            await StopActiveSessionsAsync(state!, dependencies);
+            await dependencies.TerminateProcessAsync(state!.Pid, state.PidStartTimeUtc);
             Console.WriteLine($"Terminated previous daemon process {state.Pid}.");
         }
 
@@ -194,24 +219,44 @@ public static class DaemonCommandHandler
         {
             DaemonSessionId = state?.DaemonSessionId ?? Guid.NewGuid().ToString("N"),
             Pid = Environment.ProcessId,
+            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
             StartedAt = DateTimeOffset.UtcNow,
             StopRequested = false,
             StoppedAt = null,
-            ActiveSession = state?.ActiveSession
+            ActiveSessions = state?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
         };
         await dependencies.WriteStateAsync(gitCommonDir, startState);
 
         Console.WriteLine($"Restarting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
-        using var cancellationSource = new CancellationTokenSource();
-        Console.CancelKeyPress += (_, eventArgs) =>
+        await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
+        return 0;
+    }
+
+    private static async Task RunPollerAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken externalCancellation)
+    {
+        CancellationTokenSource? ctrlC = null;
+        try
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(externalCancellation);
+            ctrlC = linked;
+            Console.CancelKeyPress += OnCancelKeyPress;
+            await DaemonExecutionService.RunAsync(workingDirectory, dependencies, linked.Token);
+            await DaemonExecutionService.ShutdownGracefullyAsync(workingDirectory, dependencies, CancellationToken.None);
+            Console.WriteLine("Daemon stopped.");
+        }
+        finally
+        {
+            if (ctrlC is not null)
+            {
+                Console.CancelKeyPress -= OnCancelKeyPress;
+            }
+        }
+
+        void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs eventArgs)
         {
             eventArgs.Cancel = true;
-            cancellationSource.Cancel();
-        };
-
-        await DaemonExecutionService.RunAsync(workingDirectory, dependencies, cancellationSource.Token);
-        Console.WriteLine("Daemon stopped.");
-        return 0;
+            ctrlC?.Cancel();
+        }
     }
 
     private static async Task<int> RunAsync(string workingDirectory, DaemonExecutionDependencies dependencies, string[] args)
@@ -236,6 +281,21 @@ public static class DaemonCommandHandler
 
         Console.Error.WriteLine("Usage: cgr daemon run --once [working-directory]");
         return 1;
+    }
+
+    private static async Task StopActiveSessionsAsync(DaemonExecutionState state, DaemonExecutionDependencies dependencies)
+    {
+        foreach (var session in state.ActiveSessions.Values)
+        {
+            try
+            {
+                await dependencies.SessionHost.StopAsync(session, CancellationToken.None);
+            }
+            catch
+            {
+                // Best-effort: an already-exited or unknown session must not abort the shutdown.
+            }
+        }
     }
 
     private static async Task<int> EnforceDaemonPreconditionsAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
@@ -296,46 +356,6 @@ public static class DaemonCommandHandler
         return workingDirectory;
     }
 
-    private static bool IsProcessRunning(int? pid) =>
-        pid is > 0 && IsProcessRunning(pid.Value);
-
-    private static bool IsProcessRunning(int pid)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(pid);
-            return !process.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-    }
-
-    private static void TerminateProcess(int pid)
-    {
-        try
-        {
-            using var process = Process.GetProcessById(pid);
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (ArgumentException)
-        {
-            // The process no longer exists; the stop state is already recorded.
-        }
-        catch (InvalidOperationException)
-        {
-            // The process already exited while being inspected.
-        }
-    }
-
     private static int Usage()
     {
         Console.WriteLine(
@@ -349,9 +369,9 @@ public static class DaemonCommandHandler
 
             Commands:
               start     Run the daemon poller in the foreground until stop is requested.
-              stop      Request a clean daemon shutdown and terminate the running poller process.
+              stop      Gracefully stop active Codex sessions and request a clean daemon shutdown.
               status    Report daemon health, session and active work state.
-              restart   Stop any running poller then start again in the foreground.
+              restart   Gracefully stop any running poller and its sessions, then start again.
               run       Execute a single polling cycle (useful for cron or debugging).
             """);
         return 1;

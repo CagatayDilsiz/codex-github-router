@@ -10,7 +10,6 @@ namespace CodexGithubRouter.Daemon;
 public static class DaemonStateStore
 {
     public const string StateFileName = "codex-github-router.daemon.json";
-    public const string ActiveSessionClaimIdKey = "activeSession.claimId";
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -42,9 +41,13 @@ public static class DaemonStateStore
 
             return JsonSerializer.Deserialize<DaemonExecutionState>(content, Options);
         }
-        catch (JsonException)
+        catch (JsonException exception)
         {
-            return null;
+            // Fail closed like the work-claim store: a corrupt daemon state file is never treated
+            // as "no state", because that would let a fresh daemon silently claim work the previous
+            // owner is still supervising (or let an operator's stop signal be ignored). The caller
+            // surfaces recovery guidance instead of continuing.
+            throw new DaemonStateFileException(statePath, exception);
         }
     }
 

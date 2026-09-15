@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using CodexGithubRouter.Helpers;
 using CodexGithubRouter.Work;
@@ -9,7 +10,10 @@ namespace CodexGithubRouter.Daemon;
 /// Production session host that spawns the Codex CLI (<c>codex exec</c> by default) in the
 /// claim's working directory. The host starts the process without waiting for exit so the daemon
 /// supervisor can continue polling, and the resulting <see cref="ActiveDaemonSession"/> carries the
-/// PID for lightweight cross-restart health checks.
+/// PID and the process start time so a restart can verify process identity instead of trusting a
+/// possibly-recycled PID. The configured <see cref="DaemonPolicy.Model"/> is forwarded to the
+/// launched process (as <c>--model &lt;model&gt;</c>) so the session never runs with an inferred
+/// model different from the one routing and the claim recorded.
 /// </summary>
 public sealed class CodexSessionHost : ISessionHost
 {
@@ -24,6 +28,13 @@ public sealed class CodexSessionHost : ISessionHost
         CancellationToken cancellationToken)
     {
         var arguments = new List<string>(daemonPolicy.Args);
+        var model = daemonPolicy.Model?.Trim();
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            arguments.Add("--model");
+            arguments.Add(model);
+        }
+
         arguments.Add(prompt);
 
         var startInfo = new ProcessStartInfo
@@ -61,8 +72,10 @@ public sealed class CodexSessionHost : ISessionHost
             WorktreeId = claim.WorktreeId,
             WorktreeDirectory = worktreeDirectory,
             ProcessId = process.Id,
+            ProcessStartTimeUtc = new DateTimeOffset(process.StartTime.ToUniversalTime()),
             WorkIdentity = workIdentity,
             WorkItemType = workItemType.ToString(),
+            Model = model,
             StartedAt = DateTimeOffset.UtcNow
         };
     }
@@ -74,20 +87,7 @@ public sealed class CodexSessionHost : ISessionHost
             return Task.FromResult(false);
         }
 
-        try
-        {
-            using var process = Process.GetProcessById(session.ProcessId.Value);
-            return Task.FromResult(!process.HasExited);
-        }
-        catch (InvalidOperationException)
-        {
-            // The process has exited or the id does not exist on this host.
-            return Task.FromResult(false);
-        }
-        catch (ArgumentException)
-        {
-            return Task.FromResult(false);
-        }
+        return Task.FromResult(ProcessIdentity.IsAlive(session.ProcessId.Value, session.ProcessStartTimeUtc));
     }
 
     public Task StopAsync(ActiveDaemonSession session, CancellationToken cancellationToken)
@@ -100,10 +100,20 @@ public sealed class CodexSessionHost : ISessionHost
         try
         {
             using var process = Process.GetProcessById(session.ProcessId.Value);
-            if (!process.HasExited)
+            if (process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                return Task.CompletedTask;
             }
+
+            if (session.ProcessStartTimeUtc is { } expected &&
+                (new DateTimeOffset(process.StartTime.ToUniversalTime()) - expected).Duration() > TimeSpan.FromSeconds(5))
+            {
+                // The PID was recycled by an unrelated process since this session was launched;
+                // never kill a process we did not start.
+                return Task.CompletedTask;
+            }
+
+            process.Kill(entireProcessTree: true);
         }
         catch (InvalidOperationException)
         {
@@ -112,6 +122,10 @@ public sealed class CodexSessionHost : ISessionHost
         catch (ArgumentException)
         {
             // Process does not exist.
+        }
+        catch (Win32Exception)
+        {
+            // The process exited while its identity was being verified.
         }
 
         return Task.CompletedTask;
