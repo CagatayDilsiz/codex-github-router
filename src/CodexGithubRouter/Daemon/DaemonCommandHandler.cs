@@ -71,21 +71,38 @@ public static class DaemonCommandHandler
             return 1;
         }
 
-        var startState = new DaemonExecutionState
-        {
-            DaemonSessionId = existing?.DaemonSessionId ?? Guid.NewGuid().ToString("N"),
-            Pid = Environment.ProcessId,
-            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
-            StartedAt = DateTimeOffset.UtcNow,
-            StopRequested = false,
-            StoppedAt = null,
-            ActiveSessions = existing?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
-        };
-        await dependencies.WriteStateAsync(gitCommonDir, startState);
+        var daemonSessionId = existing?.DaemonSessionId ?? Guid.NewGuid().ToString("N");
 
-        Console.WriteLine($"Starting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
-        await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
-        return 0;
+        // Exclusive repository supervisor lease: a concurrent start (or a live daemon that raced
+        // this PID check / state write) must not also become the supervisor.
+        if (!await TryAcquireSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies))
+        {
+            Console.Error.WriteLine("Another daemon supervisor already owns this repository, or a single-cycle run is in progress. Stop it first with 'cgr daemon stop'.");
+            return 1;
+        }
+
+        try
+        {
+            var startState = new DaemonExecutionState
+            {
+                DaemonSessionId = daemonSessionId,
+                Pid = Environment.ProcessId,
+                PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+                StartedAt = DateTimeOffset.UtcNow,
+                StopRequested = false,
+                StoppedAt = null,
+                ActiveSessions = existing?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
+            };
+            await dependencies.WriteStateAsync(gitCommonDir, startState);
+
+            Console.WriteLine($"Starting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
+            await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
+            return 0;
+        }
+        finally
+        {
+            await ReleaseSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies);
+        }
     }
 
     private static async Task<int> StopAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
@@ -126,6 +143,11 @@ public static class DaemonCommandHandler
         {
             Console.WriteLine("Stop requested; the daemon will exit on its next polling cycle.");
         }
+
+        // The supervisor is (requested to be) gone, so the repository lease is free for a later
+        // start or single-cycle run; releasing with the recorded owner identity never deletes a
+        // lease a different supervisor has since taken.
+        await dependencies.ReleaseSupervisorLeaseAsync(gitCommonDir, state.DaemonSessionId, state.Pid);
 
         return 0;
     }
@@ -212,24 +234,41 @@ public static class DaemonCommandHandler
             await dependencies.WriteStateAsync(gitCommonDir, state! with { StopRequested = true, StoppedAt = DateTimeOffset.UtcNow });
             await StopActiveSessionsAsync(state!, dependencies);
             await dependencies.TerminateProcessAsync(state!.Pid, state.PidStartTimeUtc);
+            await dependencies.ReleaseSupervisorLeaseAsync(gitCommonDir, state.DaemonSessionId, state.Pid);
             Console.WriteLine($"Terminated previous daemon process {state.Pid}.");
         }
 
-        var startState = new DaemonExecutionState
-        {
-            DaemonSessionId = state?.DaemonSessionId ?? Guid.NewGuid().ToString("N"),
-            Pid = Environment.ProcessId,
-            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
-            StartedAt = DateTimeOffset.UtcNow,
-            StopRequested = false,
-            StoppedAt = null,
-            ActiveSessions = state?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
-        };
-        await dependencies.WriteStateAsync(gitCommonDir, startState);
+        var daemonSessionId = state?.DaemonSessionId ?? Guid.NewGuid().ToString("N");
 
-        Console.WriteLine($"Restarting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
-        await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
-        return 0;
+        // The previous supervisor's lease is gone (or stale), so the successor may take ownership.
+        if (!await TryAcquireSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies))
+        {
+            Console.Error.WriteLine("Another daemon supervisor owns this repository; cannot restart it.");
+            return 1;
+        }
+
+        try
+        {
+            var startState = new DaemonExecutionState
+            {
+                DaemonSessionId = daemonSessionId,
+                Pid = Environment.ProcessId,
+                PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+                StartedAt = DateTimeOffset.UtcNow,
+                StopRequested = false,
+                StoppedAt = null,
+                ActiveSessions = state?.ActiveSessions ?? new Dictionary<string, ActiveDaemonSession>()
+            };
+            await dependencies.WriteStateAsync(gitCommonDir, startState);
+
+            Console.WriteLine($"Restarting daemon poller (session {startState.DaemonSessionId}, pid {Environment.ProcessId}). Press Ctrl+C to stop.");
+            await RunPollerAsync(workingDirectory, dependencies, cancellationToken);
+            return 0;
+        }
+        finally
+        {
+            await ReleaseSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies);
+        }
     }
 
     private static async Task RunPollerAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken externalCancellation)
@@ -269,14 +308,35 @@ public static class DaemonCommandHandler
 
         if (Array.Exists(args, argument => string.Equals(argument, "--once", StringComparison.OrdinalIgnoreCase)))
         {
-            var tick = await DaemonExecutionService.RunOnceAsync(workingDirectory, dependencies, CancellationToken.None);
-            Console.WriteLine(tick.Summary);
-            if (tick.Unhealthy)
+            var gitCommonDir = await dependencies.ResolveGitCommonDirectoryAsync(workingDirectory)
+                ?? throw new InvalidOperationException("Not a valid Git repository.");
+            var current = await dependencies.ReadStateAsync(gitCommonDir);
+            var daemonSessionId = current?.DaemonSessionId ?? Guid.NewGuid().ToString("N");
+
+            // Refuse a single-cycle run while a live daemon supervisor holds the repository: the
+            // lease serializes supervisors so a --once run and the daemon can never evaluate/launch
+            // the same claim concurrently or overwrite each other's state.
+            if (!await TryAcquireSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies))
             {
-                Console.WriteLine($"Warning: daemon marked unhealthy after {tick.ConsecutiveFailures} consecutive failure(s).");
+                Console.Error.WriteLine("A daemon supervisor is already running for this repository; refusing a concurrent single-cycle run.");
+                return 1;
             }
 
-            return 0;
+            try
+            {
+                var tick = await DaemonExecutionService.RunOnceAsync(workingDirectory, dependencies, CancellationToken.None);
+                Console.WriteLine(tick.Summary);
+                if (tick.Unhealthy)
+                {
+                    Console.WriteLine($"Warning: daemon marked unhealthy after {tick.ConsecutiveFailures} consecutive failure(s).");
+                }
+
+                return 0;
+            }
+            finally
+            {
+                await ReleaseSupervisorLeaseAsync(gitCommonDir, daemonSessionId, dependencies);
+            }
         }
 
         Console.Error.WriteLine("Usage: cgr daemon run --once [working-directory]");
@@ -297,6 +357,22 @@ public static class DaemonCommandHandler
             }
         }
     }
+
+    private static async Task<bool> TryAcquireSupervisorLeaseAsync(string gitCommonDir, string daemonSessionId, DaemonExecutionDependencies dependencies)
+    {
+        var lease = new DaemonSupervisorLease
+        {
+            DaemonSessionId = daemonSessionId,
+            Pid = Environment.ProcessId,
+            PidStartTimeUtc = ProcessIdentity.GetCurrentProcessStartTimeUtc(),
+            AcquiredAtUtc = DateTimeOffset.UtcNow
+        };
+        return await DaemonSupervisorLeaseStore.TryAcquireAsync(
+            gitCommonDir, lease, (pid, startTimeUtc) => dependencies.IsProcessAliveAsync(pid, startTimeUtc));
+    }
+
+    private static Task<bool> ReleaseSupervisorLeaseAsync(string gitCommonDir, string daemonSessionId, DaemonExecutionDependencies dependencies)
+        => DaemonSupervisorLeaseStore.ReleaseAsync(gitCommonDir, daemonSessionId, Environment.ProcessId);
 
     private static async Task<int> EnforceDaemonPreconditionsAsync(string workingDirectory, DaemonExecutionDependencies dependencies)
     {

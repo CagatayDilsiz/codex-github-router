@@ -83,6 +83,47 @@ public class DaemonStateStoreTests
     }
 
     [Fact]
+    public async Task ReadAsync_FailsClosed_WhenStateFileExistsButIsEmpty()
+    {
+        using var sandbox = new TestSandbox();
+        var statePath = DaemonStateStore.GetStatePath(sandbox.GitCommonDirectory);
+        Directory.CreateDirectory(sandbox.GitCommonDirectory);
+        await File.WriteAllTextAsync(statePath, string.Empty);
+
+        var exception = await Assert.ThrowsAsync<DaemonStateFileException>(
+            () => DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory));
+
+        Assert.Equal(statePath, exception.StatePath);
+    }
+
+    [Fact]
+    public async Task ReadAsync_FailsClosed_WhenStateFileIsWhitespace()
+    {
+        using var sandbox = new TestSandbox();
+        var statePath = DaemonStateStore.GetStatePath(sandbox.GitCommonDirectory);
+        Directory.CreateDirectory(sandbox.GitCommonDirectory);
+        await File.WriteAllTextAsync(statePath, " \r\n\t ");
+
+        await Assert.ThrowsAsync<DaemonStateFileException>(
+            () => DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory));
+    }
+
+    [Fact]
+    public async Task ReadAsync_FailsClosed_WhenStateFileIsJsonNull()
+    {
+        using var sandbox = new TestSandbox();
+        var statePath = DaemonStateStore.GetStatePath(sandbox.GitCommonDirectory);
+        Directory.CreateDirectory(sandbox.GitCommonDirectory);
+        await File.WriteAllTextAsync(statePath, "null");
+
+        var exception = await Assert.ThrowsAsync<DaemonStateFileException>(
+            () => DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory));
+
+        Assert.Equal(statePath, exception.StatePath);
+        Assert.IsType<InvalidOperationException>(exception.InnerException);
+    }
+
+    [Fact]
     public async Task DeleteAsync_RemovesTheStateFile()
     {
         using var sandbox = new TestSandbox();

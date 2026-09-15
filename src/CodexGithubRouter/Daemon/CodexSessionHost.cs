@@ -66,13 +66,23 @@ public sealed class CodexSessionHost : ISessionHost
         _ = process.StandardOutput.ReadToEndAsync(cancellationToken);
         _ = process.StandardError.ReadToEndAsync(cancellationToken);
 
+        DateTimeOffset processStartTimeUtc;
+        try
+        {
+            processStartTimeUtc = new DateTimeOffset(process.StartTime.ToUniversalTime());
+        }
+        catch (Win32Exception)
+        {
+            processStartTimeUtc = DateTimeOffset.UtcNow;
+        }
+
         return new ActiveDaemonSession
         {
             ClaimId = claim.ClaimId,
             WorktreeId = claim.WorktreeId,
             WorktreeDirectory = worktreeDirectory,
             ProcessId = process.Id,
-            ProcessStartTimeUtc = new DateTimeOffset(process.StartTime.ToUniversalTime()),
+            ProcessStartTimeUtc = processStartTimeUtc,
             WorkIdentity = workIdentity,
             WorkItemType = workItemType.ToString(),
             Model = model,

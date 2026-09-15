@@ -36,10 +36,20 @@ public static class DaemonStateStore
             var content = await File.ReadAllTextAsync(statePath, cancellationToken);
             if (string.IsNullOrWhiteSpace(content))
             {
-                return null;
+                // Once a state file exists, empty/whitespace is invalid state: treating it as "no
+                // state" would silently mint a fresh supervisor identity while the previous owner's
+                // claims/processes may still exist.
+                throw new DaemonStateFileException(statePath, new InvalidOperationException("The daemon state file exists but is empty."));
             }
 
-            return JsonSerializer.Deserialize<DaemonExecutionState>(content, Options);
+            var state = JsonSerializer.Deserialize<DaemonExecutionState>(content, Options);
+            if (state is null)
+            {
+                // A literal JSON 'null' is just as invalid as malformed JSON once the file exists.
+                throw new DaemonStateFileException(statePath, new InvalidOperationException("The daemon state file contains a null state."));
+            }
+
+            return state;
         }
         catch (JsonException exception)
         {

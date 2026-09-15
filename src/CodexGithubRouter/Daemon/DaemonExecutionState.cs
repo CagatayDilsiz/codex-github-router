@@ -53,13 +53,29 @@ public sealed record DaemonExecutionState
 }
 
 /// <summary>
+/// The persistence phase of a Codex execution session. The daemon writes a <see cref="Launching"/>
+/// marker <em>before</em> spawning the process and a <see cref="Running"/> record (with process
+/// identity) <em>after</em> the spawn succeeds, so a crash between the spawn and the durable record
+/// is distinguishable from a crash that never launched anything: a <see cref="Launching"/> marker
+/// is ambiguous and must fail closed instead of relaunching (which could duplicate work).
+/// </summary>
+public enum SessionLaunchState
+{
+    /// <summary>Default / persisted form for healthy session records and for state files written before this marker existed.</summary>
+    Running = 0,
+
+    /// <summary>Launch intent persisted but the session's process identity was never durably recorded; ambiguous.</summary>
+    Launching = 1
+}
+
+/// <summary>
 /// A Codex execution session the daemon launched for a claim it owns in a specific worktree.
 /// Persisted so a restart can tell whether the session is still running (continue supervising),
 /// finished cleanly (finalize the claim) or died unexpectedly (resume the claimed work without
 /// re-acquiring it). The recorded start time lets the daemon verify process identity instead of
 /// trusting a recycled PID.
 /// </summary>
-public sealed class ActiveDaemonSession
+public sealed record ActiveDaemonSession
 {
     public Guid ClaimId { get; init; }
 
@@ -85,4 +101,11 @@ public sealed class ActiveDaemonSession
     public string? Model { get; init; }
 
     public DateTimeOffset StartedAt { get; init; }
+
+    /// <summary>
+    /// Persistence phase of the session lifecycle. A <see cref="SessionLaunchState.Launching"/>
+    /// record (no verified process identity) means the daemon exited between intending to start the
+    /// process and durably recording it; the supervisor must fail closed rather than re-launch.
+    /// </summary>
+    public SessionLaunchState LaunchState { get; init; } = SessionLaunchState.Running;
 }

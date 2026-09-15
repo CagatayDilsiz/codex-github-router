@@ -136,6 +136,86 @@ public class DaemonCommandHandlerTests
         Assert.True(state.StoppedAt.HasValue);
     }
 
+    [Fact]
+    public async Task Start_Refuses_WhenSupervisorLease_IsHeldByAnotherLiveDaemon()
+    {
+        using var sandbox = new TestSandbox();
+        await SeedLeaseAsync(sandbox, 98765, "other-session");
+
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            new FakeSessionHost(),
+            isProcessAliveAsync: (_, _) => Task.FromResult(true));
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["start", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(1, exitCode);
+        Assert.Null(await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory));
+    }
+
+    [Fact]
+    public async Task RunOnceCommand_Refuses_WhenSupervisorLease_IsHeldByALiveDaemon()
+    {
+        using var sandbox = new TestSandbox();
+        await SeedLeaseAsync(sandbox, 98765, "other-session");
+
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            new FakeSessionHost(),
+            isProcessAliveAsync: (_, _) => Task.FromResult(true));
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["run", "--once", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(1, exitCode);
+        Assert.Null(await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory));
+    }
+
+    [Fact]
+    public async Task Stop_ReleasesTheSupervisorLease()
+    {
+        using var sandbox = new TestSandbox();
+        var pollerPid = PickUnusedPid();
+        await SeedStateAsync(sandbox, pollerPid, sessionWorkIdentity: null);
+        await SeedLeaseAsync(sandbox, pollerPid, "stable-daemon-session");
+
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            new FakeSessionHost(),
+            isProcessAliveAsync: (_, _) => Task.FromResult(true));
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["stop", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(0, exitCode);
+        Assert.False(File.Exists(DaemonSupervisorLeaseStore.GetLeasePath(sandbox.GitCommonDirectory)));
+    }
+
+    [Fact]
+    public async Task Stop_DuringPendingLaunch_RequestsStop_AndReleasesLease()
+    {
+        using var sandbox = new TestSandbox();
+        var pollerPid = PickUnusedPid();
+        await SeedStateAsync(sandbox, pollerPid, sessionWorkIdentity: "issue #12", launchState: SessionLaunchState.Launching);
+        await SeedLeaseAsync(sandbox, pollerPid, "stable-daemon-session");
+
+        var handlerDependencies = HandlerDependencies(
+            sandbox,
+            new FakeSessionHost(),
+            isProcessAliveAsync: (_, _) => Task.FromResult(true));
+
+        var exitCode = await DaemonCommandHandler.HandleAsync(["stop", sandbox.RepositoryDirectory], handlerDependencies);
+
+        Assert.Equal(0, exitCode);
+        Assert.False(File.Exists(DaemonSupervisorLeaseStore.GetLeasePath(sandbox.GitCommonDirectory)));
+
+        var state = await DaemonStateStore.ReadAsync(sandbox.GitCommonDirectory);
+        Assert.NotNull(state);
+        Assert.True(state!.StopRequested);
+        Assert.True(state.StoppedAt.HasValue);
+        // The interrupted-launch marker is preserved so a later start fails closed on it.
+        Assert.Single(state.ActiveSessions);
+        Assert.Equal(SessionLaunchState.Launching, state.ActiveSessions.Values.Single().LaunchState);
+    }
+
     private static DaemonExecutionDependencies HandlerDependencies(
         TestSandbox sandbox,
         FakeSessionHost sessionHost,
@@ -176,7 +256,8 @@ public class DaemonCommandHandlerTests
             DelayAsync = delayAsync ?? ((_, _) => Task.CompletedTask)
         };
 
-    private static async Task SeedStateAsync(TestSandbox sandbox, int pollerPid, string? sessionWorkIdentity)
+    private static async Task SeedStateAsync(TestSandbox sandbox, int pollerPid, string? sessionWorkIdentity,
+        SessionLaunchState launchState = SessionLaunchState.Running)
     {
         var activeSessions = sessionWorkIdentity is null
             ? new Dictionary<string, ActiveDaemonSession>()
@@ -186,7 +267,8 @@ public class DaemonCommandHandlerTests
                 {
                     ClaimId = Guid.NewGuid(),
                     WorkIdentity = sessionWorkIdentity,
-                    StartedAt = DateTimeOffset.UtcNow
+                    StartedAt = DateTimeOffset.UtcNow,
+                    LaunchState = launchState
                 }
             };
         await DaemonStateStore.WriteAsync(sandbox.GitCommonDirectory, new DaemonExecutionState
@@ -197,6 +279,20 @@ public class DaemonCommandHandlerTests
             StartedAt = DateTimeOffset.UtcNow.AddMinutes(-30),
             ActiveSessions = activeSessions
         });
+    }
+
+    private static async Task SeedLeaseAsync(TestSandbox sandbox, int pid, string sessionId)
+    {
+        await DaemonSupervisorLeaseStore.TryAcquireAsync(
+            sandbox.GitCommonDirectory,
+            new DaemonSupervisorLease
+            {
+                DaemonSessionId = sessionId,
+                Pid = pid,
+                PidStartTimeUtc = DateTimeOffset.UtcNow.AddMinutes(-30),
+                AcquiredAtUtc = DateTimeOffset.UtcNow.AddMinutes(-30)
+            },
+            (_, _) => Task.FromResult(true));
     }
 
     private static int PickUnusedPid()

@@ -80,6 +80,11 @@ public sealed class DaemonExecutionDependencies
     public Func<int, DateTimeOffset?, Task<bool>> IsProcessAliveAsync { get; init; }
         = (pid, startTimeUtc) => Task.FromResult(ProcessIdentity.IsAlive(pid, startTimeUtc));
 
+    /// <summary>Releases the repository supervisor lease held by the given session/process identity.</summary>
+    public Func<string, string, int, Task<bool>> ReleaseSupervisorLeaseAsync { get; init; }
+        = (gitCommonDir, daemonSessionId, ownerPid) =>
+            DaemonSupervisorLeaseStore.ReleaseAsync(gitCommonDir, daemonSessionId, ownerPid);
+
     /// <summary>Identity-verified termination of a daemon supervisor process (never a kill-tree).</summary>
     public Func<int, DateTimeOffset?, Task> TerminateProcessAsync { get; init; }
         = (pid, startTimeUtc) =>
@@ -189,13 +194,47 @@ public static class DaemonExecutionService
             return new DaemonTickResult { Summary = noWorktrees.LastTickSummary };
         }
 
+        // Resolve each worktree's OWN effective configuration (the checked-out working tree is the
+        // source of the repository override) and validate repository-consistent daemon ownership
+        // before supervising any of them. A linked worktree that resolves to hook execution is the
+        // hook's territory: routing it from this repository daemon would race that worktree's hook,
+        // which is exactly the ownership conflict #54 exists to prevent. Fail closed instead.
+        var entries = new List<(string Directory, RouterConfiguration Configuration)>();
+        foreach (var worktreeDirectory in worktreeDirectories)
+        {
+            RouterConfiguration worktreeConfiguration;
+            try
+            {
+                worktreeConfiguration = await dependencies.LoadConfigurationAsync(worktreeDirectory);
+            }
+            catch (Exception exception)
+            {
+                return new DaemonTickResult
+                {
+                    Summary = $"Could not resolve effective configuration for worktree '{worktreeDirectory}' ({exception.Message}); refusing to supervise until ownership is clear."
+                };
+            }
+
+            if (!ExecutionModeService.IsDaemonOwned(worktreeConfiguration))
+            {
+                return new DaemonTickResult
+                {
+                    Summary = $"Stop requested: worktree '{worktreeDirectory}' resolves to hook execution while this daemon handles '{workingDirectory}'. " +
+                        "Refusing to route work that the hook owns; make execution ownership repository-consistent.",
+                    StopRequested = true
+                };
+            }
+
+            entries.Add((worktreeDirectory, worktreeConfiguration));
+        }
+
         var currentState = readState;
         var summaries = new List<string>();
         var failuresThisTick = 0;
-        foreach (var worktreeDirectory in worktreeDirectories)
+        foreach (var (worktreeDirectory, worktreeConfiguration) in entries)
         {
             var pass = await RunWorktreePassAsync(
-                dependencies, worktreeDirectory, gitCommonDir, configuration, daemonSessionId, currentState, cancellationToken);
+                dependencies, worktreeDirectory, gitCommonDir, worktreeConfiguration, daemonSessionId, currentState, cancellationToken);
             currentState = pass.State;
             failuresThisTick += pass.IsFailure ? 1 : 0;
             if (!string.IsNullOrWhiteSpace(pass.Summary))
@@ -224,34 +263,38 @@ public static class DaemonExecutionService
 
     public static async Task RunAsync(string workingDirectory, DaemonExecutionDependencies dependencies, CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        var shouldShutdown = false;
+        while (!shouldShutdown && !cancellationToken.IsCancellationRequested)
         {
             try
             {
                 var tick = await RunOnceAsync(workingDirectory, dependencies, cancellationToken);
-                if (tick.StopRequested || cancellationToken.IsCancellationRequested)
+                if (tick.StopRequested)
                 {
-                    await ShutdownGracefullyAsync(workingDirectory, dependencies, cancellationToken);
-                    break;
+                    shouldShutdown = true;
+                    continue;
                 }
 
                 await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await ShutdownGracefullyAsync(workingDirectory, dependencies, CancellationToken.None);
-                break;
+                shouldShutdown = true;
             }
             catch (Exception exception)
             {
                 // Bounded exception-path polling: an unexpected tick failure is surfaced in
                 // persisted health (so status never hides it) and the poller always obeys the
-                // configured cadence/backoff before retrying instead of hot-looping.
+                // configured cadence/backoff before retrying instead of hot-looping. The retry
+                // delay uses an independent token so cancellation during it cannot escape this
+                // catch block; the loop then exits and falls through to the graceful shutdown below.
                 Console.Error.WriteLine($"Daemon tick failed: {exception.Message}");
                 await PublishTickFailureAsync(workingDirectory, dependencies, exception);
-                await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, cancellationToken);
+                await dependencies.DelayAsync(await ResolveIntervalAsync(workingDirectory, dependencies) * 1000, CancellationToken.None);
             }
         }
+
+        await ShutdownGracefullyAsync(workingDirectory, dependencies, CancellationToken.None);
     }
 
     /// <summary>
@@ -356,6 +399,11 @@ public static class DaemonExecutionService
         }
     }
 
+    /// <summary>
+    /// <paramref name="configuration"/> is the worktree's OWN effective configuration, resolved
+    /// per worktree so a linked worktree's repository override (which may legitimately differ from
+    /// the daemon's starting worktree) governs its routing, acquisition and session launch.
+    /// </summary>
     private static async Task<WorktreePassResult> RunWorktreePassAsync(
         DaemonExecutionDependencies dependencies,
         string worktreeDirectory,
@@ -387,6 +435,20 @@ public static class DaemonExecutionService
         var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, worktreeId);
         var claim = await dependencies.ReadClaimAsync(gitCommonDir, worktreeId);
         var session = baseState.ActiveSessions.TryGetValue(key, out var existing) ? existing : null;
+
+        if (claim is not null && IsDaemonOwnedClaim(claim, daemonSessionId) &&
+            session is { LaunchState: SessionLaunchState.Launching })
+        {
+            // The daemon exited between intending to launch the process and durably recording its
+            // identity, so the spawn may or may not have happened. Relaunching could duplicate the
+            // claimed work, so fail closed: never auto-resume an ambiguous launch. The operator
+            // repairs the state (or releases the claim) and the work resumes on a later cycle.
+            return new WorktreePassResult
+            {
+                State = baseState,
+                Summary = $"Session for {FormatWorkIdentity(claim)} is in an interrupted-launch state and was not resumed automatically to avoid duplicating the work. Repair the daemon state to continue."
+            };
+        }
 
         if (claim is not null && IsDaemonOwnedClaim(claim, daemonSessionId))
         {
@@ -669,6 +731,29 @@ public static class DaemonExecutionService
         var workIdentity = FormatWorkIdentity(claim);
         var selectedTask = claimedWork.Tasks.FirstOrDefault();
         var prompt = selectedTask is not null ? ContextPromptService.GetPromptForTask(selectedTask) : string.Empty;
+        var model = configuration.Policies.Daemon.Model;
+        var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId);
+
+        // Phase 1: persist the launch INTENT before the process exists. A crash after acquisition
+        // but before the spawn leaves a plain daemon-owned claim (safe to resume on restart), while
+        // a crash between the spawn and the durable running record below leaves this ambiguous
+        // Launching marker, so a restart can never launch a duplicate process for the same claim.
+        var launchingSessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions)
+        {
+            [key] = new ActiveDaemonSession
+            {
+                ClaimId = claim.ClaimId,
+                WorktreeId = claim.WorktreeId,
+                WorktreeDirectory = worktreeDirectory,
+                WorkIdentity = workIdentity,
+                WorkItemType = (selectedTask?.Type ?? WorkflowItemType.Unknown).ToString(),
+                Model = model,
+                StartedAt = DateTimeOffset.UtcNow,
+                LaunchState = SessionLaunchState.Launching
+            }
+        };
+        await dependencies.WriteStateAsync(gitCommonDir, baseState with { ActiveSessions = launchingSessions });
+
         var session = await dependencies.SessionHost.LaunchAsync(
             worktreeDirectory,
             claim,
@@ -679,9 +764,16 @@ public static class DaemonExecutionService
             daemonSessionId,
             cancellationToken);
 
-        var key = WorkClaimStore.NormalizeWorktreeId(gitCommonDir, claim.WorktreeId);
-        var sessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions) { [key] = session };
-        return (baseState with { ActiveSessions = sessions }, session);
+        // Phase 2: persist the durable running record (PID + start time) once the spawn succeeded,
+        // closing the crash window in which a claim is daemon-owned but no session existed on disk.
+        var runningSessions = new Dictionary<string, ActiveDaemonSession>(baseState.ActiveSessions)
+        {
+            [key] = session with { LaunchState = SessionLaunchState.Running }
+        };
+        var runningState = baseState with { ActiveSessions = runningSessions };
+        await dependencies.WriteStateAsync(gitCommonDir, runningState);
+
+        return (runningState, session);
     }
 
     private static bool IsDaemonOwnedClaim(WorkClaim claim, string daemonSessionId) =>
