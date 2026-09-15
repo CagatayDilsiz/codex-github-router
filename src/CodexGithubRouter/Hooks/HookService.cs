@@ -100,6 +100,16 @@ public static class HookService
 
             var configuration = await dependencies.LoadConfigurationAsync(payload.Cwd);
             scope.SetDiagnosticsPolicy(configuration.Policies.Diagnostics);
+
+            // Daemon execution ownership deterministically bypasses the hook: exactly one owner
+            // (the background poller) decides when work is acquired for this repository, so a user
+            // prompt inside the repository must never race the daemon for claims.
+            if (ExecutionModeService.IsDaemonOwned(configuration))
+            {
+                scope.Bypass();
+                return 0;
+            }
+
             var activationMode = ResolveActivationMode(configuration);
             var activated = AutonomousActivationService.IsActivated(configuration.Policies.AutonomousActivation, payload.Prompt);
             scope.SetActivation(activationMode, activated);
@@ -250,62 +260,26 @@ public static class HookService
                 return 0;
             }
 
-            var claimType = decision.SelectedTask.Type == WorkflowItemType.ChangeRequest
-                ? WorkClaimType.ChangeRequest
-                : decision.SelectedTask.Type == WorkflowItemType.PullRequestReview
-                    ? WorkClaimType.Review
-                    : WorkClaimType.Implementation;
-            var isReviewAcquisition = claimType == WorkClaimType.Review;
-            Issue? claimedIssue = null;
-            if (!isReviewAcquisition)
+            // Claim acquisition is shared bit-for-bit with the daemon: acquisition-time issue
+            // refresh, worker/assignment revalidation against the fresh issue, and the claim
+            // metadata (worker profile, model, GitHub-derived issue UpdatedAt baseline) are all
+            // decided by WorkClaimAcquisitionService so both hosts claim identically.
+            var acquisition = await WorkClaimAcquisitionService.AcquireAsync(new WorkClaimAcquisitionRequest
             {
-                claimedIssue = await GitHubCliService.GetIssueByNumberAsync(workingDirectory, decision.SelectedTask.IssueNumber!.Value, CancellationToken.None);
-            }
-
-            WorkerEligibility eligibility;
-            if (plan.HasRepositoryGate || isReviewAcquisition)
-            {
-                // Repository-gate routing bypasses worker/assignment filtering, and review work
-                // carries its own eligibility: the review decision model already resolved the
-                // authenticated reviewer and the CGR pull-request state before the task was routed.
-                eligibility = WorkerEligibility.Disabled;
-            }
-            else
-            {
-                eligibility = WorkerRoutingService.Evaluate(configuration, claimedIssue!, currentModel);
-                if (eligibility.IsEnabled && !eligibility.IsEligible)
-                {
-                    scope.Block(eligibility.Message);
-                    await WriteBlockAsync(eligibility.Message);
-                    return 0;
-                }
-
-                var assignmentEligibility = AssignmentRoutingService.Evaluate(configuration, assignmentIdentity, claimedIssue!);
-                if (assignmentEligibility.IsEnabled && !assignmentEligibility.IsEligible)
-                {
-                    scope.Block(assignmentEligibility.Message);
-                    await WriteBlockAsync(assignmentEligibility.Message);
-                    return 0;
-                }
-            }
-
-            var acquisition = await WorkClaimStore.TryAcquireAsync(gitCommonDirectory, worktreeId, new WorkClaim
-            {
+                WorkingDirectory = workingDirectory,
+                GitCommonDirectory = gitCommonDirectory,
+                WorktreeId = worktreeId,
                 OwnerSessionId = sessionId,
-                IssueNumber = decision.SelectedTask.IssueNumber,
-                PullRequestNumber = decision.SelectedTask.PullRequestNumber,
-                WorkType = claimType,
-                WorkerProfile = eligibility.WorkerProfile,
-                Model = currentModel,
-                ClaimedIssueUpdatedAt = claimedIssue?.UpdatedAt ?? default,
-                ReviewerLogin = decision.SelectedTask.ReviewerLogin,
-                ReviewCycleId = decision.SelectedTask.ReviewCycleId,
-                ReviewBaselineCaptured = claimType == WorkClaimType.Review
+                Configuration = configuration,
+                AssignmentIdentity = assignmentIdentity,
+                HasRepositoryGate = plan.HasRepositoryGate,
+                SelectedTask = decision.SelectedTask,
+                Model = currentModel
             });
             if (!acquisition.Acquired)
             {
                 var acquisitionBlockReason = acquisition.BlockReason ?? "Could not acquire the repository work claim.";
-                if (allowNoClaimReroute && acquisition.BlockReason?.Contains("another Git worktree", StringComparison.Ordinal) == true)
+                if (allowNoClaimReroute && acquisition.ConflictWithAnotherWorktree)
                 {
                     // A concurrent worktree claimed the selected work between evaluation and
                     // acquisition. Re-evaluate once from the refreshed repository-wide claim set

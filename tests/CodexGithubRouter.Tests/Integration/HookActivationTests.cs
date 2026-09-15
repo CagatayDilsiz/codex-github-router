@@ -92,6 +92,59 @@ public sealed class HookActivationTests
     }
 
     [Fact]
+    public async Task Hook_deterministically_bypasses_when_daemon_owns_execution()
+    {
+        using var sandbox = new TestSandbox();
+        var originalIn = Console.In;
+        var originalOut = Console.Out;
+        var output = new StringWriter();
+        var resolverCalls = 0;
+        try
+        {
+            var payload = new Dictionary<string, object?>
+            {
+                ["cwd"] = sandbox.RepositoryDirectory,
+                ["hook_event_name"] = "UserPromptSubmit",
+                ["model"] = "test-model",
+                ["session_id"] = "current-session",
+                ["prompt"] = "work on the next task"
+            };
+
+            Console.SetIn(new StringReader(JsonSerializer.Serialize(payload)));
+            Console.SetOut(output);
+
+            var result = await HookService.RunAsync(new HookExecutionDependencies
+            {
+                IsAutonomousAsync = _ => Task.FromResult(true),
+                LoadConfigurationAsync = _ => Task.FromResult(new RouterConfiguration
+                {
+                    Policies = new RouterPolicies { Execution = new ExecutionPolicy { Mode = ExecutionMode.Daemon } }
+                }),
+                ResolveDiagnosticsPolicyAsync = _ => Task.FromResult<DiagnosticsPolicy?>(null),
+                ResolveGitCommonDirectoryAsync = _ =>
+                {
+                    resolverCalls++;
+                    throw new InvalidOperationException("Routing boundary should not be entered.");
+                }
+            });
+
+            Assert.Equal(0, result);
+            // The diagnostic scope best-effort resolves the git common directory to persist
+            // the bypass record; the resolver failure is swallowed and must not change output.
+            Assert.Equal(1, resolverCalls);
+            Assert.DoesNotContain("\"decision\"", output.ToString());
+            Assert.DoesNotContain("\"hookSpecificOutput\"", output.ToString());
+        }
+        finally
+        {
+            Console.SetIn(originalIn);
+            Console.SetOut(originalOut);
+        }
+
+        Assert.False(File.Exists(Path.Combine(sandbox.GitCommonDirectory, "codex-github-router.work.json")));
+    }
+
+    [Fact]
     public async Task Matching_heartbeat_prompt_enters_the_real_hook_activation_boundary()
     {
         using var sandbox = new TestSandbox();

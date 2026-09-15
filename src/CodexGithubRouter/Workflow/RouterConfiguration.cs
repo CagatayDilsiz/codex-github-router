@@ -118,6 +118,52 @@ public sealed class RouterPolicies
     public ReviewRoutingPolicy? ReviewRouting { get; init; }
 
     public NativeSignalsPolicy NativeSignals { get; init; } = new();
+
+    public ExecutionPolicy Execution { get; init; } = new();
+
+    public DaemonPolicy Daemon { get; init; } = new();
+}
+
+/// <summary>
+/// Named execution ownership of a repository. Exactly one owner decides when CGR acquires work:
+/// the interactive hook (running inside a Codex session) or the daemon (a background poller). A
+/// future hybrid mode is intentionally out of scope; the first daemon design avoids two independent
+/// actors racing to acquire work for the same repository.
+/// </summary>
+public enum ExecutionMode
+{
+    /// <summary>Hook-driven execution (the default, and the only historical behavior).</summary>
+    Hook,
+
+    /// <summary>Daemon-driven execution: a background poller detects, claims and runs eligible work.</summary>
+    Daemon
+}
+
+public sealed class ExecutionPolicy
+{
+    public ExecutionMode Mode { get; init; } = ExecutionMode.Hook;
+}
+
+/// <summary>
+/// Polling and session-launch behavior for daemon execution ownership. Only consumed when
+/// <c>policies.execution.mode</c> is <see cref="ExecutionMode.Daemon"/>; ignored otherwise.
+/// </summary>
+public sealed class DaemonPolicy
+{
+    /// <summary>Seconds between polling cycles. Must be &gt; 0.</summary>
+    public int IntervalSeconds { get; init; } = 60;
+
+    /// <summary>Optional model label recorded on daemon claims and passed to launched sessions.</summary>
+    public string Model { get; init; } = string.Empty;
+
+    /// <summary>Executable used to launch Codex execution sessions. Defaults to the Codex CLI.</summary>
+    public string Command { get; init; } = "codex";
+
+    /// <summary>Arguments passed before the generated work prompt when launching a session.</summary>
+    public List<string> Args { get; init; } = new() { "exec", "--skip-git-repo-check" };
+
+    /// <summary>Consecutive failed polling cycles before the daemon reports itself unhealthy.</summary>
+    public int FailureThreshold { get; init; } = 5;
 }
 
 public sealed class ReviewRoutingPolicy

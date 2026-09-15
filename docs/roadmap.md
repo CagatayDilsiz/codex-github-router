@@ -28,4 +28,4 @@ The current stable surface is read-only inspection (`cgr config path/show/valida
 
 ## Daemon / service mode
 
-A future daemon/service mode that can poll GitHub and Codex, manage sessions, and act on schedule or events instead of only responding to the prompt hook.
+A background poller that can run the same routing engine without waiting for a prompt hook invocation. `execution.mode` is set to `daemon`, the hook deterministically bypasses prompts for the repository, and `cgr daemon start/stop/status/restart` plus `cgr daemon run --once` drive polling, crash recovery, and clean shutdown. Claims are owned by the stable daemon session id across restarts, so restarts continue rather than duplicate in-flight work; a per-repository state file (`codex-github-router.daemon.json`) records the session, health, last cycle, and the supervised Codex session. The chosen shape and its caveats are issue #54 design notes in the repository issues.

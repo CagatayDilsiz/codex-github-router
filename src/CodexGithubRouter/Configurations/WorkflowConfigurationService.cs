@@ -352,5 +352,36 @@ public static class WorkflowConfigurationService
         {
             throw new InvalidOperationException("Diagnostics retention days must be at least one.");
         }
+
+        ValidateDaemonPolicy(configuration);
+    }
+
+    private static void ValidateDaemonPolicy(RouterConfiguration configuration)
+    {
+        if (configuration.Policies.Execution.Mode != ExecutionMode.Daemon)
+        {
+            return;
+        }
+
+        if (configuration.Policies.Daemon.IntervalSeconds <= 0)
+        {
+            throw new InvalidOperationException("Daemon polling interval seconds must be greater than zero.");
+        }
+
+        if (configuration.Policies.Daemon.FailureThreshold <= 0)
+        {
+            throw new InvalidOperationException("Daemon failure threshold must be greater than zero.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configuration.Policies.Daemon.Command))
+        {
+            throw new InvalidOperationException("Daemon session command must not be empty.");
+        }
+
+        if (configuration.Policies.Daemon.Args.Count == 0 ||
+            string.IsNullOrWhiteSpace(configuration.Policies.Daemon.Args[0]))
+        {
+            throw new InvalidOperationException("Daemon session arguments must begin with a non-empty subcommand.");
+        }
     }
 }

@@ -91,4 +91,31 @@ public static class GitRepositoryService
         var output = process.Output?.Trim();
         return string.IsNullOrWhiteSpace(output) ? null : output;
     }
+
+    /// <summary>
+    /// Enumerates every worktree of the repository containing <paramref name="workingDirectory"/>,
+    /// returning absolute working (checkout) directories. This is the daemon's repository-wide
+    /// scope: the supervisor drives one pass per worktree so linked worktrees can hold independent,
+    /// concurrently running claims and sessions, mirroring the work-claim store's parallel-work
+    /// model. The porcelain format is stable and includes the main worktree.
+    /// </summary>
+    public static async Task<IReadOnlyList<string>> ListWorktreesAsync(string workingDirectory, CancellationToken cancellationToken = default)
+    {
+        var process = await ProcessRunner.RunAsync(workingDirectory, "git", new[] { "worktree", "list", "--porcelain" }, cancellationToken);
+        if (process.ExitCode != 0)
+        {
+            await Console.Error.WriteLineAsync($"Git command failed with exit code {process.ExitCode}: {process.Error}");
+            return Array.Empty<string>();
+        }
+
+        return process.Output
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("worktree ", StringComparison.Ordinal))
+            .Select(line => line["worktree ".Length..].Trim())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(Path.GetFullPath)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
 }
